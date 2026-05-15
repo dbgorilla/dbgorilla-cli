@@ -1,0 +1,106 @@
+# goreleaser config for dbgorilla-cli.
+#
+# `goreleaser release --clean` on a tag (e.g. v0.1.0) builds cross-platform
+# binaries, publishes them to GitHub Releases, and updates the Homebrew tap.
+#
+# The on-prem distribution path is independent: the dbgorilla backend's
+# Dockerfile fetches the GitHub Release artifacts at image-build time and
+# bundles them into the container. See backend repo for that wiring.
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: dbg
+    main: .
+    binary: dbg
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/dbgorilla/dbgorilla-cli/cmd.Version={{ .Version }}
+      - -X github.com/dbgorilla/dbgorilla-cli/cmd.Commit={{ .ShortCommit }}
+      - -X github.com/dbgorilla/dbgorilla-cli/cmd.Date={{ .Date }}
+
+# Single-binary archives keep the on-prem download URL pattern simple:
+# the backend serves /cli/dbgorilla-{os}-{arch} directly from the unzipped artifact.
+archives:
+  - id: dbg-bare
+    formats: [binary]
+    name_template: "dbg-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+# Sign every release artifact (binaries + checksums.txt) with cosign in
+# keyless mode. Cosign uses GitHub Actions OIDC to mint an ephemeral
+# certificate from Fulcio and publishes the signature transparency log
+# entry to Rekor. No long-lived signing keys to manage.
+#
+# Verify with:
+#   cosign verify-blob \
+#     --certificate-identity-regexp 'https://github.com/dbgorilla/dbgorilla-cli/' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --signature dbg-darwin-arm64.sig \
+#     dbg-darwin-arm64
+signs:
+  - cmd: cosign
+    artifacts: all
+    output: true
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  draft: false
+  prerelease: auto
+  # Overwrite assets when re-publishing an existing tag. Without this, a
+  # re-tag after a failed previous run hits 422 already_exists from the
+  # uploads API.
+  replace_existing_artifacts: true
+
+# Homebrew tap. Requires a tap repo at github.com/dbgorilla/homebrew-tap and
+# a HOMEBREW_TAP_GITHUB_TOKEN secret in this repo's Actions settings with
+# write access to that tap repo.
+brews:
+  - name: dbg
+    repository:
+      owner: dbgorilla
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://dbgorilla.com"
+    description: "DBGorilla CLI -- sign in and connect Claude Code via MCP"
+    license: "MIT"
+    test: |
+      system "#{bin}/dbg", "version"
+    # The archive is a bare binary (formats: [binary]) named
+    # dbg-{os}-{arch}. Rename it to "dbg" on install. Using Ruby Dir.glob
+    # because goreleaser's brew install template doesn't expose per-platform
+    # asset names; the glob finds whichever dbg-* file Homebrew downloaded
+    # for the current platform.
+    install: |
+      bin.install Dir["dbg-*"].first => "dbg"
