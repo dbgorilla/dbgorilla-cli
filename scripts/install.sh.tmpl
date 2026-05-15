@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# DBGorilla CLI installer.
+#
+# Served by the customer's DBGorilla backend with __API_URL__ replaced by the
+# backend's externally-facing URL. Devs paste:
+#
+#   curl -fsSL https://<your-deployment>/install.sh | sh
+#
+# Result: dbg binary in /usr/local/bin (or $DBG_INSTALL_DIR), config in
+# ~/.config/dbgorilla/cli.toml pre-populated with the deployment URL.
+#
+# Air-gapped friendly: the binary download comes from the same backend host
+# that served this script (no GitHub/Homebrew calls during install).
+
+set -euo pipefail
+
+API_URL="${DBGORILLA_API_URL:-__API_URL__}"
+INSTALL_DIR="${DBG_INSTALL_DIR:-/usr/local/bin}"
+
+if [ -z "${API_URL}" ] || [ "${API_URL}" = "__API_URL__" ]; then
+  echo "Error: API URL not set." >&2
+  echo "       Pass DBGORILLA_API_URL=https://your-deployment or run from a backend that templates this script." >&2
+  exit 1
+fi
+
+# Detect OS / arch.
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64|amd64) ARCH=amd64 ;;
+  aarch64|arm64) ARCH=arm64 ;;
+  *) echo "Error: unsupported architecture: $ARCH" >&2; exit 1 ;;
+esac
+case "$OS" in
+  darwin|linux) ;;
+  *) echo "Error: unsupported OS: $OS" >&2; exit 1 ;;
+esac
+
+BINARY_URL="${API_URL%/}/cli/dbg-${OS}-${ARCH}"
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+
+echo "Downloading dbg-${OS}-${ARCH} from ${API_URL}..."
+if ! curl -fsSL "$BINARY_URL" -o "$TMP"; then
+  echo "Error: download failed from ${BINARY_URL}" >&2
+  echo "       Verify the backend has CLI binaries deployed for ${OS}-${ARCH}." >&2
+  exit 1
+fi
+chmod +x "$TMP"
+
+# Install (sudo if needed).
+if [ -w "$INSTALL_DIR" ]; then
+  mv "$TMP" "$INSTALL_DIR/dbg"
+else
+  echo "Need elevated privileges to write to ${INSTALL_DIR}..."
+  sudo mv "$TMP" "$INSTALL_DIR/dbg"
+fi
+trap - EXIT
+
+# Write user config. printf with a format string treats $API_URL purely as
+# a parameter -- never shell-interpreted -- so $(...)/backticks in a
+# malicious or malformed __API_URL__ value can't execute. The URL goes
+# inside a TOML basic-string ("...") so it'll fail loudly at parse time
+# rather than silently if it contains stray double-quotes.
+CONFIG_BASE="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_DIR="${CONFIG_BASE}/dbgorilla"
+mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR"
+CONFIG_FILE="$CONFIG_DIR/cli.toml"
+# Create the tempfile with 0600 before any data lands in it (avoids a brief
+# window where the file exists with default umask perms). printf with a
+# format string treats $API_URL purely as data -- never shell-interpreted.
+: > "$CONFIG_FILE.tmp"
+chmod 600 "$CONFIG_FILE.tmp"
+printf '[api]\nurl = "%s"\n' "$API_URL" > "$CONFIG_FILE.tmp"
+mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+echo ""
+echo "✓ Installed dbg to ${INSTALL_DIR}/dbg"
+echo "✓ Configured api-url: ${API_URL}"
+echo ""
+echo "Next:"
+echo "  dbg login"
+echo "  dbg setup-ide"

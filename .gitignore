@@ -1,0 +1,17 @@
+# Binary
+dbgorilla
+dbgorilla-cli
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Test
+coverage.out
+
+.a2a-bootstrap*.md
+.a2a/
