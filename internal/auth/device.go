@@ -264,6 +264,10 @@ func pollForToken(ctx context.Context, cfg *DeviceConfig, dc *deviceCodeResponse
 				AccessToken:  tr.AccessToken,
 				RefreshToken: tr.RefreshToken,
 				ExpiresAt:    time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second),
+				// Record where these Keycloak-issued tokens came from so the
+				// refresh path renews them at Keycloak, not the backend.
+				TokenEndpoint: cfg.TokenEndpoint,
+				ClientID:      cfg.ClientID,
 			}, nil
 		}
 

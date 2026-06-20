@@ -17,10 +17,21 @@ const (
 )
 
 // Tokens holds the OAuth token pair.
+//
+// TokenEndpoint and ClientID are set only for device/SSO-flow sessions, whose
+// tokens are issued directly by Keycloak. Their presence tells the refresh
+// logic to renew at the Keycloak token endpoint (an OAuth refresh_token grant)
+// rather than the DBGorilla backend's /token/refresh endpoint, which only
+// validates backend-issued (password-flow) tokens. When they are empty
+// (password flow) the backend refresh path is used.
 type Tokens struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	ExpiresAt    time.Time `json:"expires_at"`
+	// TokenEndpoint is the Keycloak token endpoint for SSO-flow refresh.
+	TokenEndpoint string `json:"token_endpoint,omitempty"`
+	// ClientID is the OAuth client used for the SSO-flow refresh grant.
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // IsExpired returns true if the access token has expired (with 60s buffer).

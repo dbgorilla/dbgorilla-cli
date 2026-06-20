@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -196,10 +198,19 @@ type ErrorResponse struct {
 // --- Token refresh --------------------------------------------------------
 
 // refreshTokens exchanges a refresh token for a new token pair.
-// The backend expects the refresh token in the Authorization header.
+//
+// Device/SSO-flow tokens are issued by Keycloak and must be refreshed there
+// (a standard OAuth refresh_token grant) — the backend's /token/refresh only
+// validates backend-issued, password-flow tokens, so sending it a Keycloak
+// refresh token always 401s. We branch on old.TokenEndpoint, which the device
+// flow records at login.
+//
 // Surface storage errors so a silent keychain-write failure doesn't lead
 // to repeated refresh attempts on stale tokens.
 func (c *Client) refreshTokens(old *auth.Tokens) (*auth.Tokens, error) {
+	if old.TokenEndpoint != "" {
+		return c.refreshViaKeycloak(old)
+	}
 	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/api/v0_1/auth/token/refresh", nil)
 	if err != nil {
 		return nil, err
@@ -233,6 +244,64 @@ func (c *Client) refreshTokens(old *auth.Tokens) (*auth.Tokens, error) {
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	}
+	if err := auth.StoreTokens(newTokens); err != nil {
+		return nil, fmt.Errorf("token refresh succeeded but storing the new tokens failed: %w", err)
+	}
+	return newTokens, nil
+}
+
+// refreshViaKeycloak renews a device/SSO-flow session using the OAuth
+// refresh_token grant at the Keycloak token endpoint recorded at login.
+// Keycloak rotates refresh tokens, so the new one is persisted; the token
+// endpoint and client id are carried forward for the next refresh.
+func (c *Client) refreshViaKeycloak(old *auth.Tokens) (*auth.Tokens, error) {
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", old.ClientID)
+	form.Set("refresh_token", old.RefreshToken)
+
+	req, err := http.NewRequest(http.MethodPost, old.TokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "dbgorilla-cli/"+userAgentVersion)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token refresh failed (HTTP %d)", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, err
+	}
+	// Keycloak rotates the refresh token; keep the new one, falling back to the
+	// prior token only if the response omits it.
+	refresh := tokenResp.RefreshToken
+	if refresh == "" {
+		refresh = old.RefreshToken
+	}
+	newTokens := &auth.Tokens{
+		AccessToken:   tokenResp.AccessToken,
+		RefreshToken:  refresh,
+		ExpiresAt:     time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		TokenEndpoint: old.TokenEndpoint,
+		ClientID:      old.ClientID,
 	}
 	if err := auth.StoreTokens(newTokens); err != nil {
 		return nil, fmt.Errorf("token refresh succeeded but storing the new tokens failed: %w", err)

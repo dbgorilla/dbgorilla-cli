@@ -16,11 +16,11 @@ type stubWriter struct {
 	topKey     string
 }
 
-func (s *stubWriter) Name() string                    { return "Stub" }
-func (s *stubWriter) Slug() string                    { return "stub" }
-func (s *stubWriter) Detect() bool                    { return true }
-func (s *stubWriter) SupportedScopes() []Scope        { return []Scope{ScopeUser} }
-func (s *stubWriter) DefaultScope() Scope             { return ScopeUser }
+func (s *stubWriter) Name() string                       { return "Stub" }
+func (s *stubWriter) Slug() string                       { return "stub" }
+func (s *stubWriter) Detect() bool                       { return true }
+func (s *stubWriter) SupportedScopes() []Scope           { return []Scope{ScopeUser} }
+func (s *stubWriter) DefaultScope() Scope                { return ScopeUser }
 func (s *stubWriter) ConfigPath(_ Scope) (string, error) { return s.configPath, nil }
 func (s *stubWriter) TopLevelKey() string {
 	if s.topKey == "" {
