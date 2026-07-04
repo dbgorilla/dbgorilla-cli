@@ -64,12 +64,8 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          # goreleaser's per-build directories under dist/ are named
-          # dbg_<os>_<arch>_v<arch_version>/dbg. The published asset names
-          # ("dbg-{os}-{arch}") reference these files via rename at upload
-          # time -- attesting the dist binaries is what we want.
-          subject-path: |
-            dist/dbg_darwin_amd64_v1/dbg
-            dist/dbg_darwin_arm64_v8.0/dbg
-            dist/dbg_linux_amd64_v1/dbg
-            dist/dbg_linux_arm64_v8.0/dbg
+          # goreleaser writes per-build binaries to
+          # dist/<build-id>_<os>_<arch>_v<variant>/<binary>. Build id + binary are
+          # both "dbgorilla"; a glob is robust to the variant suffix (and future
+          # id renames), so provenance still covers all four platform binaries.
+          subject-path: dist/dbgorilla_*/dbgorilla
