@@ -19,10 +19,12 @@ var (
 )
 
 func init() {
-	// Push the build-time version into the api package so every outgoing
+	// Push the resolved version into the api package so every outgoing
 	// User-Agent identifies the CLI version (cannot import cmd from api due
-	// to cycles, so we inject it the other way).
-	api.SetUserAgentVersion(Version)
+	// to cycles, so we inject it the other way). resolveVersion() falls back
+	// to Go's embedded build info for `go install`ed binaries.
+	v, _, _ := resolveVersion()
+	api.SetUserAgentVersion(v)
 }
 
 var rootCmd = &cobra.Command{

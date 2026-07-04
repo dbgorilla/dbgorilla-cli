@@ -14,6 +14,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the CLI version",
 	Run: func(_ *cobra.Command, _ []string) {
-		fmt.Printf("dbgorilla version %s (commit %s, built %s)\n", Version, Commit, Date)
+		v, c, d := resolveVersion()
+		fmt.Printf("dbgorilla version %s (commit %s, built %s)\n", v, c, d)
 	},
 }
