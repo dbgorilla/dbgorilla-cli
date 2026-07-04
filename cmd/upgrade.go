@@ -14,8 +14,8 @@ func init() {
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
-	Short: "Update dbg to the latest version",
-	Long: `Updates the dbg binary in place.
+	Short: "Update dbgorilla to the latest version",
+	Long: `Updates the dbgorilla binary in place.
 
 If installed via Homebrew, runs ` + "`brew upgrade dbgorilla/tap/dbg`" + `.
 Otherwise, prints the right one-line command for your install method so
@@ -39,7 +39,7 @@ func runUpgrade(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		self = "/usr/local/bin/dbg"
 	}
-	fmt.Printf("dbg %s is installed at %s\n", Version, self)
+	fmt.Printf("dbgorilla %s is installed at %s\n", Version, self)
 	fmt.Println()
 	fmt.Println("Not a Homebrew install. Re-run the install command for your environment:")
 	fmt.Println()

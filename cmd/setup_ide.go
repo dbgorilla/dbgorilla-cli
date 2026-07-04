@@ -193,7 +193,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			failed++
 			if errors.Is(err, ide.ErrJSONCRefused) {
 				fmt.Printf("Refused to overwrite JSONC config at %s.\n", path)
-				fmt.Println("Run `dbg setup-ide --print-config --client " + writer.Slug() +
+				fmt.Println("Run `dbgorilla setup-ide --print-config --client " + writer.Slug() +
 					"` and paste the output into the file manually.")
 				continue
 			}
@@ -256,7 +256,7 @@ func resolveSelectedAdapters(clientFlag []string) ([]ide.Adapter, error) {
 		out = append(out, a)
 	}
 	if len(unknown) > 0 {
-		return nil, fmt.Errorf("unknown client(s): %s. Run `dbg setup-ide --list-clients`",
+		return nil, fmt.Errorf("unknown client(s): %s. Run `dbgorilla setup-ide --list-clients`",
 			strings.Join(unknown, ", "))
 	}
 	return out, nil
@@ -391,7 +391,7 @@ func interpretClaudeError(err error, _ string) error {
 		strings.Contains(msg, "not permitted") {
 		return fmt.Errorf(
 			"setup blocked by your Claude org's allowlist policy.\n\n"+
-				"Run:  dbg setup-ide --print-admin-allowlist\n"+
+				"Run:  dbgorilla setup-ide --print-admin-allowlist\n"+
 				"...and send the output to whoever manages your Claude admin console.\n\n"+
 				"(underlying error: %v)", err)
 	}
@@ -424,7 +424,7 @@ func printAdminAllowlist(apiURL string) {
 	fmt.Println("  3. Paste the values above")
 	fmt.Println("  4. Save")
 	fmt.Println()
-	fmt.Println("Once approved, each developer runs `dbg setup-ide` to wire it in.")
+	fmt.Println("Once approved, each developer runs `dbgorilla setup-ide` to wire it in.")
 }
 
 // fetchMCPKey calls the backend to get or create an MCP API key. Response

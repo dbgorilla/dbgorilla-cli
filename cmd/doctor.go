@@ -27,7 +27,7 @@ func checkAuthAndAPI(cmd *cobra.Command, apiURL string) (bool, string) {
 	case err != nil:
 		return false, fmt.Sprintf("cannot reach %s: %v", apiURL, err)
 	case status == http.StatusUnauthorized:
-		return false, "token expired or invalid -- run: dbg login"
+		return false, "token expired or invalid -- run: dbgorilla login"
 	case status != http.StatusOK:
 		return false, fmt.Sprintf("HTTP %d from %s", status, apiURL)
 	}
@@ -49,7 +49,7 @@ func checkMCPKey(cmd *cobra.Command) (bool, string) {
 		var raw string
 		_ = json.Unmarshal(body, &raw)
 		if raw == "" {
-			return false, "no key minted -- run: dbg setup-ide"
+			return false, "no key minted -- run: dbgorilla setup-ide"
 		}
 		return true, "exists"
 	default:
@@ -88,7 +88,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 
 	// Check 1: API URL configured
 	if apiURL == "" {
-		printCheck("API URL", false, "not configured -- run: dbg config set api-url <url>")
+		printCheck("API URL", false, "not configured -- run: dbgorilla config set api-url <url>")
 		fmt.Println()
 		fmt.Println("Cannot continue without an API URL. Aborting remaining checks.")
 		return errDoctorFailed
@@ -97,7 +97,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 
 	// Checks 2 & 3: Auth+reachability and MCP-key existence in parallel.
 	// Both are independent GETs against the same host; running them
-	// concurrently halves the latency of `dbg doctor` on slow links.
+	// concurrently halves the latency of `dbgorilla doctor` on slow links.
 	// The shared http.Transport (internal/api) means they reuse the TLS
 	// connection rather than double-handshaking.
 	tokens, _ := auth.LoadTokens()
@@ -121,7 +121,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	}
 
 	if !hasTokens {
-		printCheck("Auth", false, "not signed in -- run: dbg login")
+		printCheck("Auth", false, "not signed in -- run: dbgorilla login")
 		allOK = false
 	} else {
 		label := "Auth + API"
@@ -158,7 +158,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 				}
 			case ide.Hinter:
 				printCheck(label, true,
-					"detected (manual setup -- run: dbg setup-ide --client "+a.Slug()+")")
+					"detected (manual setup -- run: dbgorilla setup-ide --client "+a.Slug()+")")
 			}
 		}
 	}
@@ -203,7 +203,7 @@ func checkClientConfigured(w ide.Writer) (bool, string) {
 			if err == nil && strings.Contains(strings.ToLower(string(out)), ide.MCPServerName) {
 				return true, "registered (`claude mcp list`)"
 			}
-			return false, "not registered -- run: dbg setup-ide --client claude-code"
+			return false, "not registered -- run: dbgorilla setup-ide --client claude-code"
 		}
 	}
 	path, err := w.ConfigPath(w.DefaultScope())
@@ -212,7 +212,7 @@ func checkClientConfigured(w ide.Writer) (bool, string) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false, "no config at " + path + " -- run: dbg setup-ide --client " + w.Slug()
+		return false, "no config at " + path + " -- run: dbgorilla setup-ide --client " + w.Slug()
 	}
 	var cfg map[string]any
 	if err := json.Unmarshal(data, &cfg); err != nil {

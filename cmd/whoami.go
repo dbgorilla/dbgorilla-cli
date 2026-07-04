@@ -34,7 +34,7 @@ func runWhoami(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("cannot reach API: %w", err)
 	}
 	if status == http.StatusUnauthorized {
-		return fmt.Errorf("token expired or invalid -- run: dbg login")
+		return fmt.Errorf("token expired or invalid -- run: dbgorilla login")
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("unexpected response (HTTP %d)", status)

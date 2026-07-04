@@ -53,7 +53,7 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	if insecure && !insecureFlagSet {
 		fmt.Fprintln(os.Stderr,
 			"warning: TLS verification disabled via persisted `insecure = true` in config.\n"+
-				"         Run `dbg config unset insecure` to turn off, or pass --insecure=false to override.")
+				"         Run `dbgorilla config unset insecure` to turn off, or pass --insecure=false to override.")
 	}
 
 	// Honor Ctrl-C through the device-flow polling loop.
@@ -141,7 +141,7 @@ func persistLoginState(apiURL string, insecureFlagSet, insecureFlagVal bool) {
 	path, _ := config.UserConfigPath()
 	// One-line confirmation -- enough to make "I just stopped having to pass
 	// --api-url" obvious without becoming chatty. The TLS-specific guidance
-	// lives in `dbg setup-ide` which is where Claude Code actually
+	// lives in `dbgorilla setup-ide` which is where Claude Code actually
 	// connects to the MCP server.
 	if insecureFlagSet && insecureFlagVal {
 		fmt.Printf("  Saved api-url and insecure=true to %s\n", path)

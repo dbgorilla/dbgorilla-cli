@@ -18,6 +18,12 @@ permissions:
 
 jobs:
   analyze:
+    # CodeQL code scanning requires GitHub Advanced Security on PRIVATE repos.
+    # This is the private dev mirror, so skip it here (a skipped job is neutral,
+    # not a failure) and let CodeQL run on the public, source-available repo,
+    # where code scanning is free. This workflow travels to public unchanged via
+    # the publish snapshot.
+    if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

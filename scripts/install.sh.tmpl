@@ -7,7 +7,7 @@
 #
 #   curl -fsSL https://<your-deployment>/install.sh | sh
 #
-# Result: dbg binary in /usr/local/bin (or $DBG_INSTALL_DIR), config in
+# Result: dbgorilla binary (+ a "dbg" alias) in /usr/local/bin (or $DBG_INSTALL_DIR), config in
 # ~/.config/dbgorilla/cli.toml pre-populated with the deployment URL.
 #
 # Air-gapped friendly: the binary download comes from the same backend host
@@ -49,12 +49,14 @@ if ! curl -fsSL "$BINARY_URL" -o "$TMP"; then
 fi
 chmod +x "$TMP"
 
-# Install (sudo if needed).
+# Install as "dbgorilla" (canonical) with a "dbg" alias symlink (sudo if needed).
 if [ -w "$INSTALL_DIR" ]; then
-  mv "$TMP" "$INSTALL_DIR/dbg"
+  mv "$TMP" "$INSTALL_DIR/dbgorilla"
+  ln -sf dbgorilla "$INSTALL_DIR/dbg"
 else
   echo "Need elevated privileges to write to ${INSTALL_DIR}..."
-  sudo mv "$TMP" "$INSTALL_DIR/dbg"
+  sudo mv "$TMP" "$INSTALL_DIR/dbgorilla"
+  sudo ln -sf dbgorilla "$INSTALL_DIR/dbg"
 fi
 trap - EXIT
 
@@ -77,9 +79,9 @@ printf '[api]\nurl = "%s"\n' "$API_URL" > "$CONFIG_FILE.tmp"
 mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 
 echo ""
-echo "✓ Installed dbg to ${INSTALL_DIR}/dbg"
+echo "✓ Installed dbgorilla to ${INSTALL_DIR}/dbgorilla (with 'dbg' alias)"
 echo "✓ Configured api-url: ${API_URL}"
 echo ""
 echo "Next:"
-echo "  dbg login"
-echo "  dbg setup-ide"
+echo "  dbgorilla login"
+echo "  dbgorilla setup-ide"

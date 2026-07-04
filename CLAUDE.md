@@ -52,7 +52,7 @@ The merge contract in `WriteMCPConfig` is mandatory:
 ## Build & test
 
 ```sh
-go build -o dbg .
+go build -o dbgorilla ./cmd/dbgorilla
 go test ./...
 go vet ./...
 ```

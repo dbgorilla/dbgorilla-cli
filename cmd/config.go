@@ -24,7 +24,7 @@ var configCmd = &cobra.Command{
 Supported keys:
   api-url    The DBGorilla deployment URL.
   insecure   Whether to skip TLS verification. Persisted automatically
-             when --insecure is passed to ` + "`dbg login`" + `.
+             when --insecure is passed to ` + "`dbgorilla login`" + `.
 
 The CLI also reads from a system-wide config at
 /etc/dbgorilla/cli.toml (or the OS equivalent), which IT teams can
@@ -78,7 +78,7 @@ var configGetCmd = &cobra.Command{
 				fmt.Println("  source: none")
 				fmt.Println()
 				fmt.Println("  Configure with:")
-				fmt.Println("    dbg config set api-url https://your-deployment")
+				fmt.Println("    dbgorilla config set api-url https://your-deployment")
 				fmt.Println("    export DBGORILLA_API_URL=https://your-deployment")
 				return nil
 			}

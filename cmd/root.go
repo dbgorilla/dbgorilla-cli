@@ -26,14 +26,14 @@ func init() {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "dbg",
+	Use:   "dbgorilla",
 	Short: "DBGorilla CLI -- sign in and connect your IDE",
-	Long: `dbg is the command-line interface for DBGorilla.
+	Long: `dbgorilla is the command-line interface for DBGorilla (aliased as "dbg").
 
   Quick start:
-    dbg login          Sign in to your DBGorilla deployment
-    dbg setup-ide      Configure Claude Code to use DBGorilla via MCP
-    dbg doctor         Verify everything is working`,
+    dbgorilla login          Sign in to your DBGorilla deployment
+    dbgorilla setup-ide      Configure Claude Code to use DBGorilla via MCP
+    dbgorilla doctor         Verify everything is working`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }
@@ -41,7 +41,7 @@ var rootCmd = &cobra.Command{
 func Execute() error {
 	err := rootCmd.Execute()
 	if err != nil {
-		// errDoctorFailed is a sentinel for `dbg doctor`: the command
+		// errDoctorFailed is a sentinel for `dbgorilla doctor`: the command
 		// already printed per-check failures, so suppress the redundant
 		// "Error: doctor checks failed" trailer. Exit non-zero via the
 		// returned error so callers / shells see the bad status code.
@@ -87,9 +87,9 @@ func requireAPIURL(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf(
 			"no DBGorilla API URL configured.\n" +
 				"  Set one of:\n" +
-				"    dbg config set api-url https://your-deployment\n" +
+				"    dbgorilla config set api-url https://your-deployment\n" +
 				"    export DBGORILLA_API_URL=https://your-deployment\n" +
-				"    dbg --api-url https://your-deployment ...\n" +
+				"    dbgorilla --api-url https://your-deployment ...\n" +
 				"\n" +
 				"  Or have your IT team deploy /Library/Application Support/dbgorilla/cli.toml\n" +
 				"  with `[api]\\n  url = \"https://your-deployment\"`.",
@@ -103,7 +103,7 @@ func requireAPIURL(cmd *cobra.Command) (string, error) {
 func requireLogin() (*auth.Tokens, error) {
 	t, _ := auth.LoadTokens()
 	if t == nil {
-		return nil, fmt.Errorf("not logged in. Run: dbg login")
+		return nil, fmt.Errorf("not logged in. Run: dbgorilla login")
 	}
 	return t, nil
 }

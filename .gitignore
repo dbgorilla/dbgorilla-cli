@@ -1,6 +1,7 @@
-# Binary
-dbgorilla
-dbgorilla-cli
+# Binary (anchored to repo root; keeps cmd/dbgorilla/ source tracked)
+/dbgorilla
+/dbgorilla-cli
+/dbg
 
 # OS
 .DS_Store

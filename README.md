@@ -14,11 +14,21 @@ The DBGorilla CLI. Sign in to a DBGorilla deployment and connect your IDE/agent 
 ### Homebrew
 
 ```sh
-brew install dbgorilla/tap/dbg
-dbg --api-url https://<your-deployment> login
+brew install dbgorilla/tap/dbgorilla
+dbgorilla --api-url https://<your-deployment> login
 ```
 
-The first `dbg login` persists the API URL (and `--insecure` if you pass it) to `~/.config/dbgorilla/cli.toml` (or `$XDG_CONFIG_HOME/dbgorilla/cli.toml`), so every subsequent command runs without flags.
+Installs the `dbgorilla` binary with a `dbg` alias — use whichever you prefer.
+
+The first `dbgorilla login` persists the API URL (and `--insecure` if you pass it) to `~/.config/dbgorilla/cli.toml` (or `$XDG_CONFIG_HOME/dbgorilla/cli.toml`), so every subsequent command runs without flags.
+
+### Go install
+
+```sh
+go install github.com/dbgorilla/dbgorilla-cli/cmd/dbgorilla@latest
+```
+
+Produces the `dbgorilla` binary (symlink it to `dbg` yourself if you want the short name). Requires a release cut with the `cmd/dbgorilla` layout.
 
 ### Manual
 
@@ -27,16 +37,16 @@ Download a binary from the [Releases page](https://github.com/dbgorilla/dbgorill
 ## Quick start
 
 ```sh
-dbg login          # sign in (browser-based SSO or username/password)
-dbg setup-ide      # configure every detected MCP client (Claude Code, Cursor, VS Code, ...)
-dbg doctor         # verify everything works
+dbgorilla login          # sign in (browser-based SSO or username/password)
+dbgorilla setup-ide      # configure every detected MCP client (Claude Code, Cursor, VS Code, ...)
+dbgorilla doctor         # verify everything works
 ```
 
 That's it. Restart your IDE/agent and DBGorilla is wired up.
 
 ## Supported MCP clients
 
-`dbg setup-ide` auto-detects every supported client installed on your
+`dbgorilla setup-ide` auto-detects every supported client installed on your
 machine and configures each one. Pass `--client <slug>` to target a
 specific tool, or `--list-clients` to see what's supported and which are
 detected.
@@ -123,18 +133,18 @@ For contributors:
 ```sh
 git clone https://github.com/dbgorilla/dbgorilla-cli.git
 cd dbgorilla-cli
-go build -o dbg .
+go build -o dbgorilla ./cmd/dbgorilla
 ```
 
-Requires the Go version declared in `go.mod` (see the badge at the top of this README for the live value). Released binaries are produced from this same source by goreleaser on every `v*.*.*` tag — the `./dbg` you build locally behaves identically.
+Requires the Go version declared in `go.mod` (see the badge at the top of this README for the live value). Released binaries are produced from this same source by goreleaser on every `v*.*.*` tag — the `./dbgorilla` you build locally behaves identically.
 
 Cross-compile for another platform:
 
 ```sh
-GOOS=darwin GOARCH=arm64 go build -o dbg-darwin-arm64 .
-GOOS=darwin GOARCH=amd64 go build -o dbg-darwin-amd64 .
-GOOS=linux  GOARCH=amd64 go build -o dbg-linux-amd64 .
-GOOS=linux  GOARCH=arm64 go build -o dbg-linux-arm64 .
+GOOS=darwin GOARCH=arm64 go build -o dbg-darwin-arm64 ./cmd/dbgorilla
+GOOS=darwin GOARCH=amd64 go build -o dbg-darwin-amd64 ./cmd/dbgorilla
+GOOS=linux  GOARCH=amd64 go build -o dbg-linux-amd64 ./cmd/dbgorilla
+GOOS=linux  GOARCH=arm64 go build -o dbg-linux-arm64 ./cmd/dbgorilla
 ```
 
 ## Feedback
