@@ -349,6 +349,13 @@ func printClientList() {
 // from the captured stderr before returning so a verbose Claude error
 // doesn't echo the secret back onto the dev's terminal.
 func claudeMCPAdd(mcpURL, apiKey, scope string) error {
+	// `claude mcp add` errors ("already exists") if an entry with this name is
+	// present, so it is not idempotent on its own. Remove any existing entry
+	// first (best-effort; a "not found" is expected and ignored) so re-running
+	// setup-ide -- or running it after a stale/prior entry -- reliably updates
+	// in place instead of failing, matching the write-in-place behavior of the
+	// other IDE writers.
+	_ = exec.Command("claude", "mcp", "remove", ide.MCPServerName).Run()
 	args := []string{
 		"mcp", "add",
 		"--scope", scope,

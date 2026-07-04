@@ -228,7 +228,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("✓ Container started: %s\n", runner.Name)
 
 	// Verify connection (best-effort; not fatal).
-	verifyConnection(client, creds.AgentID)
+	verifyConnection(client, creds.AgentID, caCert)
 
 	fmt.Println()
 	fmt.Println("Collector installed. Next:")
@@ -639,7 +639,32 @@ func endpointsFor(creds *api.CollectorCredentials, cmd *cobra.Command) collector
 	if v, _ := cmd.Flags().GetString("opamp-url"); v != "" {
 		e.OpampBaseURL = v
 	}
+	// The OTLP exporter needs an explicit host:port; a bare "https://host"
+	// (no port) makes otelcol fail with "missing port in address". Default to
+	// the scheme's standard port when the endpoint omits one.
+	e.OtlpBaseURL = withDefaultPort(e.OtlpBaseURL)
 	return e
+}
+
+// withDefaultPort adds the scheme's standard port to a URL whose host omits one.
+// Leaves the value untouched if it already has a port, is empty, or is unparseable.
+func withDefaultPort(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Port() != "" {
+		return raw
+	}
+	switch u.Scheme {
+	case "https":
+		u.Host += ":443"
+	case "http":
+		u.Host += ":80"
+	default:
+		return raw
+	}
+	return u.String()
 }
 
 func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
@@ -710,7 +735,7 @@ func checkReachable(addr string) error {
 
 // verifyConnection polls the control plane briefly for the collector to come
 // online. Non-fatal: a slow first connect is normal.
-func verifyConnection(client *api.Client, agentID string) {
+func verifyConnection(client *api.Client, agentID, caCert string) {
 	fmt.Print("Verifying connection")
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -725,6 +750,10 @@ func verifyConnection(client *api.Client, agentID string) {
 	fmt.Println()
 	fmt.Println("⚠  Not connected yet — this can take a moment on first start.")
 	fmt.Println("   Check `dbg collector status` and `dbg collector logs -f`.")
+	if caCert == "" {
+		fmt.Println("   If your deployment uses an internal/private CA, re-run with")
+		fmt.Println("   --ca-cert /path/to/ca.pem so the collector trusts its endpoints.")
+	}
 }
 
 func isConnected(status string) bool {

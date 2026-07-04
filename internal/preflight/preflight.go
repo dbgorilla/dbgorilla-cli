@@ -66,6 +66,7 @@ type Inspector interface {
 	ShowParam(ctx context.Context, name string) (string, error)
 	HasExtension(ctx context.Context, name string) (bool, error)
 	CanReadStats(ctx context.Context) error
+	UnreadableUserTables(ctx context.Context) (int, error)
 }
 
 // Run opens a pgx connection to dsn and runs all checks. A connection failure
@@ -96,6 +97,7 @@ func RunWith(ctx context.Context, ins Inspector) Report {
 		CheckSharedPreload(ctx, ins),
 		CheckExtension(ctx, ins),
 		CheckStatsGrants(ctx, ins),
+		CheckTopologyGrants(ctx, ins),
 		CheckTrackIOTiming(ctx, ins),
 		CheckTrackFunctions(ctx, ins),
 	)
@@ -182,6 +184,31 @@ func CheckStatsGrants(ctx context.Context, ins Inspector) Result {
 		}
 	}
 	return Result{Name: "stats read permission", Severity: Warn, Detail: msg}
+}
+
+// CheckTopologyGrants warns if the role cannot read every user table. The
+// topology scrape uses pg_dump, which LOCKs each table IN ACCESS SHARE MODE and
+// reads its definition; without read access the scrape fails and the topology
+// view stays empty (metrics are unaffected). pg_read_all_stats is NOT enough --
+// it grants stats, not table data.
+func CheckTopologyGrants(ctx context.Context, ins Inspector) Result {
+	n, err := ins.UnreadableUserTables(ctx)
+	if err != nil {
+		return Result{Name: "topology read permission", Severity: Warn, Detail: err.Error()}
+	}
+	if n > 0 {
+		return Result{
+			Name:     "topology read permission",
+			Severity: Warn,
+			Detail:   fmt.Sprintf("%d user table(s) not readable -- the pg_dump topology scrape will fail (metrics unaffected)", n),
+			Fix: []string{
+				"Grant the collector role read access to all data (Postgres 14+):",
+				"  GRANT pg_read_all_data TO <your_role>;",
+				"(Pre-14: GRANT SELECT on the relevant schemas/tables.)",
+			},
+		}
+	}
+	return Result{Name: "topology read permission", Severity: OK, Detail: "all user tables readable"}
 }
 
 // CheckTrackIOTiming warns if track_io_timing is off.
@@ -282,6 +309,22 @@ func (p *pgxInspector) HasExtension(ctx context.Context, name string) (bool, err
 func (p *pgxInspector) CanReadStats(ctx context.Context) error {
 	var count int
 	return p.conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_statements LIMIT 1").Scan(&count)
+}
+
+// UnreadableUserTables counts user tables (excluding catalogs) the current role
+// lacks SELECT on -- i.e. tables the pg_dump topology scrape can't read.
+func (p *pgxInspector) UnreadableUserTables(ctx context.Context) (int, error) {
+	var n int
+	err := p.conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_class c
+		JOIN pg_namespace ns ON ns.oid = c.relnamespace
+		WHERE c.relkind IN ('r', 'p')
+		  AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND ns.nspname NOT LIKE 'pg_temp%'
+		  AND NOT has_table_privilege(current_user, c.oid, 'SELECT')
+	`).Scan(&n)
+	return n, err
 }
 
 // quoteIdent wraps an identifier in double quotes. The package only passes a
