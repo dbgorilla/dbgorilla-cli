@@ -17,6 +17,10 @@ concurrency:
 
 jobs:
   goreleaser:
+    # GoReleaser publishes only from the PUBLIC repo (after the snapshot pushes
+    # the tag there). The same tag also lands on this private dev repo, but
+    # releasing is the public repo's job -- skip here (skipped = neutral).
+    if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # `environment: homebrew-tap` scopes HOMEBREW_TAP_GITHUB_TOKEN to this
