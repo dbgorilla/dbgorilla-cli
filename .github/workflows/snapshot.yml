@@ -1,0 +1,25 @@
+name: snapshot-publish
+
+# On a version tag, publish a CLEAN squashed snapshot of this private dev repo
+# to the public, source-available repo (dbgorilla/dbgorilla-cli) via the shared
+# reusable. The reusable scrubs internal-only files, pushes one "Release" commit,
+# and re-tags on the public side so its GoReleaser fires.
+#
+# NOTE: this file names furiousengineering, so the reusable's scrub deliberately
+# drops it from the public snapshot -- it must never ship to the public repo.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    uses: furiousengineering/dbg-shared-workflows/.github/workflows/cli-snapshot-publish.yml@main
+    with:
+      version: ${{ github.ref_name }}
+      app_id: ${{ vars.DBGORILLA_PUBLISH_APP_ID }}
+    secrets:
+      app_private_key: ${{ secrets.DBGORILLA_PUBLISH_APP_PRIVATE_KEY }}
