@@ -29,5 +29,35 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test -race -coverprofile=coverage.out ./...
+      # The coverage-upload reusable runs on a separate runner with no shared
+      # filesystem, so the report crosses the job boundary as an artifact.
+      - name: Upload coverage report artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-cli
+          path: coverage.out
+          retention-days: 1
       - name: build
         run: go build -o dbgorilla ./cmd/dbgorilla
+
+  # Push the report to Codecov via the shared reusable (upload-only, tokenless
+  # OIDC). flag "cli" = the single component; codecov.yml marks it informational +
+  # carryforward so a non-code PR never shows a false drop.
+  coverage-upload:
+    name: Upload coverage to Codecov
+    needs: test
+    if: ${{ !cancelled() }}
+    # Tokenless OIDC: the reusable requests id-token: write; a caller that does not
+    # grant it startup-fails the whole workflow. Job-level perms replace the
+    # top-level block, so contents: read must be repeated here.
+    permissions:
+      contents: read
+      id-token: write
+    # Pinned to the dbg-shared-workflows #123 merge commit on main (coverage-upload.yml).
+    uses: furiousengineering/dbg-shared-workflows/.github/workflows/coverage-upload.yml@035a6879bca4e2373031cdd983611cb1f5ae0ae8
+    with:
+      artifact_name: coverage-cli
+      flags: cli
+      name: cli-unit
+    secrets: inherit
