@@ -13,6 +13,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Testability seams. These indirect the few operations in the cmd package that
+// touch the host environment (spawning the `claude`/`brew` CLIs, probing PATH,
+// and auto-detecting installed IDEs) so tests can stub them for hermetic,
+// deterministic runs. Production defaults are the real stdlib/ide functions.
+var (
+	// execCommand builds an *exec.Cmd. Stubbed in tests to fake the `claude`
+	// and `brew` subprocesses without a real binary on PATH.
+	execCommand = exec.Command
+	// lookPath reports whether a binary is on PATH. Stubbed to control whether
+	// the `claude` CLI appears installed.
+	lookPath = exec.LookPath
+	// detectInstalled returns the IDE adapters present on the system. Stubbed
+	// so IDE detection is deterministic regardless of the host's installs.
+	detectInstalled = ide.DetectInstalled
+)
+
 func init() {
 	setupIDECmd.Flags().StringSlice("client",
 		nil, "Comma-separated list of clients to configure (default: all detected). "+
@@ -157,7 +173,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		// Claude Code's preferred path is `claude mcp add` (handles managed-org
 		// allowlists). Skip the file writer if the CLI is on PATH.
 		if writer.Slug() == "claude-code" && !noClaudeCLI {
-			if _, lookErr := exec.LookPath("claude"); lookErr == nil {
+			if _, lookErr := lookPath("claude"); lookErr == nil {
 				if dryRun {
 					fmt.Printf("Would run: claude mcp add (scope=%s, name=dbgorilla)\n", scope)
 					configured++
@@ -239,7 +255,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 // of Adapter instances to act on.
 func resolveSelectedAdapters(clientFlag []string) ([]ide.Adapter, error) {
 	if len(clientFlag) == 0 {
-		return ide.DetectInstalled(), nil
+		return detectInstalled(), nil
 	}
 	var out []ide.Adapter
 	var unknown []string
@@ -355,7 +371,7 @@ func claudeMCPAdd(mcpURL, apiKey, scope string) error {
 	// setup-ide -- or running it after a stale/prior entry -- reliably updates
 	// in place instead of failing, matching the write-in-place behavior of the
 	// other IDE writers.
-	_ = exec.Command("claude", "mcp", "remove", ide.MCPServerName).Run()
+	_ = execCommand("claude", "mcp", "remove", ide.MCPServerName).Run()
 	args := []string{
 		"mcp", "add",
 		"--scope", scope,
@@ -363,7 +379,7 @@ func claudeMCPAdd(mcpURL, apiKey, scope string) error {
 		ide.MCPServerName, mcpURL,
 		"--header", "Authorization: Bearer " + apiKey,
 	}
-	out, err := exec.Command("claude", args...).CombinedOutput()
+	out, err := execCommand("claude", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("`claude mcp add` failed: %w\n%s", err, redactBearer(string(out), apiKey))
 	}

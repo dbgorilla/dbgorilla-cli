@@ -37,6 +37,16 @@ const (
 	configFile   = "cli.toml"
 )
 
+// goos indirects runtime.GOOS so the OS-specific path resolution branches can
+// be exercised from a single host in tests. Production always reads the real
+// runtime.GOOS; tests override this and restore it.
+var goos = runtime.GOOS
+
+// systemConfigPathFn indirects SystemConfigPath so LoadSystem can be pointed at
+// a temp file in hermetic tests (the real system path is root-owned and not
+// writable from a test). Production uses the real SystemConfigPath.
+var systemConfigPathFn = SystemConfigPath
+
 // Config is the persisted CLI configuration.
 type Config struct {
 	API APIConfig `toml:"api"`
@@ -75,7 +85,7 @@ func userConfigBase() (string, error) {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return xdg, nil
 	}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		return os.UserConfigDir()
 	}
 	home, err := os.UserHomeDir()
@@ -98,7 +108,7 @@ func UserConfigPath() (string, error) {
 // MDM-deployed configurations. This file is read-only from the CLI's point of
 // view; we never write it.
 func SystemConfigPath() string {
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		return "/Library/Application Support/dbgorilla/cli.toml"
 	case "windows":
@@ -121,7 +131,7 @@ func LoadUser() (*Config, error) {
 // LoadSystem reads the system-wide config. A missing file returns a zero-value
 // Config and nil error -- system config is optional.
 func LoadSystem() (*Config, error) {
-	return loadFile(SystemConfigPath())
+	return loadFile(systemConfigPathFn())
 }
 
 func loadFile(path string) (*Config, error) {

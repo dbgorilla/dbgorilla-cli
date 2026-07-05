@@ -19,6 +19,19 @@ import (
 	"golang.org/x/term"
 )
 
+// Install-path seams. These indirect the three operations in runInstall that
+// touch the Docker engine or a live database, so the install workflow can be
+// exercised end-to-end in tests with fakes. Production defaults call the real
+// implementations.
+var (
+	// dockerAvailable reports whether a usable Docker engine is reachable.
+	dockerAvailable = collector.DockerAvailable
+	// runPreflight runs the read-only database preflight against a DSN.
+	runPreflight = preflight.Run
+	// runContainer starts the collector container (`docker run`).
+	runContainer = func(r collector.Runner) error { return r.Run() }
+)
+
 func init() {
 	installCmd.Flags().String("name", "", "Display name for this database target (prompted if omitted)")
 	installCmd.Flags().String("db-host", "localhost", "Database host")
@@ -86,7 +99,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Environment preflight: Docker must be usable before we mint anything.
-	if err := collector.DockerAvailable(); err != nil {
+	if err := dockerAvailable(); err != nil {
 		return err
 	}
 
@@ -124,7 +137,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 
 	// Deep DB preflight (read-only) before we provision anything, so a
 	// misconfigured database never gets a live collector identity.
-	report := preflight.Run(cmd.Context(), buildDSN(target, password))
+	report := runPreflight(cmd.Context(), buildDSN(target, password))
 	printPreflight(report)
 	if report.Failed() {
 		if force, _ := cmd.Flags().GetBool("force"); !force {
@@ -197,7 +210,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		CACertPath:  caCert,
 	}
 	fmt.Printf("Starting collector container (%s)...\n", image)
-	if err := runner.Run(); err != nil {
+	if err := runContainer(runner); err != nil {
 		// Roll back the just-minted identity so a failed start never orphans it.
 		fmt.Println("Container failed to start; rolling back the provisioned identity...")
 		if derr := client.DeleteCollector(creds.AgentID); derr != nil {

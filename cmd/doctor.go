@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -142,7 +141,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	// writer-type adapter and check whether the dbgorilla entry is present
 	// under that client's config. Hint-only adapters (Claude Desktop) are
 	// reported separately as informational.
-	detected := ide.DetectInstalled()
+	detected := detectInstalled()
 	if len(detected) == 0 {
 		printCheck("MCP clients", false,
 			"no supported clients detected -- install Claude Code, Cursor, VS Code, etc.")
@@ -198,8 +197,8 @@ func printCheck(name string, ok bool, detail string) {
 // default-scope config file directly and looks for the dbgorilla entry.
 func checkClientConfigured(w ide.Writer) (bool, string) {
 	if w.Slug() == "claude-code" {
-		if _, err := exec.LookPath("claude"); err == nil {
-			out, err := exec.Command("claude", "mcp", "list").Output()
+		if _, err := lookPath("claude"); err == nil {
+			out, err := execCommand("claude", "mcp", "list").Output()
 			if err == nil && strings.Contains(strings.ToLower(string(out)), ide.MCPServerName) {
 				return true, "registered (`claude mcp list`)"
 			}

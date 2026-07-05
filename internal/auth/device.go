@@ -48,6 +48,18 @@ import (
 	"github.com/pkg/browser"
 )
 
+// openBrowser opens the verification URL in the user's default browser. It is
+// a package-level seam so tests can substitute a no-op: calling the real
+// browser.OpenURL during a test would launch `open`/`xdg-open` on the host,
+// a non-hermetic side effect. Production behaviour is unchanged.
+var openBrowser = browser.OpenURL
+
+// pollUnit is the time unit applied to the device-code interval and expiry
+// deadline. It is time.Second in production; tests override it (e.g. to a
+// microsecond) so the polling loop runs to completion instantly. Keeping it a
+// single knob means both the interval and the deadline scale together.
+var pollUnit = time.Second
+
 // DeviceConfig matches GET /api/v0_1/auth/keycloak/device-config.
 type DeviceConfig struct {
 	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
@@ -166,7 +178,7 @@ func LoginDevice(ctx context.Context, apiURL string, insecure bool) (*Tokens, er
 	fmt.Printf("  Enter code:           %s\n\n", dc.UserCode)
 
 	// Best-effort browser open; ignore failure (headless boxes are normal).
-	_ = browser.OpenURL(displayURL)
+	_ = openBrowser(displayURL)
 
 	fmt.Print("  Waiting for approval...")
 	tok, err := pollForToken(ctx, cfg, dc, insecure)
@@ -220,8 +232,8 @@ func requestDeviceCode(ctx context.Context, cfg *DeviceConfig, insecure bool) (*
 // unrecoverable error occurs. RFC 8628 reserves "authorization_pending"
 // for keep-polling and "slow_down" for keep-polling-but-back-off.
 func pollForToken(ctx context.Context, cfg *DeviceConfig, dc *deviceCodeResponse, insecure bool) (*Tokens, error) {
-	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
-	interval := time.Duration(dc.Interval) * time.Second
+	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * pollUnit)
+	interval := time.Duration(dc.Interval) * pollUnit
 
 	form := url.Values{}
 	form.Set("client_id", cfg.ClientID)
@@ -276,7 +288,7 @@ func pollForToken(ctx context.Context, cfg *DeviceConfig, dc *deviceCodeResponse
 			fmt.Print(".")
 			continue
 		case "slow_down":
-			interval += 5 * time.Second
+			interval += 5 * pollUnit
 			fmt.Print(".")
 			continue
 		case "access_denied":

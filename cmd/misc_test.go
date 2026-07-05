@@ -1,0 +1,354 @@
+package cmd
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
+	"github.com/spf13/cobra"
+)
+
+func whoamiTestCmd() *cobra.Command {
+	c := &cobra.Command{}
+	c.Flags().String("api-url", "", "")
+	c.Flags().Bool("insecure", false, "")
+	c.Flags().Bool("json", false, "")
+	return c
+}
+
+func TestRunWhoami(t *testing.T) {
+	t.Run("no api url", func(t *testing.T) {
+		isolate(t)
+		if err := runWhoami(whoamiTestCmd(), nil); err == nil {
+			t.Fatal("want api-url error")
+		}
+	})
+
+	t.Run("not logged in", func(t *testing.T) {
+		isolate(t)
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", "https://dep.example")
+		if err := runWhoami(c, nil); err == nil || !strings.Contains(err.Error(), "not logged in") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("identity with user-id", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 200, `{"email":"dev@acme.com","tenant":"Acme","user_id":"u-1"}`)
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		out := capture(t, func() {
+			if err := runWhoami(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "dev@acme.com") || !strings.Contains(out, "user-id: u-1") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("identity without user-id falls back", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		// tenant empty, tenant_id populated -> falls back to tenant_id
+		srv := statusServer(t, 200, `{"username":"dev","tenant_id":"t-9"}`)
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		out := capture(t, func() {
+			if err := runWhoami(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "dev  (org: t-9)") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("json output", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 200, `{"email":"dev@acme.com","tenant":"Acme"}`)
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		_ = c.Flags().Set("json", "true")
+		out := capture(t, func() {
+			if err := runWhoami(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, `"email": "dev@acme.com"`) {
+			t.Errorf("want indented JSON, got %q", out)
+		}
+	})
+
+	t.Run("401 token expired", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 401, "")
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		if err := runWhoami(c, nil); err == nil || !strings.Contains(err.Error(), "token expired") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("unexpected status", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 503, "")
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		if err := runWhoami(c, nil); err == nil || !strings.Contains(err.Error(), "unexpected response") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("malformed body", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 200, `not json`)
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		if err := runWhoami(c, nil); err == nil || !strings.Contains(err.Error(), "cannot parse identity") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("unreachable", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", "http://127.0.0.1:1")
+		if err := runWhoami(c, nil); err == nil || !strings.Contains(err.Error(), "cannot reach API") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestConfigSet(t *testing.T) {
+	t.Run("api-url", func(t *testing.T) {
+		isolate(t)
+		out := capture(t, func() {
+			if err := configSetCmd.RunE(configSetCmd, []string{"api-url", "https://dep.example"}); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Set api-url = https://dep.example") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("insecure bool", func(t *testing.T) {
+		isolate(t)
+		if err := configSetCmd.RunE(configSetCmd, []string{"insecure", "true"}); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		if cfg, _ := loadUserCfgInsecure(); !cfg {
+			t.Error("insecure not saved")
+		}
+	})
+
+	t.Run("insecure invalid bool errors", func(t *testing.T) {
+		isolate(t)
+		if err := configSetCmd.RunE(configSetCmd, []string{"insecure", "notabool"}); err == nil {
+			t.Fatal("want invalid-boolean error")
+		}
+	})
+
+	t.Run("unknown key errors", func(t *testing.T) {
+		isolate(t)
+		if err := configSetCmd.RunE(configSetCmd, []string{"nope", "x"}); err == nil {
+			t.Fatal("want unknown-key error")
+		}
+	})
+}
+
+func TestConfigGet(t *testing.T) {
+	t.Run("api-url from user config with source", func(t *testing.T) {
+		isolate(t)
+		if err := configSetCmd.RunE(configSetCmd, []string{"api-url", "https://dep.example"}); err != nil {
+			t.Fatal(err)
+		}
+		c := baseCmd()
+		out := capture(t, func() {
+			if err := configGetCmd.RunE(c, []string{"api-url"}); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "https://dep.example") || !strings.Contains(out, "source: user-config") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("api-url not set", func(t *testing.T) {
+		isolate(t)
+		c := baseCmd()
+		out := capture(t, func() {
+			if err := configGetCmd.RunE(c, []string{"api-url"}); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "(not set)") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("insecure", func(t *testing.T) {
+		isolate(t)
+		c := baseCmd()
+		out := capture(t, func() {
+			if err := configGetCmd.RunE(c, []string{"insecure"}); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "insecure: false") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("unknown key errors", func(t *testing.T) {
+		isolate(t)
+		if err := configGetCmd.RunE(baseCmd(), []string{"nope"}); err == nil {
+			t.Fatal("want unknown-key error")
+		}
+	})
+}
+
+func TestConfigUnset(t *testing.T) {
+	t.Run("api-url", func(t *testing.T) {
+		isolate(t)
+		if err := configSetCmd.RunE(configSetCmd, []string{"api-url", "https://dep.example"}); err != nil {
+			t.Fatal(err)
+		}
+		out := capture(t, func() {
+			if err := configUnsetCmd.RunE(configUnsetCmd, []string{"api-url"}); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Unset api-url") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("insecure", func(t *testing.T) {
+		isolate(t)
+		if err := configUnsetCmd.RunE(configUnsetCmd, []string{"insecure"}); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("unknown key errors", func(t *testing.T) {
+		isolate(t)
+		if err := configUnsetCmd.RunE(configUnsetCmd, []string{"nope"}); err == nil {
+			t.Fatal("want unknown-key error")
+		}
+	})
+}
+
+// loadUserCfgInsecure is a tiny helper for asserting persisted insecure state.
+func loadUserCfgInsecure() (bool, error) {
+	// import cycle-free: use the same path resolution the code under test uses.
+	c := baseCmd()
+	return resolveInsecure(c), nil
+}
+
+func TestVersionCommand(t *testing.T) {
+	out := capture(t, func() { versionCmd.Run(versionCmd, nil) })
+	if !strings.Contains(out, "dbgorilla version") || !strings.Contains(out, "commit") {
+		t.Errorf("out=%q", out)
+	}
+}
+
+func TestResolveVersion(t *testing.T) {
+	t.Run("released ldflag version is authoritative", func(t *testing.T) {
+		old := Version
+		Version = "9.9.9"
+		defer func() { Version = old }()
+		v, _, _ := resolveVersion()
+		if v != "9.9.9" {
+			t.Errorf("v=%q, want 9.9.9", v)
+		}
+	})
+
+	t.Run("dev build resolves from build info", func(t *testing.T) {
+		old := Version
+		Version = "dev"
+		defer func() { Version = old }()
+		v, _, _ := resolveVersion()
+		if v == "" {
+			t.Error("version must never be empty")
+		}
+	})
+}
+
+func TestInstalledViaBrew(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/opt/homebrew/bin/dbg", true},
+		{"/usr/local/Cellar/dbg/1.0/bin/dbg", true},
+		{"/home/linuxbrew/.linuxbrew/bin/dbg", true},
+		{"/usr/bin/dbg", false},
+		{"/opt/homebrew", false}, // exactly the prefix (no suffix) -> not "under" it
+	}
+	for _, tc := range cases {
+		stubExecutable(t, tc.path)
+		if got := installedViaBrew(); got != tc.want {
+			t.Errorf("installedViaBrew(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestRunUpgrade(t *testing.T) {
+	t.Run("non-brew prints manual instructions", func(t *testing.T) {
+		isolate(t)
+		stubExecutable(t, "/usr/bin/dbg")
+		out := capture(t, func() {
+			if err := runUpgrade(nil, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Not a Homebrew install") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("brew install runs brew upgrade", func(t *testing.T) {
+		isolate(t)
+		stubExecutable(t, "/opt/homebrew/bin/dbg")
+		stubExec(t, "", 0)
+		out := capture(t, func() {
+			if err := runUpgrade(nil, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Detected Homebrew install") {
+			t.Errorf("out=%q", out)
+		}
+	})
+}
+
+func TestLogout(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	out := capture(t, func() {
+		if err := logoutCmd.RunE(logoutCmd, nil); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	if !strings.Contains(out, "Signed out.") {
+		t.Errorf("out=%q", out)
+	}
+	if tok, _ := auth.LoadTokens(); tok != nil {
+		t.Error("tokens should be cleared after logout")
+	}
+}

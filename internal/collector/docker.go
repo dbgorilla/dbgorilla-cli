@@ -8,6 +8,15 @@ import (
 	"strings"
 )
 
+// Seams for tests. These default to the stdlib implementations so production
+// behavior is unchanged; tests substitute fakes to avoid invoking a real
+// docker daemon or depending on the host OS.
+var (
+	execCommand  = exec.Command
+	execLookPath = exec.LookPath
+	goos         = runtime.GOOS
+)
+
 // DefaultImage is the published GA collector image, pinned by digest for
 // reproducibility. Bump this on each release (see the collector repo's
 // "Releasing" docs). Override with `dbg collector install --image`. Used as the
@@ -37,7 +46,7 @@ func PinnedRef(ref string) (string, error) {
 	if err := docker("pull", ref); err != nil {
 		return "", err
 	}
-	out, err := exec.Command("docker", "inspect", "-f", "{{index .RepoDigests 0}}", ref).Output()
+	out, err := execCommand("docker", "inspect", "-f", "{{index .RepoDigests 0}}", ref).Output()
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve image digest for %s (is it pushed to a registry?): %w", ref, err)
 	}
@@ -61,10 +70,10 @@ const DefaultContainerName = "dbg-collector"
 
 // DockerAvailable returns nil when a usable Docker engine is reachable.
 func DockerAvailable() error {
-	if _, err := exec.LookPath("docker"); err != nil {
+	if _, err := execLookPath("docker"); err != nil {
 		return fmt.Errorf("docker not found on PATH. Install Docker Desktop or Colima, then retry")
 	}
-	if out, err := exec.Command("docker", "info").CombinedOutput(); err != nil {
+	if out, err := execCommand("docker", "info").CombinedOutput(); err != nil {
 		return fmt.Errorf("docker is installed but the engine is not responding (is it running?):\n%s",
 			strings.TrimSpace(string(out)))
 	}
@@ -93,7 +102,7 @@ const containerCAPath = "/etc/ssl/certs/dbg-collector-ca.pem"
 // Docker Desktop). Secrets arrive via --env-file, never on argv.
 func (r Runner) runArgs() []string {
 	args := []string{"run", "-d", "--name", r.Name, "--restart", "unless-stopped"}
-	if runtime.GOOS == "linux" {
+	if goos == "linux" {
 		args = append(args, "--add-host="+DockerHostInternal+":host-gateway")
 	}
 	args = append(args,
@@ -148,7 +157,7 @@ func (r Runner) Logs(follow bool, tail string) error {
 		args = append(args, "--tail", tail)
 	}
 	args = append(args, r.Name)
-	cmd := exec.Command("docker", args...)
+	cmd := execCommand("docker", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -156,7 +165,7 @@ func (r Runner) Logs(follow bool, tail string) error {
 
 // Running reports whether the container exists and is currently running.
 func (r Runner) Running() (exists bool, running bool, err error) {
-	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", r.Name).CombinedOutput()
+	out, err := execCommand("docker", "inspect", "-f", "{{.State.Running}}", r.Name).CombinedOutput()
 	if err != nil {
 		// inspect exits non-zero when the container does not exist.
 		if strings.Contains(string(out), "No such object") {
@@ -169,7 +178,7 @@ func (r Runner) Running() (exists bool, running bool, err error) {
 
 // ImageRef returns the image the container was created from (for status).
 func (r Runner) ImageRef() string {
-	out, err := exec.Command("docker", "inspect", "-f", "{{.Config.Image}}", r.Name).Output()
+	out, err := execCommand("docker", "inspect", "-f", "{{.Config.Image}}", r.Name).Output()
 	if err != nil {
 		return ""
 	}
@@ -179,7 +188,7 @@ func (r Runner) ImageRef() string {
 // docker runs a docker subcommand, returning a wrapped error with output on
 // failure.
 func docker(args ...string) error {
-	out, err := exec.Command("docker", args...).CombinedOutput()
+	out, err := execCommand("docker", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker %s failed: %w\n%s", args[0], err, strings.TrimSpace(string(out)))
 	}

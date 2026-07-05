@@ -7,17 +7,45 @@ import (
 )
 
 // fakePreflightInspector is a minimal Inspector for exercising the check logic
-// without a live database. Only the fields a given test needs are set.
+// without a live database. Every field is optional: when a field is left at its
+// zero value the method returns the "all healthy" default, so a test only sets
+// what it wants to steer. This keeps the happy-path callers terse while letting
+// other tests drive each error/degraded branch.
 type fakePreflightInspector struct {
-	unreadable    int
-	unreadableErr error
+	summary       string            // Summary() override; "" -> "fake"
+	version       string            // ServerVersionNum() override; "" -> "160000"
+	versionErr    error             // ServerVersionNum() error
+	params        map[string]string // ShowParam() overrides by name
+	paramErr      error             // ShowParam() error (all names)
+	extMissing    bool              // HasExtension() -> false when true
+	hasExtErr     error             // HasExtension() error
+	canReadErr    error             // CanReadStats() error
+	unreadable    int               // UnreadableUserTables() count
+	unreadableErr error             // UnreadableUserTables() error
 }
 
-func (f fakePreflightInspector) Summary() string { return "fake" }
+func (f fakePreflightInspector) Summary() string {
+	if f.summary != "" {
+		return f.summary
+	}
+	return "fake"
+}
 func (f fakePreflightInspector) ServerVersionNum(context.Context) (string, error) {
+	if f.versionErr != nil {
+		return "", f.versionErr
+	}
+	if f.version != "" {
+		return f.version, nil
+	}
 	return "160000", nil
 }
 func (f fakePreflightInspector) ShowParam(_ context.Context, name string) (string, error) {
+	if f.paramErr != nil {
+		return "", f.paramErr
+	}
+	if v, ok := f.params[name]; ok {
+		return v, nil
+	}
 	switch name {
 	case "shared_preload_libraries":
 		return "pg_stat_statements", nil
@@ -28,8 +56,13 @@ func (f fakePreflightInspector) ShowParam(_ context.Context, name string) (strin
 	}
 	return "", nil
 }
-func (f fakePreflightInspector) HasExtension(context.Context, string) (bool, error) { return true, nil }
-func (f fakePreflightInspector) CanReadStats(context.Context) error                 { return nil }
+func (f fakePreflightInspector) HasExtension(context.Context, string) (bool, error) {
+	if f.hasExtErr != nil {
+		return false, f.hasExtErr
+	}
+	return !f.extMissing, nil
+}
+func (f fakePreflightInspector) CanReadStats(context.Context) error { return f.canReadErr }
 func (f fakePreflightInspector) UnreadableUserTables(context.Context) (int, error) {
 	return f.unreadable, f.unreadableErr
 }

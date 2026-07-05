@@ -3,10 +3,13 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 )
+
+// osExecutable indirects os.Executable so tests can simulate the binary
+// living under (or outside) a Homebrew prefix and exercise both upgrade paths.
+var osExecutable = os.Executable
 
 func init() {
 	rootCmd.AddCommand(upgradeCmd)
@@ -27,7 +30,7 @@ binary that just downloaded shouldn't decide it's safe to overwrite).`,
 func runUpgrade(_ *cobra.Command, _ []string) error {
 	if installedViaBrew() {
 		fmt.Println("Detected Homebrew install. Running: brew upgrade dbgorilla/tap/dbg")
-		c := exec.Command("brew", "upgrade", "dbgorilla/tap/dbg")
+		c := execCommand("brew", "upgrade", "dbgorilla/tap/dbg")
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		return c.Run()
@@ -35,7 +38,7 @@ func runUpgrade(_ *cobra.Command, _ []string) error {
 
 	// Not a brew install. Find where the binary lives and tell the user the
 	// matching upgrade command for the path they used.
-	self, err := os.Executable()
+	self, err := osExecutable()
 	if err != nil {
 		self = "/usr/local/bin/dbg"
 	}
@@ -58,7 +61,7 @@ func runUpgrade(_ *cobra.Command, _ []string) error {
 // Homebrew's Cellar prefix. Works for /opt/homebrew (Apple Silicon) and
 // /usr/local (Intel macOS, Linuxbrew).
 func installedViaBrew() bool {
-	self, err := os.Executable()
+	self, err := osExecutable()
 	if err != nil {
 		return false
 	}

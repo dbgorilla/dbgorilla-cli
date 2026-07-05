@@ -279,8 +279,16 @@ func DSNSummary(dsn string) string {
 
 // --- pgx adapter ----------------------------------------------------------
 
+// rowQuerier is the minimal slice of *pgx.Conn the adapter needs: run a query
+// that returns a single row. Narrowing the concrete *pgx.Conn to this port lets
+// the adapter's row-to-value mapping be unit-tested against a fake row source
+// with no live database. *pgx.Conn satisfies it directly.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 type pgxInspector struct {
-	conn *pgx.Conn
+	conn rowQuerier
 	dsn  string
 }
 
