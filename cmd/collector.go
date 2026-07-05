@@ -28,8 +28,10 @@ var (
 	dockerAvailable = collector.DockerAvailable
 	// runPreflight runs the read-only database preflight against a DSN.
 	runPreflight = preflight.Run
-	// runContainer starts the collector container (`docker run`).
-	runContainer = func(r collector.Runner) error { return r.Run() }
+	// runContainer starts the collector container (`docker run`). Method
+	// expression (not a wrapping closure) so the default carries no uncovered
+	// statement of its own -- collector.Runner.Run is func(collector.Runner) error.
+	runContainer = collector.Runner.Run
 )
 
 func init() {
