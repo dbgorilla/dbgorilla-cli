@@ -10,6 +10,7 @@ package preflight
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -65,6 +66,10 @@ type Inspector interface {
 	ServerVersionNum(ctx context.Context) (string, error)
 	ShowParam(ctx context.Context, name string) (string, error)
 	HasExtension(ctx context.Context, name string) (bool, error)
+	// MaintenanceDBHasExtension checks for the extension in the `postgres`
+	// maintenance database -- the DB the collector's capability probe connects
+	// to, which can differ from the target DB this preflight is connected to.
+	MaintenanceDBHasExtension(ctx context.Context, name string) (bool, error)
 	CanReadStats(ctx context.Context) error
 	UnreadableUserTables(ctx context.Context) (int, error)
 }
@@ -87,6 +92,27 @@ func Run(ctx context.Context, dsn string) Report {
 	}
 	defer func() { _ = conn.Close(ctx) }()
 	return RunWith(ctx, &pgxInspector{conn: conn, dsn: dsn})
+}
+
+// CheckWorkload opens a connection to dsn and returns ONLY the workload
+// (pg_stat_statements) capability check -- the `postgres` maintenance-DB probe
+// that determines whether query/workload data flows. It lets `dbg collector
+// status` answer "topology works but the Queries views are empty" without
+// running the full preflight. A connection failure degrades to a Warn so status
+// never hard-errors on a transiently-unreachable DB.
+func CheckWorkload(ctx context.Context, dsn string) Result {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return Result{
+			Name:     "workload",
+			Severity: Warn,
+			Detail:   fmt.Sprintf("could not connect to the database to check the workload capability: %v", err),
+		}
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	res := CheckExtension(ctx, &pgxInspector{conn: conn, dsn: dsn})
+	res.Name = "workload"
+	return res
 }
 
 // RunWith runs the checks against a given Inspector (for tests / reused conns).
@@ -147,21 +173,50 @@ func CheckSharedPreload(ctx context.Context, ins Inspector) Result {
 	return Result{Name: "shared_preload_libraries", Severity: OK, Detail: libs}
 }
 
-// CheckExtension requires the pg_stat_statements extension in the current DB.
+// CheckExtension requires pg_stat_statements in the `postgres` MAINTENANCE
+// database -- the DB the collector's capability probe actually connects to.
+// This is deliberately NOT (only) the target/business DB: if the extension
+// lives only in the target DB, the collector probes `postgres`, finds nothing,
+// and silently advertises NO workload -- topology flows but the Queries views
+// stay permanently empty with no error. So we gate on the maintenance DB and
+// call out the target-only divergence explicitly (dbgorilla-cli#14).
 func CheckExtension(ctx context.Context, ins Inspector) Result {
-	present, err := ins.HasExtension(ctx, "pg_stat_statements")
+	inMaint, err := ins.MaintenanceDBHasExtension(ctx, "pg_stat_statements")
 	if err != nil {
-		return Result{Name: "pg_stat_statements extension", Severity: Fail, Detail: err.Error()}
+		// Could not reach/inspect the postgres maintenance DB. Warn rather than
+		// hard-fail -- we cannot confirm the workload capability either way.
+		return Result{
+			Name:     "pg_stat_statements extension",
+			Severity: Warn,
+			Detail:   fmt.Sprintf("could not verify pg_stat_statements in the postgres maintenance DB (the collector probes it there for workload): %v", err),
+		}
 	}
-	if !present {
+	if inMaint {
+		return Result{Name: "pg_stat_statements extension", Severity: OK, Detail: "installed in the postgres maintenance DB"}
+	}
+	// Missing in `postgres`. If it is (misleadingly) present in the target DB,
+	// this is the silent-empty-workload trap: setup/preflight look fine but the
+	// collector probes `postgres` and finds nothing.
+	if inTarget, terr := ins.HasExtension(ctx, "pg_stat_statements"); terr == nil && inTarget {
 		return Result{
 			Name:     "pg_stat_statements extension",
 			Severity: Fail,
-			Detail:   "extension not created in this database",
-			Fix:      []string{"CREATE EXTENSION pg_stat_statements;"},
+			Detail:   "pg_stat_statements exists in the target database but NOT in the `postgres` maintenance database -- the collector probes `postgres` for the workload capability, so query/workload data will be silently empty (topology is unaffected)",
+			Fix: []string{
+				"Create the extension in the postgres maintenance DB (the one the collector probes):",
+				"  psql \"host=<host> port=<port> user=<user> dbname=postgres\" -c 'CREATE EXTENSION pg_stat_statements;'",
+			},
 		}
 	}
-	return Result{Name: "pg_stat_statements extension", Severity: OK, Detail: "installed"}
+	return Result{
+		Name:     "pg_stat_statements extension",
+		Severity: Fail,
+		Detail:   "pg_stat_statements extension not created in the `postgres` maintenance database (the collector probes it there for the workload capability)",
+		Fix: []string{
+			"Create the extension in the postgres maintenance DB:",
+			"  psql -d postgres -c 'CREATE EXTENSION pg_stat_statements;'",
+		},
+	}
 }
 
 // CheckStatsGrants requires the role to be able to read pg_stat_statements.
@@ -314,6 +369,23 @@ func (p *pgxInspector) HasExtension(ctx context.Context, name string) (bool, err
 	return present, err
 }
 
+// MaintenanceDBHasExtension checks for the extension in the `postgres`
+// maintenance database -- the DB the collector's capability probe connects to,
+// which may differ from the target DB this preflight is connected to. It opens a
+// short-lived connection to the maintenance DB derived from the DSN.
+func (p *pgxInspector) MaintenanceDBHasExtension(ctx context.Context, name string) (bool, error) {
+	conn, err := pgx.Connect(ctx, maintenanceDSN(p.dsn))
+	if err != nil {
+		return false, fmt.Errorf("connect to postgres maintenance DB: %w", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var present bool
+	err = conn.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)", name,
+	).Scan(&present)
+	return present, err
+}
+
 func (p *pgxInspector) CanReadStats(ctx context.Context) error {
 	var count int
 	return p.conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_statements LIMIT 1").Scan(&count)
@@ -339,4 +411,16 @@ func (p *pgxInspector) UnreadableUserTables(ctx context.Context) (int, error) {
 // fixed set of literal parameter names; this is defense-in-depth.
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// maintenanceDSN returns dsn with its database set to `postgres` -- the
+// maintenance DB the collector's capability probe connects to. Falls back to the
+// original dsn if it can't be parsed as a URL.
+func maintenanceDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme == "" {
+		return dsn
+	}
+	u.Path = "/postgres"
+	return u.String()
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -32,6 +33,9 @@ var (
 	// expression (not a wrapping closure) so the default carries no uncovered
 	// statement of its own -- collector.Runner.Run is func(collector.Runner) error.
 	runContainer = collector.Runner.Run
+	// checkWorkload probes the workload (pg_stat_statements) capability for
+	// `dbg collector status`; stubbed in tests to avoid a live DB.
+	checkWorkload = preflight.CheckWorkload
 )
 
 func init() {
@@ -345,7 +349,53 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 			fmt.Printf("Connection: %s\n", orUnknown(cs.Status))
 		}
 	}
+
+	// Workload capability (best-effort): re-probe pg_stat_statements in the
+	// `postgres` maintenance DB the collector uses to gate workload, so the
+	// "topology works but the Queries views are empty" case is diagnosable here
+	// rather than only at install time (dbgorilla-cli#14).
+	printWorkloadStatus(cmd.Context(), st)
 	return nil
+}
+
+// printWorkloadStatus recovers the monitored target from the installed config +
+// keychain and prints whether the workload (pg_stat_statements) capability is
+// satisfied. Entirely best-effort: any missing piece just omits the line.
+func printWorkloadStatus(ctx context.Context, st *collector.State) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg, err := collector.LoadConfig(st.ConfigPath)
+	if err != nil || len(cfg.Component) == 0 {
+		return
+	}
+	_, dbPassword, err := collector.LoadSecrets(st.AgentID)
+	if err != nil {
+		return
+	}
+	comp := cfg.Component[0]
+	target := collector.Target{
+		Host:      collector.DialHost(comp.Connect.Host), // host-side view
+		Port:      comp.Connect.Port,
+		Databases: comp.Connect.Databases,
+		User:      comp.Auth.User,
+		SSLMode:   comp.Connect.SSLMode,
+	}
+	// Bound the probe so status never hangs on an unreachable DB.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res := checkWorkload(ctx, buildDSN(target, dbPassword))
+	switch res.Severity {
+	case preflight.OK:
+		fmt.Println("Workload:   collecting (pg_stat_statements in the postgres maintenance DB)")
+	case preflight.Warn:
+		fmt.Printf("Workload:   unknown (%s)\n", res.Detail)
+	default:
+		fmt.Printf("Workload:   NOT collecting -- %s\n", res.Detail)
+		for _, f := range res.Fix {
+			fmt.Printf("            %s\n", f)
+		}
+	}
 }
 
 // --- list -----------------------------------------------------------------

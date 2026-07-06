@@ -132,27 +132,72 @@ func TestCheckSharedPreload_NotLoaded(t *testing.T) {
 
 // --- CheckExtension -------------------------------------------------------
 
+func TestCheckWorkload_ConnectFailureWarns(t *testing.T) {
+	// Unreachable DB -> Warn (never a hard error), named "workload".
+	r := CheckWorkload(bg(), "postgres://u:p@127.0.0.1:1/none?sslmode=disable&connect_timeout=1")
+	if r.Severity != Warn {
+		t.Fatalf("want Warn on connect failure, got %s (%s)", r.Severity, r.Detail)
+	}
+	if r.Name != "workload" {
+		t.Errorf("want Name=workload, got %q", r.Name)
+	}
+}
+
+func TestMaintenanceDSN(t *testing.T) {
+	cases := map[string]string{
+		"postgres://u:p@h:5433/appdb?sslmode=disable": "postgres://u:p@h:5433/postgres?sslmode=disable",
+		"postgres://u:p@h:5432/postgres":              "postgres://u:p@h:5432/postgres",
+		"not a url":                                   "not a url", // unparseable -> unchanged
+	}
+	for in, want := range cases {
+		if got := maintenanceDSN(in); got != want {
+			t.Errorf("maintenanceDSN(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestCheckExtension_OK(t *testing.T) {
+	// Present in the postgres maintenance DB -> OK (workload capability on).
 	r := CheckExtension(bg(), fakePreflightInspector{})
 	if r.Severity != OK {
 		t.Fatalf("want OK, got %s (%s)", r.Severity, r.Detail)
 	}
 }
 
-func TestCheckExtension_QueryError(t *testing.T) {
-	r := CheckExtension(bg(), fakePreflightInspector{hasExtErr: errors.New("boom")})
-	if r.Severity != Fail {
-		t.Fatalf("want Fail on query error, got %s", r.Severity)
+func TestCheckExtension_MaintenanceProbeErrorWarns(t *testing.T) {
+	// Can't reach the postgres maintenance DB -> Warn, not a hard fail.
+	r := CheckExtension(bg(), fakePreflightInspector{maintExtErr: errors.New("boom")})
+	if r.Severity != Warn {
+		t.Fatalf("want Warn when the maintenance-DB probe errors, got %s", r.Severity)
 	}
 }
 
-func TestCheckExtension_NotPresent(t *testing.T) {
-	r := CheckExtension(bg(), fakePreflightInspector{extMissing: true})
+func TestCheckExtension_TargetOnlyDivergenceFails(t *testing.T) {
+	// The dbgorilla-cli#14 trap: extension is in the target DB but NOT in the
+	// `postgres` maintenance DB the collector probes -> Fail with the specific
+	// silent-empty-workload diagnosis, not the generic message.
+	r := CheckExtension(bg(), fakePreflightInspector{maintExtMissing: true, extMissing: false})
 	if r.Severity != Fail {
-		t.Fatalf("want Fail when extension missing, got %s", r.Severity)
+		t.Fatalf("want Fail on maintenance-DB/target divergence, got %s", r.Severity)
 	}
-	if len(r.Fix) == 0 || r.Fix[0] != "CREATE EXTENSION pg_stat_statements;" {
-		t.Errorf("expected CREATE EXTENSION fix, got %v", r.Fix)
+	if !strings.Contains(r.Detail, "maintenance database") || !strings.Contains(r.Detail, "target database") {
+		t.Errorf("expected a divergence-specific detail, got %q", r.Detail)
+	}
+	joined := strings.Join(r.Fix, " ")
+	if !strings.Contains(joined, "dbname=postgres") {
+		t.Errorf("expected a fix that creates the extension in the postgres DB, got %v", r.Fix)
+	}
+}
+
+func TestCheckExtension_MissingEverywhereFails(t *testing.T) {
+	// Not in the maintenance DB and not in the target DB -> Fail, fix points at
+	// the postgres maintenance DB.
+	r := CheckExtension(bg(), fakePreflightInspector{maintExtMissing: true, extMissing: true})
+	if r.Severity != Fail {
+		t.Fatalf("want Fail when extension missing everywhere, got %s", r.Severity)
+	}
+	if !strings.Contains(strings.Join(r.Fix, " "), "postgres") {
+		t.Errorf("expected the fix to reference the postgres maintenance DB, got %v", r.Fix)
 	}
 }
 

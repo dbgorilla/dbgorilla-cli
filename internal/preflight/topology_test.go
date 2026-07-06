@@ -12,16 +12,18 @@ import (
 // what it wants to steer. This keeps the happy-path callers terse while letting
 // other tests drive each error/degraded branch.
 type fakePreflightInspector struct {
-	summary       string            // Summary() override; "" -> "fake"
-	version       string            // ServerVersionNum() override; "" -> "160000"
-	versionErr    error             // ServerVersionNum() error
-	params        map[string]string // ShowParam() overrides by name
-	paramErr      error             // ShowParam() error (all names)
-	extMissing    bool              // HasExtension() -> false when true
-	hasExtErr     error             // HasExtension() error
-	canReadErr    error             // CanReadStats() error
-	unreadable    int               // UnreadableUserTables() count
-	unreadableErr error             // UnreadableUserTables() error
+	summary         string            // Summary() override; "" -> "fake"
+	version         string            // ServerVersionNum() override; "" -> "160000"
+	versionErr      error             // ServerVersionNum() error
+	params          map[string]string // ShowParam() overrides by name
+	paramErr        error             // ShowParam() error (all names)
+	extMissing      bool              // HasExtension() -> false when true
+	hasExtErr       error             // HasExtension() error
+	maintExtMissing bool              // MaintenanceDBHasExtension() -> false when true
+	maintExtErr     error             // MaintenanceDBHasExtension() error
+	canReadErr      error             // CanReadStats() error
+	unreadable      int               // UnreadableUserTables() count
+	unreadableErr   error             // UnreadableUserTables() error
 }
 
 func (f fakePreflightInspector) Summary() string {
@@ -61,6 +63,12 @@ func (f fakePreflightInspector) HasExtension(context.Context, string) (bool, err
 		return false, f.hasExtErr
 	}
 	return !f.extMissing, nil
+}
+func (f fakePreflightInspector) MaintenanceDBHasExtension(context.Context, string) (bool, error) {
+	if f.maintExtErr != nil {
+		return false, f.maintExtErr
+	}
+	return !f.maintExtMissing, nil
 }
 func (f fakePreflightInspector) CanReadStats(context.Context) error { return f.canReadErr }
 func (f fakePreflightInspector) UnreadableUserTables(context.Context) (int, error) {
