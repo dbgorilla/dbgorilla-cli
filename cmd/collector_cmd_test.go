@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
+	"github.com/dbgorilla/dbgorilla-cli/internal/preflight"
 	"github.com/spf13/cobra"
 )
 
@@ -125,6 +127,65 @@ func TestRunInstall_EarlyErrors(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "existing-agent") {
 			t.Errorf("error should name the existing agent: %v", err)
+		}
+	})
+}
+
+func TestRunStatus_WorkloadLine(t *testing.T) {
+	setup := func(t *testing.T) {
+		isolate(t)
+		cfg := collector.Build("a1", "t1",
+			collector.Target{Name: "Local", Host: "localhost", Port: 5433, Databases: []string{"appdb"}, User: "dbg_collector", SSLMode: "disable"},
+			collector.Endpoints{})
+		rendered, err := cfg.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := t.TempDir() + "/collector.toml"
+		if err := collector.WriteConfig(path, rendered); err != nil {
+			t.Fatal(err)
+		}
+		if err := collector.StoreSecrets("a1", "sekret", "dbpass"); err != nil {
+			t.Fatal(err)
+		}
+		if err := collector.SaveState(&collector.State{AgentID: "a1", ContainerName: "dbg-collector", ConfigPath: path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub := func(t *testing.T, res preflight.Result) {
+		orig := checkWorkload
+		checkWorkload = func(context.Context, string) preflight.Result { return res }
+		t.Cleanup(func() { checkWorkload = orig })
+	}
+
+	t.Run("capability present -> collecting", func(t *testing.T) {
+		setup(t)
+		stub(t, preflight.Result{Name: "workload", Severity: preflight.OK})
+		out := capture(t, func() {
+			if err := runStatus(baseCmd(), nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Workload:") || !strings.Contains(out, "collecting") {
+			t.Errorf("want a 'Workload: collecting' line:\n%s", out)
+		}
+	})
+
+	t.Run("capability missing -> NOT collecting + fix", func(t *testing.T) {
+		setup(t)
+		stub(t, preflight.Result{
+			Name:     "workload",
+			Severity: preflight.Fail,
+			Detail:   "not in the postgres maintenance database",
+			Fix:      []string{"psql -d postgres -c 'CREATE EXTENSION pg_stat_statements;'"},
+		})
+		out := capture(t, func() {
+			if err := runStatus(baseCmd(), nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "NOT collecting") || !strings.Contains(out, "CREATE EXTENSION") {
+			t.Errorf("want 'NOT collecting' + fix hint:\n%s", out)
 		}
 	})
 }

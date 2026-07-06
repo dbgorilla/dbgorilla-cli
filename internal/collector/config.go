@@ -169,6 +169,26 @@ func (c Config) Render() (string, error) {
 	return buf.String(), nil
 }
 
+// LoadConfig decodes an installed collector.toml back into a Config, so `dbg
+// collector status` can recover the monitored target's connection details
+// without re-prompting.
+func LoadConfig(path string) (Config, error) {
+	var c Config
+	_, err := toml.DecodeFile(path, &c)
+	return c, err
+}
+
+// DialHost reverses the container host rewrite for a HOST-side connection: a
+// config host of host.docker.internal (written so the in-container collector
+// can reach a DB on the host) maps back to localhost for this CLI process. Any
+// other host is returned unchanged.
+func DialHost(configHost string) string {
+	if strings.EqualFold(strings.Trim(configHost, "[]"), DockerHostInternal) {
+		return "localhost"
+	}
+	return configHost
+}
+
 // HostDial returns the host:port a process on the host (i.e. this CLI) uses to
 // reach the target, for the pre-install reachability check. This deliberately
 // uses the original loopback host, not the rewritten container host.

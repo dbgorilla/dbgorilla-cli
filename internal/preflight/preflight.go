@@ -94,6 +94,27 @@ func Run(ctx context.Context, dsn string) Report {
 	return RunWith(ctx, &pgxInspector{conn: conn, dsn: dsn})
 }
 
+// CheckWorkload opens a connection to dsn and returns ONLY the workload
+// (pg_stat_statements) capability check -- the `postgres` maintenance-DB probe
+// that determines whether query/workload data flows. It lets `dbg collector
+// status` answer "topology works but the Queries views are empty" without
+// running the full preflight. A connection failure degrades to a Warn so status
+// never hard-errors on a transiently-unreachable DB.
+func CheckWorkload(ctx context.Context, dsn string) Result {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return Result{
+			Name:     "workload",
+			Severity: Warn,
+			Detail:   fmt.Sprintf("could not connect to the database to check the workload capability: %v", err),
+		}
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	res := CheckExtension(ctx, &pgxInspector{conn: conn, dsn: dsn})
+	res.Name = "workload"
+	return res
+}
+
 // RunWith runs the checks against a given Inspector (for tests / reused conns).
 func RunWith(ctx context.Context, ins Inspector) Report {
 	results := []Result{{Name: "connect", Severity: OK, Detail: ins.Summary()}}

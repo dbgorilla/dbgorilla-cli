@@ -132,6 +132,17 @@ func TestCheckSharedPreload_NotLoaded(t *testing.T) {
 
 // --- CheckExtension -------------------------------------------------------
 
+func TestCheckWorkload_ConnectFailureWarns(t *testing.T) {
+	// Unreachable DB -> Warn (never a hard error), named "workload".
+	r := CheckWorkload(bg(), "postgres://u:p@127.0.0.1:1/none?sslmode=disable&connect_timeout=1")
+	if r.Severity != Warn {
+		t.Fatalf("want Warn on connect failure, got %s (%s)", r.Severity, r.Detail)
+	}
+	if r.Name != "workload" {
+		t.Errorf("want Name=workload, got %q", r.Name)
+	}
+}
+
 func TestMaintenanceDSN(t *testing.T) {
 	cases := map[string]string{
 		"postgres://u:p@h:5433/appdb?sslmode=disable": "postgres://u:p@h:5433/postgres?sslmode=disable",
