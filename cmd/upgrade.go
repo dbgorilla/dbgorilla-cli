@@ -20,7 +20,7 @@ var upgradeCmd = &cobra.Command{
 	Short: "Update dbgorilla to the latest version",
 	Long: `Updates the dbgorilla binary in place.
 
-If installed via Homebrew, runs ` + "`brew upgrade dbgorilla/tap/dbg`" + `.
+If installed via Homebrew, runs ` + "`brew upgrade dbgorilla/tap/dbgorilla`" + `.
 Otherwise, prints the right one-line command for your install method so
 you can run it. The CLI does NOT replace itself in place (security: the
 binary that just downloaded shouldn't decide it's safe to overwrite).`,
@@ -29,8 +29,8 @@ binary that just downloaded shouldn't decide it's safe to overwrite).`,
 
 func runUpgrade(_ *cobra.Command, _ []string) error {
 	if installedViaBrew() {
-		fmt.Println("Detected Homebrew install. Running: brew upgrade dbgorilla/tap/dbg")
-		c := execCommand("brew", "upgrade", "dbgorilla/tap/dbg")
+		fmt.Println("Detected Homebrew install. Running: brew upgrade dbgorilla/tap/dbgorilla")
+		c := execCommand("brew", "upgrade", "dbgorilla/tap/dbgorilla")
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		return c.Run()

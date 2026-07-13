@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"os"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -333,6 +336,31 @@ func TestRunUpgrade(t *testing.T) {
 		})
 		if !strings.Contains(out, "Detected Homebrew install") {
 			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("brew install targets the dbgorilla formula, not dbg", func(t *testing.T) {
+		// Pins the actual Homebrew formula name (`dbgorilla`, matching
+		// `brew install dbgorilla/tap/dbgorilla`). A prior version of this
+		// command ran `brew upgrade dbgorilla/tap/dbg`, which fails outright
+		// -- there is no `dbg` formula, only a `dbg` symlink installed by
+		// the `dbgorilla` formula.
+		isolate(t)
+		stubExecutable(t, "/opt/homebrew/bin/dbg")
+		orig := execCommand
+		var gotName string
+		var gotArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			gotName, gotArgs = name, args
+			return exec.Command(os.Args[0], "-test.run=TestHelperProcess", "--")
+		}
+		t.Cleanup(func() { execCommand = orig })
+		_ = capture(t, func() { _ = runUpgrade(nil, nil) })
+		if gotName != "brew" {
+			t.Errorf("command = %q, want brew", gotName)
+		}
+		if want := []string{"upgrade", "dbgorilla/tap/dbgorilla"}; !slices.Equal(gotArgs, want) {
+			t.Errorf("args = %v, want %v", gotArgs, want)
 		}
 	})
 }
