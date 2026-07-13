@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -38,6 +39,25 @@ func withStdin(t *testing.T, content string) {
 	})
 }
 
+// withBlockingStdin points os.Stdin at the read end of a pipe whose write end
+// is never written to or closed during the test -- so a read against it
+// blocks indefinitely, exactly like a real interactive prompt waiting on a
+// human. Used to exercise ctx cancellation instead of a real read completing.
+func withBlockingStdin(t *testing.T) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = old
+		_ = w.Close()
+		_ = r.Close()
+	})
+}
+
 // --- PromptCredentials -----------------------------------------------------
 
 func TestPromptCredentials_AllPrefilledReadsNothing(t *testing.T) {
@@ -45,7 +65,7 @@ func TestPromptCredentials_AllPrefilledReadsNothing(t *testing.T) {
 	// still succeed against the inherited fd, so guard by using empty stdin.
 	withStdin(t, "")
 	in := PasswordCredentials{Tenant: "acme", Account: "sysop", Password: "hunter2"}
-	got, err := PromptCredentials(in)
+	got, err := PromptCredentials(context.Background(), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,7 +76,7 @@ func TestPromptCredentials_AllPrefilledReadsNothing(t *testing.T) {
 
 func TestPromptCredentials_ReadsTenantAndAccountFromStdin(t *testing.T) {
 	withStdin(t, "acme\nsysop\n")
-	got, err := PromptCredentials(PasswordCredentials{Password: "pw"})
+	got, err := PromptCredentials(context.Background(), PasswordCredentials{Password: "pw"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -68,7 +88,7 @@ func TestPromptCredentials_ReadsTenantAndAccountFromStdin(t *testing.T) {
 func TestPromptCredentials_ReadsPasswordFromStdin(t *testing.T) {
 	// Only the password is read here, so a single reader touches stdin.
 	withStdin(t, "s3cret\n")
-	got, err := PromptCredentials(PasswordCredentials{Tenant: "acme", Account: "sysop"})
+	got, err := PromptCredentials(context.Background(), PasswordCredentials{Tenant: "acme", Account: "sysop"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -81,7 +101,7 @@ func TestPromptCredentials_MissingFieldsError(t *testing.T) {
 	// Password prefilled (so readPassword is skipped), but tenant/account read
 	// back empty from blank lines -> the "all required" validation fires.
 	withStdin(t, "\n\n")
-	_, err := PromptCredentials(PasswordCredentials{Password: "pw"})
+	_, err := PromptCredentials(context.Background(), PasswordCredentials{Password: "pw"})
 	if err == nil || !strings.Contains(err.Error(), "all required") {
 		t.Fatalf("err = %v, want 'all required'", err)
 	}
@@ -91,7 +111,7 @@ func TestPromptCredentials_EmptyStdinAllFields(t *testing.T) {
 	// Nothing prefilled and empty stdin: the tenant prompt hits EOF (returns
 	// ""), and the flow ultimately errors out.
 	withStdin(t, "")
-	if _, err := PromptCredentials(PasswordCredentials{}); err == nil {
+	if _, err := PromptCredentials(context.Background(), PasswordCredentials{}); err == nil {
 		t.Fatal("expected error with no input available")
 	}
 }
@@ -100,9 +120,31 @@ func TestPromptCredentials_PasswordReadErrorPropagates(t *testing.T) {
 	// Tenant/account prefilled; empty stdin -> readPassword hits EOF and the
 	// error must propagate out of PromptCredentials.
 	withStdin(t, "")
-	_, err := PromptCredentials(PasswordCredentials{Tenant: "acme", Account: "sysop"})
+	_, err := PromptCredentials(context.Background(), PasswordCredentials{Tenant: "acme", Account: "sysop"})
 	if err == nil {
 		t.Fatal("expected error when password read hits EOF, got nil")
+	}
+}
+
+// TestPromptCredentials_CtxCancelDuringPrompt pins the actual bug fix: Ctrl-C
+// (modeled here as ctx cancellation, exactly as `dbg login` wires SIGINT via
+// signal.NotifyContext) must abort a blocked prompt promptly instead of the
+// blocking stdin read silently swallowing it forever.
+func TestPromptCredentials_CtxCancelDuringPrompt(t *testing.T) {
+	withBlockingStdin(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := PromptCredentials(ctx, PasswordCredentials{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("PromptCredentials took %v to return after cancellation, want prompt return", elapsed)
 	}
 }
 

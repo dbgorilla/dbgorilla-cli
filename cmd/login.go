@@ -79,7 +79,7 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	case "password":
 		tenant, _ := cmd.Flags().GetString("tenant")
 		account, _ := cmd.Flags().GetString("account")
-		creds, err := auth.PromptCredentials(auth.PasswordCredentials{Tenant: tenant, Account: account})
+		creds, err := auth.PromptCredentials(ctx, auth.PasswordCredentials{Tenant: tenant, Account: account})
 		if err != nil {
 			return err
 		}
