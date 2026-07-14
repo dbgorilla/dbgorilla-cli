@@ -16,6 +16,7 @@ import (
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
 	"github.com/dbgorilla/dbgorilla-cli/internal/preflight"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -133,12 +134,12 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	// Reachability preflight from the host (the CLI runs on the host, so the
 	// original loopback host is correct here, not the container rewrite).
 	if err := checkReachable(target.HostDial()); err != nil {
-		fmt.Printf("⚠  %s\n", err)
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s", err)))
 		if !confirm(cmd, "Continue anyway?") {
 			return errors.New("aborted")
 		}
 	} else {
-		fmt.Printf("✓ Database reachable at %s\n", target.HostDial())
+		fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", target.HostDial())))
 	}
 
 	// Deep DB preflight (read-only) before we provision anything, so a
@@ -149,7 +150,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		if force, _ := cmd.Flags().GetBool("force"); !force {
 			return errors.New("database preflight failed; fix the items above, or rerun with --force")
 		}
-		fmt.Println("Continuing despite preflight failures (--force).")
+		fmt.Println(style.Warn("Continuing despite preflight failures (--force)."))
 	}
 
 	// Resolve + validate the optional CA cert before minting (fail fast).
@@ -159,12 +160,12 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Mint the collector identity. The user token authorizes the mint.
-	fmt.Println("Provisioning collector identity...")
+	fmt.Println(style.Info("Provisioning collector identity..."))
 	creds, err := client.ProvisionCollector()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ Collector provisioned (agent %s, tenant %s)\n", creds.AgentID, creds.TenantID)
+	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
 	// Render config + materialize secrets. Endpoints come from the mint
 	// response (non-prod deployments), with explicit --*-url flags overriding.
@@ -186,14 +187,14 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if collector.IsLoopback(target.Host) {
-		fmt.Printf("✓ Rewrote %s -> %s for in-container access\n", target.Host, collector.DockerHostInternal)
+		fmt.Println(style.Success(fmt.Sprintf("✓ Rewrote %s -> %s for in-container access", target.Host, collector.DockerHostInternal)))
 	}
-	fmt.Printf("✓ Wrote config: %s\n", configPath)
+	fmt.Println(style.Success(fmt.Sprintf("✓ Wrote config: %s", configPath)))
 
 	// Resolve the collector image: explicit --image wins; else the version the
 	// deployment blesses (preferred_collector_version); else the CLI default.
 	image, imageSource := resolveImage(cmd, creds)
-	fmt.Printf("✓ Collector image: %s (%s)\n", image, imageSource)
+	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
 	// Pin to an immutable digest before running, so a deployment-blessed version
 	// (a bare tag) is as reproducible and tamper-evident as the hard-pinned
@@ -203,7 +204,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("resolving collector image digest: %w", err)
 	}
 	if pinned != image {
-		fmt.Printf("✓ Pinned to digest: %s\n", pinned)
+		fmt.Println(style.Success(fmt.Sprintf("✓ Pinned to digest: %s", pinned)))
 	}
 	image = pinned
 
@@ -215,12 +216,12 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		EnvFilePath: envPath,
 		CACertPath:  caCert,
 	}
-	fmt.Printf("Starting collector container (%s)...\n", image)
+	fmt.Println(style.Info(fmt.Sprintf("Starting collector container (%s)...", image)))
 	if err := runContainer(runner); err != nil {
 		// Roll back the just-minted identity so a failed start never orphans it.
-		fmt.Println("Container failed to start; rolling back the provisioned identity...")
+		fmt.Println(style.Warn("Container failed to start; rolling back the provisioned identity..."))
 		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
-			fmt.Printf("⚠  could not auto-deprovision %s: %v (remove it from the console)\n", creds.AgentID, derr)
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
 		}
 		collector.ClearSecrets(creds.AgentID)
 		_ = os.Remove(configPath)
@@ -244,7 +245,7 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if err := collector.SaveState(state); err != nil {
 		return err
 	}
-	fmt.Printf("✓ Container started: %s\n", runner.Name)
+	fmt.Println(style.Success(fmt.Sprintf("✓ Container started: %s", runner.Name)))
 
 	// Verify connection (best-effort; not fatal).
 	verifyConnection(client, creds.AgentID, caCert)
@@ -286,17 +287,17 @@ func dryRunInstall(cmd *cobra.Command) error {
 		CACertPath:  caCert,
 	}
 
-	fmt.Println("DRY RUN — nothing was provisioned, written, or started.")
+	fmt.Println(style.Info("DRY RUN — nothing was provisioned, written, or started."))
 	fmt.Println()
 	if collector.IsLoopback(target.Host) {
-		fmt.Printf("Would rewrite %s -> %s for in-container access.\n", target.Host, collector.DockerHostInternal)
+		fmt.Println(style.Info(fmt.Sprintf("Would rewrite %s -> %s for in-container access.", target.Host, collector.DockerHostInternal)))
 	}
-	fmt.Printf("Would write config:   %s\n", configPath)
-	fmt.Printf("Would write env-file: %s (0600; %s, %s)\n", envPath, collector.SecretEnv, collector.DBPasswordEnv)
+	fmt.Println(style.Info(fmt.Sprintf("Would write config:   %s", configPath)))
+	fmt.Println(style.Info(fmt.Sprintf("Would write env-file: %s (0600; %s, %s)", envPath, collector.SecretEnv, collector.DBPasswordEnv)))
 	fmt.Println()
-	fmt.Println("--- collector.toml ---")
+	fmt.Println(style.Info("--- collector.toml ---"))
 	fmt.Print(rendered)
-	fmt.Println("--- docker command ---")
+	fmt.Println(style.Info("--- docker command ---"))
 	fmt.Println(runner.RunCommandString())
 	return nil
 }
@@ -315,7 +316,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if st == nil {
-		fmt.Println("No collector installed. Run: dbg collector install")
+		fmt.Println(style.Warn("No collector installed. Run: dbg collector install"))
 		return nil
 	}
 
@@ -329,11 +330,11 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("Config:     %s\n", st.ConfigPath)
 	switch {
 	case !exists:
-		fmt.Println("Container:  missing (run `dbg collector install` again or `dbg collector start`)")
+		fmt.Println(style.Error("Container:  missing (run `dbg collector install` again or `dbg collector start`)"))
 	case running:
-		fmt.Println("Container:  running")
+		fmt.Println(style.Success("Container:  running"))
 	default:
-		fmt.Println("Container:  stopped (run `dbg collector start`)")
+		fmt.Println(style.Warn("Container:  stopped (run `dbg collector start`)"))
 	}
 
 	// Live control-plane status (best-effort).
@@ -342,11 +343,11 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		cs, err := client.FetchCollectorStatus(st.AgentID)
 		switch {
 		case err != nil:
-			fmt.Printf("Connection: unknown (%v)\n", err)
+			fmt.Println(style.Warn(fmt.Sprintf("Connection: unknown (%v)", err)))
 		case cs == nil:
-			fmt.Println("Connection: not yet seen by control plane")
+			fmt.Println(style.Warn("Connection: not yet seen by control plane"))
 		default:
-			fmt.Printf("Connection: %s\n", orUnknown(cs.Status))
+			fmt.Println(style.Success(fmt.Sprintf("Connection: %s", orUnknown(cs.Status))))
 		}
 	}
 
@@ -387,11 +388,11 @@ func printWorkloadStatus(ctx context.Context, st *collector.State) {
 	res := checkWorkload(ctx, buildDSN(target, dbPassword))
 	switch res.Severity {
 	case preflight.OK:
-		fmt.Println("Workload:   collecting (pg_stat_statements in the postgres maintenance DB)")
+		fmt.Println(style.Success("Workload:   collecting (pg_stat_statements in the postgres maintenance DB)"))
 	case preflight.Warn:
-		fmt.Printf("Workload:   unknown (%s)\n", res.Detail)
+		fmt.Println(style.Warn(fmt.Sprintf("Workload:   unknown (%s)", res.Detail)))
 	default:
-		fmt.Printf("Workload:   NOT collecting -- %s\n", res.Detail)
+		fmt.Println(style.Error(fmt.Sprintf("Workload:   NOT collecting -- %s", res.Detail)))
 		for _, f := range res.Fix {
 			fmt.Printf("            %s\n", f)
 		}
@@ -429,7 +430,7 @@ func runList(cmd *cobra.Command, _ []string) error {
 		localAgent = st.AgentID
 	}
 
-	fmt.Printf("%-38s  %-10s  %s\n", "AGENT ID", "STATUS", "DETAIL")
+	fmt.Println(style.Info(fmt.Sprintf("%-38s  %-10s  %s", "AGENT ID", "STATUS", "DETAIL")))
 	for _, it := range items {
 		id := firstString(it, "agent_id", "id", "agentId")
 		status := firstString(it, "status", "state", "connection_status")
@@ -482,7 +483,7 @@ var startCmd = &cobra.Command{
 		if err := runner.Start(); err != nil {
 			return err
 		}
-		fmt.Println("✓ Started")
+		fmt.Println(style.Success("✓ Started"))
 		return nil
 	},
 }
@@ -498,7 +499,7 @@ var stopCmd = &cobra.Command{
 		if err := runner.Stop(); err != nil {
 			return err
 		}
-		fmt.Println("✓ Stopped")
+		fmt.Println(style.Success("✓ Stopped"))
 		return nil
 	},
 }
@@ -514,7 +515,7 @@ var restartCmd = &cobra.Command{
 		if err := runner.Restart(); err != nil {
 			return err
 		}
-		fmt.Println("✓ Restarted")
+		fmt.Println(style.Success("✓ Restarted"))
 		return nil
 	},
 }
@@ -533,7 +534,7 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if st == nil {
-		fmt.Println("No collector installed.")
+		fmt.Println(style.Warn("No collector installed."))
 		return nil
 	}
 	if !confirm(cmd, fmt.Sprintf("Remove collector %s and deprovision its identity?", st.AgentID)) {
@@ -543,9 +544,9 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	// Stop+remove the container (best-effort).
 	runner := collector.Runner{Name: st.ContainerName}
 	if err := runner.Remove(); err != nil {
-		fmt.Printf("⚠  could not remove container: %v\n", err)
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove container: %v", err)))
 	} else {
-		fmt.Println("✓ Container removed")
+		fmt.Println(style.Success("✓ Container removed"))
 	}
 
 	// Deprovision the identity on the backend.
@@ -553,13 +554,13 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	if _, err := requireLogin(); err == nil {
 		client := newAPIClient(cmd)
 		if err := client.DeleteCollector(st.AgentID); err != nil {
-			fmt.Printf("⚠  could not deprovision identity: %v\n", err)
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not deprovision identity: %v", err)))
 		} else {
-			fmt.Println("✓ Identity deprovisioned")
+			fmt.Println(style.Success("✓ Identity deprovisioned"))
 			deprovisioned = true
 		}
 	} else {
-		fmt.Println("⚠  not logged in; cannot deprovision the identity.")
+		fmt.Println(style.Warn("⚠  not logged in; cannot deprovision the identity."))
 	}
 
 	// Keep local state if deprovision did not succeed, so the user can retry
@@ -576,7 +577,7 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	_ = os.Remove(st.EnvFilePath)
 	_ = os.Remove(st.ConfigPath)
 	_ = collector.RemoveState()
-	fmt.Println("✓ Local config and secrets cleared")
+	fmt.Println(style.Success("✓ Local config and secrets cleared"))
 	return nil
 }
 
@@ -624,12 +625,12 @@ func buildDSN(t collector.Target, password string) string {
 // printPreflight renders a preflight report with severity markers + fixes.
 func printPreflight(rep preflight.Report) {
 	for _, r := range rep.Results {
-		mark := "✓"
+		mark := style.Success("✓")
 		switch r.Severity {
 		case preflight.Warn:
-			mark = "⚠"
+			mark = style.Warn("⚠")
 		case preflight.Fail:
-			mark = "✗"
+			mark = style.Error("✗")
 		}
 		fmt.Printf("%s %s — %s\n", mark, r.Name, r.Detail)
 		for _, f := range r.Fix {
@@ -801,19 +802,20 @@ func checkReachable(addr string) error {
 // verifyConnection polls the control plane briefly for the collector to come
 // online. Non-fatal: a slow first connect is normal.
 func verifyConnection(client *api.Client, agentID, caCert string) {
-	fmt.Print("Verifying connection")
+	fmt.Print(style.Info("Verifying connection"))
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		fmt.Print(".")
 		cs, err := client.FetchCollectorStatus(agentID)
 		if err == nil && cs != nil && isConnected(cs.Status) {
-			fmt.Printf("\n✓ Collector connected (%s)\n", cs.Status)
+			fmt.Println()
+			fmt.Println(style.Success(fmt.Sprintf("✓ Collector connected (%s)", cs.Status)))
 			return
 		}
 		time.Sleep(3 * time.Second)
 	}
 	fmt.Println()
-	fmt.Println("⚠  Not connected yet — this can take a moment on first start.")
+	fmt.Println(style.Warn("⚠  Not connected yet — this can take a moment on first start."))
 	fmt.Println("   Check `dbg collector status` and `dbg collector logs -f`.")
 	if caCert == "" {
 		fmt.Println("   If your deployment uses an internal/private CA, re-run with")

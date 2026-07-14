@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -56,7 +57,7 @@ var configSetCmd = &cobra.Command{
 		if err := cfg.SaveUser(); err != nil {
 			return fmt.Errorf("cannot save config: %w", err)
 		}
-		fmt.Printf("Set %s = %s\n", key, val)
+		fmt.Println(style.Success(fmt.Sprintf("Set %s = %s", key, val)))
 		return nil
 	},
 }
@@ -117,7 +118,7 @@ var configUnsetCmd = &cobra.Command{
 		if err := cfg.SaveUser(); err != nil {
 			return fmt.Errorf("cannot save config: %w", err)
 		}
-		fmt.Printf("Unset %s\n", key)
+		fmt.Println(style.Success(fmt.Sprintf("Unset %s", key)))
 		return nil
 	},
 }

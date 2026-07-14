@@ -14,6 +14,7 @@ import (
 	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
 	"github.com/dbgorilla/dbgorilla-cli/internal/ide"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -81,7 +82,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	flagURL, _ := cmd.Flags().GetString("api-url")
 	apiURL, source := config.ResolveAPIURL(flagURL)
 
-	fmt.Println("Checking DBGorilla setup...")
+	fmt.Println(style.Info("Checking DBGorilla setup..."))
 	fmt.Println()
 	allOK := true
 
@@ -176,17 +177,17 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 
 	fmt.Println()
 	if allOK {
-		fmt.Println("All checks passed.")
+		fmt.Println(style.Success("All checks passed."))
 		return nil
 	}
-	fmt.Println("Some checks failed. See above for details.")
+	fmt.Println(style.Error("Some checks failed. See above for details."))
 	return errDoctorFailed
 }
 
 func printCheck(name string, ok bool, detail string) {
-	tag := "FAIL"
+	tag := style.Error("FAIL")
 	if ok {
-		tag = " OK "
+		tag = style.Success(" OK ")
 	}
 	fmt.Printf("  [%s] %-18s %s\n", tag, name, detail)
 }

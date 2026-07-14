@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -56,9 +57,9 @@ func runWhoami(cmd *cobra.Command, _ []string) error {
 	identity := firstNonEmpty(u.Email, u.Username)
 	org := firstNonEmpty(u.Tenant, u.TenantID)
 	if u.UserID != "" {
-		fmt.Printf("%s  (org: %s, user-id: %s)\n", identity, org, u.UserID)
+		fmt.Println(style.Success(fmt.Sprintf("%s  (org: %s, user-id: %s)", identity, org, u.UserID)))
 	} else {
-		fmt.Printf("%s  (org: %s)\n", identity, org)
+		fmt.Println(style.Success(fmt.Sprintf("%s  (org: %s)", identity, org)))
 	}
 	return nil
 }

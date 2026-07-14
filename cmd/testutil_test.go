@@ -86,12 +86,15 @@ func writeTokens(t *testing.T) {
 	}
 }
 
-// baseCmd builds a throwaway command carrying just the two persistent flags
-// (--api-url / --insecure) every command inherits from the real root.
+// baseCmd builds a throwaway command carrying just the persistent flags
+// every command inherits from the real root (--api-url / --insecure /
+// --color / --no-color).
 func baseCmd() *cobra.Command {
 	c := &cobra.Command{}
 	c.Flags().String("api-url", "", "")
 	c.Flags().Bool("insecure", false, "")
+	c.Flags().Bool("color", false, "")
+	c.Flags().Bool("no-color", false, "")
 	return c
 }
 

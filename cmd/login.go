@@ -12,6 +12,7 @@ import (
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -51,9 +52,9 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	// line), print a visible warning so the user doesn't forget they're
 	// silently skipping TLS verification across every call.
 	if insecure && !insecureFlagSet {
-		fmt.Fprintln(os.Stderr,
+		fmt.Fprintln(os.Stderr, style.Warn(
 			"warning: TLS verification disabled via persisted `insecure = true` in config.\n"+
-				"         Run `dbgorilla config unset insecure` to turn off, or pass --insecure=false to override.")
+				"         Run `dbgorilla config unset insecure` to turn off, or pass --insecure=false to override."))
 	}
 
 	// Honor Ctrl-C through the device-flow polling loop.
@@ -72,7 +73,7 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 
 	switch mode {
 	case "sso":
-		fmt.Println("Signing in via SSO (Keycloak device flow)...")
+		fmt.Println(style.Info("Signing in via SSO (Keycloak device flow)..."))
 		if _, err := auth.LoginDevice(ctx, apiURL, insecure); err != nil {
 			return err
 		}
@@ -103,7 +104,8 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr, "Signed in.")
 		return nil
 	}
-	fmt.Printf("✓ Signed in as %s  (org: %s)\n", firstNonEmpty(u.Email, u.Username), firstNonEmpty(u.Tenant, u.TenantID))
+	fmt.Printf("%s\n", style.Success(fmt.Sprintf("✓ Signed in as %s  (org: %s)",
+		firstNonEmpty(u.Email, u.Username), firstNonEmpty(u.Tenant, u.TenantID))))
 
 	// Persist URL + insecure so subsequent commands don't need the flags.
 	// This is the DevUX fix for "I logged in but still have to specify

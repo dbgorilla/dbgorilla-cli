@@ -34,6 +34,22 @@ Produces the `dbgorilla` binary (symlink it to `dbg` yourself if you want the sh
 
 Download a binary from the [Releases page](https://github.com/dbgorilla/dbgorilla-cli/releases) and put it on your `PATH`.
 
+## Shell completion
+
+Homebrew installs set up tab completion for bash/zsh/fish automatically — nothing to do.
+
+For Go install / manual installs, generate it yourself:
+
+```sh
+# zsh, current shell only
+source <(dbgorilla completion zsh)
+
+# zsh, every new shell (macOS/Homebrew paths shown; see `dbgorilla completion zsh --help` for Linux/bash/fish)
+dbgorilla completion zsh > $(brew --prefix)/share/zsh/site-functions/_dbgorilla
+```
+
+`dbgorilla completion --help` lists bash, zsh, fish, and powershell, each with shell-specific setup instructions.
+
 ## Quick start
 
 ```sh
@@ -88,6 +104,7 @@ JSONC files (with `//` comments) are refused rather than overwritten.
 | `dbg config get <key>` | Show the resolved value and where it came from. |
 | `dbg config unset <key>` | Clear a key from the user config. |
 | `dbg version` | Print version info. |
+| `dbg completion <shell>` | Print a tab-completion script. See [Shell completion](#shell-completion). |
 
 ## Centralized Claude allowlist
 

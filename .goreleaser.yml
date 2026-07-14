@@ -107,3 +107,9 @@ brews:
     install: |
       bin.install Dir["dbg-*"].first => "dbgorilla"
       bin.install_symlink "dbgorilla" => "dbg"
+      # Cobra's built-in `dbgorilla completion <shell>` already emits a valid
+      # script for each shell; this Homebrew helper runs it and installs the
+      # output to the right completions directory (bash/zsh/fish) so tab
+      # completion works immediately after `brew install`, with no manual
+      # `dbgorilla completion zsh > ...` step required.
+      generate_completions_from_executable(bin/"dbgorilla", "completion")

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 )
 
 func TestRequireAPIURL(t *testing.T) {
@@ -152,6 +153,35 @@ func TestExecute_Smoke(t *testing.T) {
 		})
 		if !strings.Contains(out, "Error:") {
 			t.Errorf("Execute should print the error, got: %q", out)
+		}
+	})
+}
+
+func TestResolveColor(t *testing.T) {
+	t.Run("explicit --no-color wins over --color", func(t *testing.T) {
+		c := baseCmd()
+		mustSet(t, c, "no-color", "true")
+		mustSet(t, c, "color", "true")
+		if resolveColor(c) {
+			t.Error("--no-color must win even if --color was also passed")
+		}
+	})
+
+	t.Run("explicit --color forces on", func(t *testing.T) {
+		c := baseCmd()
+		mustSet(t, c, "color", "true")
+		if !resolveColor(c) {
+			t.Error("--color should force color on")
+		}
+	})
+
+	t.Run("neither flag set falls back to auto-detect", func(t *testing.T) {
+		// baseCmd's flags default to false and unchanged -- resolveColor
+		// should fall through to style.Detect() rather than treating the
+		// zero-value `false` on --color as an explicit --color=false.
+		c := baseCmd()
+		if resolveColor(c) != style.Detect() {
+			t.Error("with no flags set, resolveColor should equal style.Detect()")
 		}
 	})
 }

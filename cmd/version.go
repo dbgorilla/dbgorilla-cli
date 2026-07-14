@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -15,6 +16,6 @@ var versionCmd = &cobra.Command{
 	Short: "Print the CLI version",
 	Run: func(_ *cobra.Command, _ []string) {
 		v, c, d := resolveVersion()
-		fmt.Printf("dbgorilla version %s (commit %s, built %s)\n", v, c, d)
+		fmt.Printf("dbgorilla version %s (commit %s, built %s)\n", style.Info(v), c, d)
 	},
 }

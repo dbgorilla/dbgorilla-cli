@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -18,7 +19,7 @@ var logoutCmd = &cobra.Command{
 		if err := auth.ClearTokens(); err != nil {
 			return fmt.Errorf("failed to clear credentials: %w", err)
 		}
-		fmt.Println("Signed out.")
+		fmt.Println(style.Success("Signed out."))
 		return nil
 	},
 }

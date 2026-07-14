@@ -10,6 +10,7 @@ import (
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/ide"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -143,7 +144,8 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		// Hint-only adapters (Claude Desktop): print instructions and move on.
 		if h, ok := adapter.(ide.Hinter); ok {
 			if _, isWriter := adapter.(ide.Writer); !isWriter {
-				fmt.Printf("\n--- %s (manual setup) ---\n", adapter.Name())
+				fmt.Println()
+				fmt.Println(style.Info(fmt.Sprintf("--- %s (manual setup) ---", adapter.Name())))
 				fmt.Println(h.Hint(mcpURL))
 				hinted++
 				continue
@@ -154,17 +156,20 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		if !ok {
 			// Adapter is neither Writer nor Hinter -- shouldn't happen, but
 			// don't crash.
-			fmt.Printf("\n--- %s ---\nNo setup path implemented; skipping.\n", adapter.Name())
+			fmt.Println()
+			fmt.Println(style.Info(fmt.Sprintf("--- %s ---", adapter.Name())))
+			fmt.Println("No setup path implemented; skipping.")
 			continue
 		}
 
-		fmt.Printf("\n--- %s ---\n", adapter.Name())
+		fmt.Println()
+		fmt.Println(style.Info(fmt.Sprintf("--- %s ---", adapter.Name())))
 
 		scope := pickScope(writer, scopeOverride)
 
 		if printConfig {
 			if err := emitPrintConfig(writer, mcpURL, mcpKey); err != nil {
-				fmt.Printf("error: %v\n", err)
+				fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
 				failed++
 			}
 			continue
@@ -175,16 +180,16 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		if writer.Slug() == "claude-code" && !noClaudeCLI {
 			if _, lookErr := lookPath("claude"); lookErr == nil {
 				if dryRun {
-					fmt.Printf("Would run: claude mcp add (scope=%s, name=dbgorilla)\n", scope)
+					fmt.Println(style.Info(fmt.Sprintf("Would run: claude mcp add (scope=%s, name=dbgorilla)", scope)))
 					configured++
 					continue
 				}
 				if err := claudeMCPAdd(mcpURL, mcpKey, string(scope)); err != nil {
 					failed++
-					fmt.Printf("error: %v\n", interpretClaudeError(err, apiURL))
+					fmt.Println(style.Error(fmt.Sprintf("error: %v", interpretClaudeError(err, apiURL))))
 					continue
 				}
-				fmt.Println("✓ Registered via `claude mcp add`")
+				fmt.Println(style.Success("✓ Registered via `claude mcp add`"))
 				configured++
 				continue
 			}
@@ -194,12 +199,12 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		path, err := writer.ConfigPath(scope)
 		if err != nil {
 			failed++
-			fmt.Printf("error resolving config path: %v\n", err)
+			fmt.Println(style.Error(fmt.Sprintf("error resolving config path: %v", err)))
 			continue
 		}
 
 		if dryRun {
-			fmt.Printf("Would write MCP entry to: %s (scope=%s)\n", path, scope)
+			fmt.Println(style.Info(fmt.Sprintf("Would write MCP entry to: %s (scope=%s)", path, scope)))
 			configured++
 			continue
 		}
@@ -208,24 +213,24 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			failed++
 			if errors.Is(err, ide.ErrJSONCRefused) {
-				fmt.Printf("Refused to overwrite JSONC config at %s.\n", path)
+				fmt.Println(style.Warn(fmt.Sprintf("Refused to overwrite JSONC config at %s.", path)))
 				fmt.Println("Run `dbgorilla setup-ide --print-config --client " + writer.Slug() +
 					"` and paste the output into the file manually.")
 				continue
 			}
-			fmt.Printf("error: %v\n", err)
+			fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
 			continue
 		}
 		switch {
 		case res.NoOp:
 			fmt.Printf("Up to date: %s\n", res.Path)
 		case res.Updated:
-			fmt.Printf("✓ Updated existing dbgorilla entry: %s\n", res.Path)
+			fmt.Println(style.Success(fmt.Sprintf("✓ Updated existing dbgorilla entry: %s", res.Path)))
 			fmt.Printf("  Backup: %s\n", res.BackupPath)
 		case res.Created:
-			fmt.Printf("✓ Created %s\n", res.Path)
+			fmt.Println(style.Success(fmt.Sprintf("✓ Created %s", res.Path)))
 		default:
-			fmt.Printf("✓ Merged dbgorilla entry into %s\n", res.Path)
+			fmt.Println(style.Success(fmt.Sprintf("✓ Merged dbgorilla entry into %s", res.Path)))
 			if res.BackupPath != "" {
 				fmt.Printf("  Backup: %s\n", res.BackupPath)
 			}
@@ -234,15 +239,20 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Println()
-	fmt.Printf("Done. Configured: %d, Hinted: %d, Failed: %d.\n", configured, hinted, failed)
+	summary := fmt.Sprintf("Done. Configured: %d, Hinted: %d, Failed: %d.", configured, hinted, failed)
+	if failed > 0 {
+		fmt.Println(style.Error(summary))
+	} else {
+		fmt.Println(style.Success(summary))
+	}
 
 	// TLS warning shown once at the end if applicable.
 	if resolveInsecure(cmd) {
 		fmt.Println()
-		fmt.Println("⚠  Your deployment uses an internal certificate.")
-		fmt.Println("   Node-based clients (Claude Code, opencode) may reject the MCP")
-		fmt.Println("   connection without NODE_EXTRA_CA_CERTS set:")
-		fmt.Println("     export NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem")
+		fmt.Println(style.Warn("⚠  Your deployment uses an internal certificate."))
+		fmt.Println(style.Warn("   Node-based clients (Claude Code, opencode) may reject the MCP"))
+		fmt.Println(style.Warn("   connection without NODE_EXTRA_CA_CERTS set:"))
+		fmt.Println(style.Warn("     export NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem"))
 	}
 
 	if failed > 0 {
@@ -324,12 +334,12 @@ func emitPrintConfig(w ide.Writer, mcpURL, apiKey string) error {
 // printClientList shows every registered client, whether it's detected,
 // and what scopes/paths it would target.
 func printClientList() {
-	fmt.Println("Supported MCP clients:")
+	fmt.Println(style.Info("Supported MCP clients:"))
 	fmt.Println()
 	for _, a := range ide.Registry {
 		mark := " "
 		if a.Detect() {
-			mark = "✓"
+			mark = style.Success("✓")
 		}
 		role := "writer"
 		if _, isWriter := a.(ide.Writer); !isWriter {
@@ -346,7 +356,7 @@ func printClientList() {
 		}
 	}
 	fmt.Println()
-	fmt.Println("[✓] = detected on this system")
+	fmt.Println("[" + style.Success("✓") + "] = detected on this system")
 }
 
 // claudeMCPAdd shells out to `claude mcp add` with the right scope flag.
@@ -434,14 +444,14 @@ func validScope(s string) bool {
 // console at app.claude.com. Self-contained; no auth required.
 func printAdminAllowlist(apiURL string) {
 	mcpURL := strings.TrimRight(apiURL, "/") + "/mcp/"
-	fmt.Println("To allowlist DBGorilla in your Claude admin console:")
+	fmt.Println(style.Info("To allowlist DBGorilla in your Claude admin console:"))
 	fmt.Println()
 	fmt.Printf("  Server name:  %s\n", ide.MCPServerName)
 	fmt.Printf("  Server URL:   %s\n", mcpURL)
 	fmt.Println("  Transport:    HTTP")
 	fmt.Println("  Auth header:  Authorization: Bearer <each-developer's-API-key>")
 	fmt.Println()
-	fmt.Println("Steps for your Claude admin:")
+	fmt.Println(style.Info("Steps for your Claude admin:"))
 	fmt.Println("  1. Sign in to https://app.claude.com/admin")
 	fmt.Println("  2. Settings → Code → MCP servers → Allowed servers → + Add")
 	fmt.Println("  3. Paste the values above")
