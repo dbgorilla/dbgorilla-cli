@@ -27,7 +27,9 @@ concurrency:
 
 jobs:
   cover:
-    runs-on: ubuntu-latest
+    # Private-only workflow (scrubbed from the public mirror), so a straight
+    # flip to the self-hosted ARC pool is safe.
+    runs-on: fast-pass-v3
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0

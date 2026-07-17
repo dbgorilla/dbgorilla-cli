@@ -16,7 +16,9 @@ concurrency:
 jobs:
   golangci:
     name: golangci-lint
-    runs-on: ubuntu-latest
+    # Self-hosted ARC pool on the private repo; ubuntu-latest on the public
+    # mirror (no self-hosted runners there).
+    runs-on: ${{ github.event.repository.private && 'fast-pass-v3' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
@@ -31,7 +33,9 @@ jobs:
 
   gofmt:
     name: gofmt
-    runs-on: ubuntu-latest
+    # Self-hosted ARC pool on the private repo; ubuntu-latest on the public
+    # mirror (no self-hosted runners there).
+    runs-on: ${{ github.event.repository.private && 'fast-pass-v3' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
