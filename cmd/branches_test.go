@@ -118,19 +118,19 @@ func TestRunUninstall_DeprovisionFailureKeepsState(t *testing.T) {
 	}
 }
 
-// --- endpointsFor: keycloak + opamp overrides ------------------------------
+// --- endpointsFor: auth + opamp overrides ----------------------------------
 
 func TestEndpointsFor_AllOverrides(t *testing.T) {
 	c := endpointFlagCmd()
-	_ = c.Flags().Set("keycloak-url", "https://kc.override")
+	_ = c.Flags().Set("auth-url", "https://auth.override")
 	_ = c.Flags().Set("otlp-url", "https://otlp.override")
 	_ = c.Flags().Set("opamp-url", "https://opamp.override")
 	e := endpointsFor(&api.CollectorCredentials{
-		KeycloakBaseURL: "https://mint-kc",
-		OtlpBaseURL:     "https://mint-otlp",
-		OpampBaseURL:    "https://mint-opamp",
+		AuthBaseURL:  "https://mint-auth",
+		OtlpBaseURL:  "https://mint-otlp",
+		OpampBaseURL: "https://mint-opamp",
 	}, c)
-	if e.KeycloakBaseURL != "https://kc.override" || e.OpampBaseURL != "https://opamp.override" {
+	if e.AuthBaseURL != "https://auth.override" || e.OpampBaseURL != "https://opamp.override" {
 		t.Errorf("flag overrides not applied: %+v", e)
 	}
 	if e.OtlpBaseURL != "https://otlp.override:443" {

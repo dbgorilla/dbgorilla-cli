@@ -22,6 +22,11 @@ type CollectorCredentials struct {
 	// Optional per-service endpoints (contract agreed with backend; populated
 	// only for non-prod/self-hosted deployments). Empty -> the collector uses
 	// its built-in production defaults.
+	//
+	// AuthBaseURL is the auth host base (OIDC/OAuth2 token issuer). KeycloakBaseURL
+	// is the deprecated former name, still read as a fallback for deployments that
+	// predate the rename; use AuthHost() to resolve the effective value.
+	AuthBaseURL     string `json:"auth_base_url,omitempty"`
 	KeycloakBaseURL string `json:"keycloak_base_url,omitempty"`
 	OtlpBaseURL     string `json:"otlp_base_url,omitempty"`
 	OpampBaseURL    string `json:"opamp_base_url,omitempty"`
@@ -29,6 +34,16 @@ type CollectorCredentials struct {
 	// for this environment (e.g. "0.1.0"). Empty -> the CLI uses its built-in
 	// default image. The CLI pins this version unless --image overrides it.
 	PreferredCollectorVersion string `json:"preferred_collector_version,omitempty"`
+}
+
+// AuthHost returns the collector's auth host base, preferring auth_base_url and
+// falling back to the deprecated keycloak_base_url for deployments that predate
+// the rename. Empty -> the collector uses its built-in production default.
+func (c CollectorCredentials) AuthHost() string {
+	if c.AuthBaseURL != "" {
+		return c.AuthBaseURL
+	}
+	return c.KeycloakBaseURL
 }
 
 // CollectorSupported probes whether the deployment exposes the v0_2 collector

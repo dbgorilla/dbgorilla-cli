@@ -50,7 +50,7 @@ func TestCollectorSupportedTransportError(t *testing.T) {
 func TestProvisionCollectorSuccess(t *testing.T) {
 	body := `{
 		"agent_id":"agent-1","secret":"s3cr3t","tenant_id":"t-1","domain":"deploy.example.com",
-		"keycloak_base_url":"https://kc.example.com","otlp_base_url":"https://otlp.example.com",
+		"auth_base_url":"https://auth.example.com","otlp_base_url":"https://otlp.example.com",
 		"opamp_base_url":"https://opamp.example.com","preferred_collector_version":"0.1.0"
 	}`
 	for _, status := range []int{http.StatusCreated, http.StatusOK} {
@@ -66,7 +66,7 @@ func TestProvisionCollectorSuccess(t *testing.T) {
 		if cc.Domain != "deploy.example.com" {
 			t.Fatalf("domain not parsed: %q", cc.Domain)
 		}
-		if cc.KeycloakBaseURL != "https://kc.example.com" ||
+		if cc.AuthHost() != "https://auth.example.com" ||
 			cc.OtlpBaseURL != "https://otlp.example.com" ||
 			cc.OpampBaseURL != "https://opamp.example.com" {
 			t.Fatalf("optional endpoints not parsed: %+v", cc)
@@ -74,6 +74,23 @@ func TestProvisionCollectorSuccess(t *testing.T) {
 		if cc.PreferredCollectorVersion != "0.1.0" {
 			t.Fatalf("preferred version not parsed: %q", cc.PreferredCollectorVersion)
 		}
+	}
+}
+
+func TestCollectorCredentials_AuthHost(t *testing.T) {
+	// auth_base_url wins when present.
+	cc := CollectorCredentials{AuthBaseURL: "https://auth", KeycloakBaseURL: "https://kc"}
+	if got := cc.AuthHost(); got != "https://auth" {
+		t.Fatalf("AuthHost() = %q, want auth_base_url", got)
+	}
+	// Falls back to the deprecated keycloak_base_url for older deployments.
+	legacy := CollectorCredentials{KeycloakBaseURL: "https://kc"}
+	if got := legacy.AuthHost(); got != "https://kc" {
+		t.Fatalf("AuthHost() fallback = %q, want keycloak_base_url", got)
+	}
+	// Empty when neither is set (collector uses its built-in default).
+	if got := (CollectorCredentials{}).AuthHost(); got != "" {
+		t.Fatalf("AuthHost() = %q, want empty", got)
 	}
 }
 

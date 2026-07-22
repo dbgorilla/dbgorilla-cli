@@ -76,9 +76,9 @@ func TestHostDial(t *testing.T) {
 
 func TestBuild_endpointsPassThroughAndRender(t *testing.T) {
 	eps := Endpoints{
-		OpampBaseURL:    "https://opamp.internal.example.com",
-		OtlpBaseURL:     "https://otlp.internal.example.com:4317",
-		KeycloakBaseURL: "https://auth.internal.example.com",
+		OpampBaseURL: "https://opamp.internal.example.com",
+		OtlpBaseURL:  "https://otlp.internal.example.com:4317",
+		AuthBaseURL:  "https://auth.internal.example.com",
 	}
 	cfg := Build("agent-2", "tenant-2", Target{
 		Name: "billing", Host: "db.example.com", Port: 5432, User: "dbg_ro",
@@ -86,7 +86,7 @@ func TestBuild_endpointsPassThroughAndRender(t *testing.T) {
 
 	if cfg.Dbgorilla.OpampBaseURL != eps.OpampBaseURL ||
 		cfg.Dbgorilla.OtlpBaseURL != eps.OtlpBaseURL ||
-		cfg.Dbgorilla.KeycloakBaseURL != eps.KeycloakBaseURL {
+		cfg.Dbgorilla.AuthBaseURL != eps.AuthBaseURL {
 		t.Errorf("endpoint overrides not carried onto Config: %+v", cfg.Dbgorilla)
 	}
 
@@ -98,7 +98,7 @@ func TestBuild_endpointsPassThroughAndRender(t *testing.T) {
 	for _, want := range []string{
 		"opamp_base_url = \"https://opamp.internal.example.com\"",
 		"otlp_base_url = \"https://otlp.internal.example.com:4317\"",
-		"keycloak_base_url = \"https://auth.internal.example.com\"",
+		"auth_base_url = \"https://auth.internal.example.com\"",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered TOML missing %q\n---\n%s", want, out)
