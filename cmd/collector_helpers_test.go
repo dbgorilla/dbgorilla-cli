@@ -31,6 +31,7 @@ func TestWithDefaultPort(t *testing.T) {
 
 func endpointFlagCmd() *cobra.Command {
 	c := &cobra.Command{}
+	c.Flags().String("auth-url", "", "")
 	c.Flags().String("keycloak-url", "", "")
 	c.Flags().String("otlp-url", "", "")
 	c.Flags().String("opamp-url", "", "")
@@ -39,11 +40,19 @@ func endpointFlagCmd() *cobra.Command {
 
 func TestEndpointsFromFlags(t *testing.T) {
 	c := endpointFlagCmd()
-	_ = c.Flags().Set("keycloak-url", "https://kc")
+	_ = c.Flags().Set("auth-url", "https://auth")
 	_ = c.Flags().Set("otlp-url", "https://otlp")
 	e := endpointsFromFlags(c)
-	if e.KeycloakBaseURL != "https://kc" || e.OtlpBaseURL != "https://otlp" || e.OpampBaseURL != "" {
+	if e.AuthBaseURL != "https://auth" || e.OtlpBaseURL != "https://otlp" || e.OpampBaseURL != "" {
 		t.Errorf("endpointsFromFlags = %+v", e)
+	}
+}
+
+func TestEndpointsFromFlags_DeprecatedKeycloakFlag(t *testing.T) {
+	c := endpointFlagCmd()
+	_ = c.Flags().Set("keycloak-url", "https://legacy-auth")
+	if e := endpointsFromFlags(c); e.AuthBaseURL != "https://legacy-auth" {
+		t.Errorf("deprecated --keycloak-url not honored: %+v", e)
 	}
 }
 
@@ -52,13 +61,13 @@ func TestEndpointsFor(t *testing.T) {
 		c := endpointFlagCmd()
 		_ = c.Flags().Set("otlp-url", "https://flag-otlp") // override just OTLP
 		creds := &api.CollectorCredentials{
-			KeycloakBaseURL: "https://mint-kc",
-			OtlpBaseURL:     "https://mint-otlp",
-			OpampBaseURL:    "https://mint-opamp",
+			AuthBaseURL:  "https://mint-auth",
+			OtlpBaseURL:  "https://mint-otlp",
+			OpampBaseURL: "https://mint-opamp",
 		}
 		e := endpointsFor(creds, c)
-		if e.KeycloakBaseURL != "https://mint-kc" {
-			t.Errorf("keycloak = %q, want mint value", e.KeycloakBaseURL)
+		if e.AuthBaseURL != "https://mint-auth" {
+			t.Errorf("auth = %q, want mint value", e.AuthBaseURL)
 		}
 		if e.OpampBaseURL != "https://mint-opamp" {
 			t.Errorf("opamp = %q, want mint value", e.OpampBaseURL)

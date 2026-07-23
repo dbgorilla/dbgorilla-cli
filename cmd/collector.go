@@ -50,7 +50,9 @@ func init() {
 	installCmd.Flags().String("image", collector.DefaultImage, "Collector container image")
 	installCmd.Flags().Bool("yes", false, "Skip confirmation prompts")
 	installCmd.Flags().Bool("dry-run", false, "Render config and print the docker command without minting, writing, or starting anything")
-	installCmd.Flags().String("keycloak-url", "", "Override the Keycloak base URL (default: collector's deployment default)")
+	installCmd.Flags().String("auth-url", "", "Override the auth host base URL (default: collector's deployment default)")
+	installCmd.Flags().String("keycloak-url", "", "Deprecated: use --auth-url")
+	_ = installCmd.Flags().MarkDeprecated("keycloak-url", "use --auth-url instead")
 	installCmd.Flags().String("otlp-url", "", "Override the OTLP gateway base URL")
 	installCmd.Flags().String("opamp-url", "", "Override the OpAMP websocket base URL")
 	installCmd.Flags().String("ca-cert", "", "Path to a PEM CA bundle to trust (for private/internal-CA deployments)")
@@ -676,14 +678,23 @@ func resolveImage(cmd *cobra.Command, creds *api.CollectorCredentials) (image, s
 // back to the collector's built-in production defaults. (Phase 2 replaces these
 // flags with values from the deployment's .well-known discovery doc.)
 func endpointsFromFlags(cmd *cobra.Command) collector.Endpoints {
-	kc, _ := cmd.Flags().GetString("keycloak-url")
 	otlp, _ := cmd.Flags().GetString("otlp-url")
 	opamp, _ := cmd.Flags().GetString("opamp-url")
 	return collector.Endpoints{
-		KeycloakBaseURL: kc,
-		OtlpBaseURL:     otlp,
-		OpampBaseURL:    opamp,
+		AuthBaseURL:  authURLFlag(cmd),
+		OtlpBaseURL:  otlp,
+		OpampBaseURL: opamp,
 	}
+}
+
+// authURLFlag returns the auth host override, preferring --auth-url and falling
+// back to the deprecated --keycloak-url so existing scripts keep working.
+func authURLFlag(cmd *cobra.Command) string {
+	if v, _ := cmd.Flags().GetString("auth-url"); v != "" {
+		return v
+	}
+	v, _ := cmd.Flags().GetString("keycloak-url")
+	return v
 }
 
 // endpointsFor resolves the collector endpoints: start from the mint response
@@ -692,12 +703,12 @@ func endpointsFromFlags(cmd *cobra.Command) collector.Endpoints {
 // defaults.
 func endpointsFor(creds *api.CollectorCredentials, cmd *cobra.Command) collector.Endpoints {
 	e := collector.Endpoints{
-		KeycloakBaseURL: creds.KeycloakBaseURL,
-		OtlpBaseURL:     creds.OtlpBaseURL,
-		OpampBaseURL:    creds.OpampBaseURL,
+		AuthBaseURL:  creds.AuthHost(),
+		OtlpBaseURL:  creds.OtlpBaseURL,
+		OpampBaseURL: creds.OpampBaseURL,
 	}
-	if v, _ := cmd.Flags().GetString("keycloak-url"); v != "" {
-		e.KeycloakBaseURL = v
+	if v := authURLFlag(cmd); v != "" {
+		e.AuthBaseURL = v
 	}
 	if v, _ := cmd.Flags().GetString("otlp-url"); v != "" {
 		e.OtlpBaseURL = v

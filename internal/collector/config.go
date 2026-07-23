@@ -43,12 +43,12 @@ type Config struct {
 // overrides. Empty *_base_url fields fall back to the collector's built-in
 // production defaults, so local-dev-against-prod needs none of them.
 type Dbgorilla struct {
-	AgentID         string `toml:"agent_id"`
-	TenantID        string `toml:"tenant_id"`
-	Secret          string `toml:"secret"`
-	OpampBaseURL    string `toml:"opamp_base_url,omitempty"`
-	OtlpBaseURL     string `toml:"otlp_base_url,omitempty"`
-	KeycloakBaseURL string `toml:"keycloak_base_url,omitempty"`
+	AgentID      string `toml:"agent_id"`
+	TenantID     string `toml:"tenant_id"`
+	Secret       string `toml:"secret"`
+	OpampBaseURL string `toml:"opamp_base_url,omitempty"`
+	OtlpBaseURL  string `toml:"otlp_base_url,omitempty"`
+	AuthBaseURL  string `toml:"auth_base_url,omitempty"`
 }
 
 // Component is one [[component]] to monitor.
@@ -104,9 +104,9 @@ type Target struct {
 // provisioning response; Phase 2: from the .well-known discovery document).
 // Leave fields empty to use the collector's production defaults.
 type Endpoints struct {
-	OpampBaseURL    string
-	OtlpBaseURL     string
-	KeycloakBaseURL string
+	OpampBaseURL string
+	OtlpBaseURL  string
+	AuthBaseURL  string
 }
 
 // IsLoopback reports whether host refers to the local loopback interface, in
@@ -132,12 +132,12 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 	}
 	return Config{
 		Dbgorilla: Dbgorilla{
-			AgentID:         agentID,
-			TenantID:        tenantID,
-			Secret:          "${" + SecretEnv + "}",
-			OpampBaseURL:    eps.OpampBaseURL,
-			OtlpBaseURL:     eps.OtlpBaseURL,
-			KeycloakBaseURL: eps.KeycloakBaseURL,
+			AgentID:      agentID,
+			TenantID:     tenantID,
+			Secret:       "${" + SecretEnv + "}",
+			OpampBaseURL: eps.OpampBaseURL,
+			OtlpBaseURL:  eps.OtlpBaseURL,
+			AuthBaseURL:  eps.AuthBaseURL,
 		},
 		Component: []Component{{
 			Name:     target.Name,
