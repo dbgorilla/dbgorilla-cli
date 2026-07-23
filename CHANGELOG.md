@@ -1,6 +1,43 @@
 # Changelog
 
-## v0.1.1 — Initial release
+## v0.3.0
+
+### Added
+
+- Colorized status output across commands (login, whoami, doctor, setup-ide,
+  collector, config, logout), via a new `--color`/`--no-color` flag pair.
+  Color auto-detects a real terminal and honors `NO_COLOR` and `TERM=dumb`,
+  so piped or incompatible output stays plain text.
+
+### Fixed
+
+- `dbg login` now honors Ctrl-C during the password-mode credential prompt
+  instead of ignoring the interrupt.
+- `dbg upgrade` runs `brew upgrade` against the `dbgorilla` formula rather
+  than a nonexistent `dbg` formula.
+- Preflight gates the `pg_stat_statements` check on the Postgres maintenance
+  database, avoiding false failures where the extension isn't present
+  cluster-wide.
+
+## v0.2.0
+
+### Added
+
+- `dbg collector` — install and manage a local-dev collector.
+- `go install github.com/dbgorilla/dbgorilla-cli/cmd/dbgorilla@latest` support
+  via the `cmd/dbgorilla` layout.
+
+### Fixed
+
+- Auth: SSO/device-flow sessions now refresh at Keycloak rather than the
+  backend.
+- `dbg version` falls back to Go build info for `go install` builds where
+  ldflags aren't injected.
+- `setup-ide` Claude Code registration is now idempotent; added a
+  topology-permission preflight, corrected the OTLP port, and a `--ca-cert`
+  hint for private-CA deployments.
+
+## v0.1.4 — Initial release
 
 First release of the DBGorilla CLI.
 
