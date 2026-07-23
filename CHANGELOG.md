@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.1
+
+### Changed
+
+- Collector config renames the `keycloak_base_url` key to `auth_base_url`, and
+  `collector install` gains an `--auth-url` flag (the old `--keycloak-url` flag
+  is deprecated). The former name is still read as a fallback, so existing
+  `collector.toml` files and scripts keep working; update them to `auth_base_url`
+  at your convenience.
+
 ## v0.3.0
 
 ### Added
