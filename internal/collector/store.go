@@ -46,19 +46,32 @@ func inDir(name string) (string, error) {
 }
 
 // State records the installed collector so status/stop/uninstall work across
-// CLI invocations. It holds no secrets.
+// CLI invocations. It holds no secrets. Target selects which runtime the
+// management commands drive; older records predate Target and mean docker.
 type State struct {
-	AgentID       string    `json:"agent_id"`
-	TenantID      string    `json:"tenant_id"`
-	Domain        string    `json:"domain"`
-	ContainerName string    `json:"container_name"`
-	Image         string    `json:"image"`
-	ConfigPath    string    `json:"config_path"`
-	EnvFilePath   string    `json:"env_file_path"`
-	CACertPath    string    `json:"ca_cert_path,omitempty"`
-	TargetName    string    `json:"target_name"`
-	CreatedAt     time.Time `json:"created_at"`
+	AgentID    string `json:"agent_id"`
+	TenantID   string `json:"tenant_id"`
+	Domain     string `json:"domain"`
+	Target     string `json:"target,omitempty"` // "docker" (default) or "aws"
+	Image      string `json:"image"`
+	TargetName string `json:"target_name"`
+
+	// docker target
+	ContainerName string `json:"container_name,omitempty"`
+	ConfigPath    string `json:"config_path,omitempty"`
+	EnvFilePath   string `json:"env_file_path,omitempty"`
+	CACertPath    string `json:"ca_cert_path,omitempty"`
+
+	// aws target
+	StackName string `json:"stack_name,omitempty"`
+	Region    string `json:"region,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
 }
+
+// IsAWS reports whether this collector was deployed to AWS (vs local Docker).
+// An empty Target predates the field and means Docker.
+func (s *State) IsAWS() bool { return s.Target == "aws" }
 
 // LoadState reads the installed-collector record. A missing file returns
 // (nil, nil) — no collector installed.

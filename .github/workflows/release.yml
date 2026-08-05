@@ -69,3 +69,72 @@ jobs:
           # both "dbgorilla"; a glob is robust to the variant suffix (and future
           # id renames), so provenance still covers all four platform binaries.
           subject-path: dist/dbgorilla_*/dbgorilla
+
+  # Publish the collector's CloudFormation template. It is versioned
+  # independently of the CLI (Metadata.DBGorilla.TemplateVersion, mirrored by
+  # collector.TemplateVersion), so this republishes the same key on most
+  # releases and only writes a new one when the template's parameter contract
+  # actually changes. The CLI deploys this file by URL with no local copy, so a
+  # published version must never change underneath an already-released CLI --
+  # hence the overwrite guard below.
+  publish-template:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # OIDC federation into the dbgorilla-cli artifacts account
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_CFN_PUBLISH_ROLE }}
+          aws-region: us-east-1
+      - name: Validate the template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://internal/collector/cloudformation/collector-fargate.yaml
+      - name: Publish
+        env:
+          BUCKET: dbgorilla-cfn-us-east-1
+          TEMPLATE: internal/collector/cloudformation/collector-fargate.yaml
+        run: |
+          set -euo pipefail
+
+          # The version the template declares is the key it publishes under.
+          version=$(grep -oP "TemplateVersion:\s*'\K[^']+" "$TEMPLATE")
+          if [ -z "$version" ]; then
+            echo "::error::the template declares no Metadata.DBGorilla.TemplateVersion"
+            exit 1
+          fi
+          # It must match what the CLI pins, or the CLI requests a key we never wrote.
+          pinned=$(grep -oP 'TemplateVersion = "\K[^"]+' internal/collector/awstemplate.go)
+          if [ "$version" != "$pinned" ]; then
+            echo "::error::template says $version but collector.TemplateVersion says $pinned"
+            exit 1
+          fi
+
+          key="collector/fargate/${version}.yaml"
+          # Refuse to change a version that is already published: released CLIs
+          # deploy it by URL and would silently pick up the new content. A
+          # contract change needs a TemplateVersion bump instead.
+          if aws s3api head-object --bucket "$BUCKET" --key "$key" >/dev/null 2>&1; then
+            aws s3api get-object --bucket "$BUCKET" --key "$key" /tmp/published.yaml >/dev/null
+            if ! cmp -s /tmp/published.yaml "$TEMPLATE"; then
+              echo "::error::$version is already published with different content."
+              echo "::error::Bump TemplateVersion in the template and awstemplate.go instead of rewriting a released version."
+              diff -u /tmp/published.yaml "$TEMPLATE" || true
+              exit 1
+            fi
+            echo "$version already published and identical -- nothing to do"
+          else
+            aws s3api put-object --bucket "$BUCKET" --key "$key" \
+              --body "$TEMPLATE" --content-type text/yaml
+            echo "published s3://$BUCKET/$key"
+          fi
+
+          # latest.yaml backs the docs and the console quick-create link. The CLI
+          # never reads it -- it pins the version above.
+          aws s3api put-object --bucket "$BUCKET" --key collector/fargate/latest.yaml \
+            --body "$TEMPLATE" --content-type text/yaml
+          echo "published s3://$BUCKET/collector/fargate/latest.yaml"

@@ -106,6 +106,40 @@ JSONC files (with `//` comments) are refused rather than overwritten.
 | `dbg version` | Print version info. |
 | `dbg completion <shell>` | Print a tab-completion script. See [Shell completion](#shell-completion). |
 
+## Collector on AWS
+
+`dbg collector install --target aws` deploys the collector as a single Fargate task that monitors your RDS/Aurora databases. It runs entirely with **your own** AWS credentials — the CLI reuses whatever `aws sso login` / `AWS_PROFILE` already resolves, and nothing sensitive passes through DBGorilla.
+
+```sh
+dbg collector install --target aws                 # discover the database, deploy
+dbg collector install --target aws --dry-run       # show the config + validate, deploy nothing
+```
+
+### The CloudFormation template
+
+The stack is defined by a template DBGorilla publishes, so you can read exactly what will be created before running anything:
+
+- <https://dbgorilla-cfn-us-east-1.s3.us-east-1.amazonaws.com/collector/fargate/latest.yaml>
+
+The template is versioned independently of the CLI — its version tracks its parameter contract, which changes far more rarely than `dbg` does. A given CLI build deploys one specific version (currently `.../collector/fargate/v1.0.yaml`), and a published version is never rewritten: a contract change means a new version, so an existing install's template can't shift under it.
+
+This published copy is the only one — the CLI carries no template of its own, so the file you read at that URL is exactly the file your account deploys. If it can't be reached, the install stops and tells you to update rather than deploying anything else. `dbg` therefore needs HTTPS egress to `dbgorilla-cfn-us-east-1.s3.us-east-1.amazonaws.com`; if that isn't possible, host the template yourself and pass `--template-url`.
+
+### Launching it yourself
+
+The template takes no injected values, so you can deploy it from the console without the CLI:
+
+1. Write a config — see [`examples/collector-aws.toml`](examples/collector-aws.toml) for every available option.
+2. Encode it (stack parameters are single-line, so it's base64):
+
+   ```sh
+   dbg collector encode-config collector-aws.toml
+   ```
+
+3. Open the [quick-create link](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateURL=https://dbgorilla-cfn-us-east-1.s3.us-east-1.amazonaws.com/collector/fargate/latest.yaml&stackName=dbgorilla-collector), paste it into **CollectorConfig**, and fill in the identity DBGorilla minted for you.
+
+Secrets never go in the config: reference them as `${DBG_SERVER_SECRET}` and `${DBG_DB_PASSWORD}` and supply the real values through the `ServerSecret` / `DbPassword` parameters, which the stack stores in Secrets Manager.
+
 ## Centralized Claude allowlist
 
 If your org uses a managed Claude allowlist (Team / Enterprise tier on app.claude.com), `dbg setup-ide` may be blocked by policy. Run:

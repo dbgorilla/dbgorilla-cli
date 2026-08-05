@@ -1,0 +1,118 @@
+# Example dbg-collector config for the AWS Fargate target.
+#
+# `dbg install --target aws` generates this for you from RDS discovery. Write it
+# by hand only when launching the CloudFormation template from the console:
+#
+#     dbgorilla collector encode-config collector-aws.toml
+#
+# and paste the output into the stack's CollectorConfig parameter.
+#
+# Secrets are never written here. They are ${VAR} references the Fargate task
+# resolves from Secrets Manager, fed by the ServerSecret and DbPassword stack
+# parameters. The encoded config must stay under 4096 characters (a
+# CloudFormation parameter limit) — encode-config checks that for you.
+#
+# This example exercises every option; a real config is usually just
+# [dbgorilla] plus one [[component]].
+
+[dbgorilla]
+agent_id  = "e10977fe-74e3-445d-81e9-a85601c6ca51"   # OpAMP client_id, minted by DBGorilla
+tenant_id = "cf1986c0-2534-4d96-8e1c-c68e63e9df42"
+secret    = "${DBG_SERVER_SECRET}"                   # <- the ServerSecret parameter
+
+# Endpoint overrides. Omit all three to use the production defaults
+# (wss://otlp.dbgorilla.com/v1/opamp, https://otlp.dbgorilla.com:443,
+# https://auth.dbgorilla.com). Set them to point at a self-hosted deployment.
+opamp_base_url = "wss://otlp.example.com/v1/opamp"
+otlp_base_url  = "https://otlp.example.com:443"
+auth_base_url  = "https://auth.example.com"
+
+max_message_bytes       = 67108864   # OpAMP frame cap; default 64 MiB
+opamp_idle_timeout_secs = 75         # reconnect if the socket goes quiet; default 75s
+
+# Query analysis: lets DBGorilla run EXPLAIN and read pg_stat_* views — the data
+# behind query insights and index advice. Off by default. Omit `allowed` to
+# grant everything the engine supports; an explicit list is clamped to that set.
+[commands]
+enabled = true
+allowed = ["execute_query", "explain"]
+
+[topology]
+interval = "60s"        # schema-graph re-scrape cadence; 60s floor
+
+[otelcol]
+binary = "dbg_otelcol"  # already set in the image; override only for local dev
+
+# Opaque per-engine tuning, passed through to the engine plugin.
+[engine.postgres.pool]
+per_db_max = 5
+
+# ── An RDS Postgres instance with IAM auth (the common case) ──
+# The database user must exist with rds_iam granted:
+#   CREATE USER dbgorilla; GRANT rds_iam TO dbgorilla;
+# and the stack's RdsConnectResources parameter must include this database's
+# rds-db:connect ARN.
+[[component]]
+name     = "prod-rds"
+engine   = "postgres"
+commands = ["explain"]   # per-component override of [commands]
+
+[component.provider]
+type        = "aws_rds"
+region      = "us-east-1"
+instance_id = "prod-pg"
+# role_arn  = "arn:aws:iam::123456789012:role/dbg-collector"  # optional, cross-account
+
+[component.auth]
+method = "iam"
+user   = "dbgorilla"
+
+[component.connect]
+host      = "prod-pg.abc.us-east-1.rds.amazonaws.com"
+port      = 5432
+databases = ["app"]
+ssl_mode  = "verify-full"
+
+# ── An Aurora Postgres cluster with IAM auth ──
+# Aurora addresses the cluster by cluster_id, not instance_id.
+[[component]]
+name   = "analytics-aurora"
+engine = "postgres"
+
+[component.provider]
+type       = "aws_aurora"
+region     = "us-east-1"
+cluster_id = "analytics"
+
+[component.auth]
+method = "iam"
+user   = "readonly"
+
+[component.connect]
+host      = "analytics.cluster-abc.us-east-1.rds.amazonaws.com"
+port      = 5432
+databases = ["warehouse", "events"]
+ssl_mode  = "verify-full"
+
+# ── An Aurora MySQL cluster with password auth ──
+# Password auth needs no rds-db:connect grant. The password comes from the
+# DbPassword stack parameter via Secrets Manager, so only one component in a
+# stack can use it.
+[[component]]
+name   = "legacy-mysql"
+engine = "mysql"
+
+[component.provider]
+type       = "aws_aurora"
+region     = "us-east-1"
+cluster_id = "legacy"
+
+[component.auth]
+method   = "password"
+user     = "dbgorilla"
+password = "${DBG_DB_PASSWORD}"   # <- the DbPassword parameter
+
+[component.connect]
+host      = "legacy.cluster-abc.us-east-1.rds.amazonaws.com"
+port      = 3306
+databases = ["app"]

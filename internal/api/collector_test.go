@@ -318,3 +318,26 @@ func TestListCollectorsTransportError(t *testing.T) {
 		t.Fatalf("expected list transport error, got %v", err)
 	}
 }
+
+func TestHTTPError_401MapsToSessionExpired(t *testing.T) {
+	if err := httpError("provisioning collector", http.StatusUnauthorized, []byte(`{"detail":"Invalid token"}`)); !errors.Is(err, ErrSessionExpired) {
+		t.Errorf("401 should map to ErrSessionExpired, got: %v", err)
+	}
+	// Other statuses keep the detailed message and are not session-expired.
+	err := httpError("provisioning collector", http.StatusInternalServerError, []byte("boom"))
+	if errors.Is(err, ErrSessionExpired) {
+		t.Error("500 should not be treated as session-expired")
+	}
+	if err == nil || !contains(err.Error(), "500") || !contains(err.Error(), "boom") {
+		t.Errorf("non-401 error should include status + body, got: %v", err)
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

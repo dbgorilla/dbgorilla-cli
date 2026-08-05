@@ -11,6 +11,20 @@ import (
 // collector API (the release line, or a backend predating v0_2).
 var ErrCollectorUnsupported = errors.New("this deployment does not support the managed collector (needs a main-based backend)")
 
+// ErrSessionExpired is returned when the backend rejects the stored token —
+// almost always an expired login. The message tells the user how to recover
+// instead of dumping a raw 401 body.
+var ErrSessionExpired = errors.New("your DBGorilla login has expired — run `dbg login` to sign in again")
+
+// httpError turns a non-2xx response into an error, mapping 401 to the clear
+// "log in again" message rather than a raw status + body dump.
+func httpError(action string, status int, body []byte) error {
+	if status == http.StatusUnauthorized {
+		return ErrSessionExpired
+	}
+	return fmt.Errorf("backend returned HTTP %d %s:\n%s", status, action, string(body))
+}
+
 // CollectorCredentials is the response from POST /api/v0_2/collectors. The
 // secret is returned exactly once. agent_id is the OAuth client_id; domain is
 // the deployment domain for the collector's endpoints.
@@ -72,7 +86,7 @@ func (c *Client) ProvisionCollector() (*CollectorCredentials, error) {
 		return nil, ErrCollectorUnsupported
 	}
 	if status != http.StatusCreated && status != http.StatusOK {
-		return nil, fmt.Errorf("backend returned HTTP %d provisioning collector:\n%s", status, string(body))
+		return nil, httpError("provisioning collector", status, body)
 	}
 	var cc CollectorCredentials
 	if err := json.Unmarshal(body, &cc); err != nil {
@@ -103,7 +117,7 @@ func (c *Client) FetchCollectorStatus(agentID string) (*CollectorStatus, error) 
 		return nil, nil
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("backend returned HTTP %d fetching collector status:\n%s", status, string(body))
+		return nil, httpError("fetching collector status", status, body)
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -126,7 +140,7 @@ func (c *Client) DeleteCollector(agentID string) error {
 	if status == http.StatusNoContent || status == http.StatusOK || status == http.StatusNotFound {
 		return nil
 	}
-	return fmt.Errorf("backend returned HTTP %d deleting collector:\n%s", status, string(body))
+	return httpError("deleting collector", status, body)
 }
 
 // ListCollectors returns the tenant's collector agents. The bridge's AgentPage
@@ -141,7 +155,7 @@ func (c *Client) ListCollectors() ([]map[string]any, error) {
 		return nil, ErrCollectorUnsupported
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("backend returned HTTP %d listing collectors:\n%s", status, string(body))
+		return nil, httpError("listing collectors", status, body)
 	}
 	// Try an enveloped object first.
 	var env struct {

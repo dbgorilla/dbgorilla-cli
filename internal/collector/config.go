@@ -11,6 +11,7 @@ package collector
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -23,6 +24,12 @@ import (
 const (
 	SecretEnv     = "DBG_SERVER_SECRET"
 	DBPasswordEnv = "COLLECTOR_DB_PASSWORD"
+
+	// AwsDBPasswordEnv is the password reference for the aws target. It differs
+	// from DBPasswordEnv because the Fargate task definition names the variable
+	// itself (fed from Secrets Manager), while the docker target names it in the
+	// env-file it writes.
+	AwsDBPasswordEnv = "DBG_DB_PASSWORD"
 
 	// DockerHostInternal is the hostname that resolves to the Docker host from
 	// inside a container (native on Docker Desktop; on Linux we add an
@@ -53,23 +60,33 @@ type Dbgorilla struct {
 
 // Component is one [[component]] to monitor.
 type Component struct {
-	Name     string   `toml:"name"`
-	Engine   string   `toml:"engine"`
+	Name   string `toml:"name"`
+	Engine string `toml:"engine"`
+	// Commands the control plane may run against this database (execute_query,
+	// explain). Omitted means "inherit the global [commands] default".
+	Commands []string `toml:"commands,omitempty"`
 	Provider Provider `toml:"provider"`
 	Auth     Auth     `toml:"auth"`
 	Connect  Connect  `toml:"connect"`
 }
 
-// Provider is [component.provider]. self_hosted carries no extra fields.
+// Provider is [component.provider]. self_hosted carries no extra fields; the
+// aws_rds / aws_aurora providers add the region and the instance or cluster id
+// (exactly one of the two, per the collector's provider contract).
 type Provider struct {
-	Type string `toml:"type"`
+	Type       string `toml:"type"`
+	Region     string `toml:"region,omitempty"`
+	InstanceID string `toml:"instance_id,omitempty"`
+	ClusterID  string `toml:"cluster_id,omitempty"`
+	RoleArn    string `toml:"role_arn,omitempty"`
 }
 
-// Auth is [component.auth].
+// Auth is [component.auth]. Password is a ${VAR} reference, never a literal, so
+// it is omitted entirely for IAM auth.
 type Auth struct {
 	Method   string `toml:"method"`
 	User     string `toml:"user"`
-	Password string `toml:"password"`
+	Password string `toml:"password,omitempty"`
 }
 
 // Connect is [component.connect].
@@ -78,6 +95,10 @@ type Connect struct {
 	Port      int      `toml:"port"`
 	Databases []string `toml:"databases,omitempty"`
 	SSLMode   string   `toml:"ssl_mode"`
+	// CACert is the bundle the server certificate is verified against; empty
+	// means the OS trust store. RDS certificates are not publicly rooted, so an
+	// AWS target verifying the server must name the bundle baked into the image.
+	CACert string `toml:"ca_cert,omitempty"`
 }
 
 // Topology is [topology].
@@ -176,6 +197,43 @@ func LoadConfig(path string) (Config, error) {
 	var c Config
 	_, err := toml.DecodeFile(path, &c)
 	return c, err
+}
+
+// ParseConfig decodes collector.toml text into a Config. The aws target uses it
+// to read back the config it stored as a stack parameter, so an update can
+// change the monitored databases while preserving the identity and endpoints
+// the install minted.
+func ParseConfig(s string) (Config, error) {
+	var c Config
+	_, err := toml.Decode(s, &c)
+	return c, err
+}
+
+// StrictParseConfig is ParseConfig that refuses to silently drop keys it does
+// not model. The aws target round-trips the stored config through Config on
+// every update — parse, replace the components, re-render — so any key this
+// build does not know about would be quietly deleted from a running collector's
+// configuration. Failing tells the operator to upgrade instead.
+//
+// ParseConfig stays permissive: `encode-config` hands it hand-written files
+// whose documented example exercises collector options beyond what this CLI
+// generates, and merely encoding them must not require modelling them.
+func StrictParseConfig(s string) (Config, error) {
+	var c Config
+	md, err := toml.Decode(s, &c)
+	if err != nil {
+		return c, err
+	}
+	if un := md.Undecoded(); len(un) > 0 {
+		keys := make([]string, 0, len(un))
+		for _, k := range un {
+			keys = append(keys, k.String())
+		}
+		return c, fmt.Errorf("config contains %d setting(s) this version of dbg does not understand (%s). "+
+			"Upgrade with 'dbg upgrade' and re-run, so the update preserves them",
+			len(keys), strings.Join(keys, ", "))
+	}
+	return c, nil
 }
 
 // DialHost reverses the container host rewrite for a HOST-side connection: a
