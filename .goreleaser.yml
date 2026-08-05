@@ -67,6 +67,10 @@ signs:
 snapshot:
   version_template: "{{ .Tag }}-next"
 
+# Kept as the fallback for a local `goreleaser release` run. CI does NOT use
+# this: release.yml passes --release-notes with the tag's CHANGELOG.md section,
+# because the public repo receives one squashed "Release vX.Y.Z" commit per
+# version and a git-log changelog has nothing to describe.
 changelog:
   sort: asc
   filters:

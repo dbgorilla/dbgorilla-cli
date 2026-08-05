@@ -50,11 +50,35 @@ jobs:
           # cosign 2.x where ${signature} -> .sig works as goreleaser
           # expects.
           cosign-release: "v2.6.3"
+      # Release notes come from CHANGELOG.md, not from git history. The snapshot
+      # publish squashes an entire release into ONE "Release vX.Y.Z" commit on
+      # the public repo, so goreleaser's git-log changelog has exactly one
+      # subject to describe and produces a useless one-line body. Extract this
+      # tag's section instead and hand it over as the release body.
+      #
+      # A missing section fails the release. A version ships with notes or it
+      # does not ship.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          awk -v want="## ${GITHUB_REF_NAME}" '
+            $0 == want        { inside = 1; next }
+            inside && /^## /  { exit }
+            inside            { print }
+          ' CHANGELOG.md > "$notes"
+          if ! grep -q '[^[:space:]]' "$notes"; then
+            echo "::error::CHANGELOG.md has no '## ${GITHUB_REF_NAME}' section — add one and re-tag."
+            exit 1
+          fi
+          echo "RELEASE_NOTES=$notes" >> "$GITHUB_ENV"
+          echo "--- release notes for ${GITHUB_REF_NAME} ---"
+          cat "$notes"
       - uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=${{ env.RELEASE_NOTES }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
