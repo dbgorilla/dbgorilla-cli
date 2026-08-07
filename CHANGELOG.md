@@ -39,6 +39,12 @@
   can read and security-review the exact file their account will deploy before
   running anything, and `--template-url` deploys a self-hosted copy instead.
 
+### Changed
+
+- The default collector image moves to 0.3.3, which carries RDS certificates in
+  the container's system trust root. This matters for the AWS target, where the
+  CLI defaults to `verify-full` TLS against RDS and Aurora endpoints.
+
 ### Notes
 
 - The AWS target requires HTTPS access to the published template. A CLI that
