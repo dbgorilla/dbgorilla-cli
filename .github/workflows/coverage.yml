@@ -1,16 +1,14 @@
 name: coverage
 
-# PRIVATE-ONLY workflow. Uploads unit-test coverage to the org Codecov via the
-# furiousengineering shared reusable. Because it names furiousengineering and
-# pushes to our internal Codecov org, the publish pipeline's scrub DROPS this
-# file (alongside snapshot.yml) -- it never ships to the public
-# dbgorilla/dbgorilla-cli mirror. Public CI is test.yml + lint.yml + codeql.yml;
-# coverage is an internal signal, not a customer-facing check.
+# Unit-test coverage -> Codecov, tokenless via GitHub OIDC (id-token: write;
+# no static upload secret). Coverage is an INFORMATIONAL signal here, never a
+# merge gate: codecov.yml marks both project and patch statuses informational,
+# with carryforward so a non-code PR never shows a false drop.
 #
-# Self-contained by necessity: the shared coverage-upload reusable runs as a
-# SEPARATE job on a fresh runner and downloads the report as an artifact from
-# THIS workflow run, so the profile must be generated and uploaded here rather
-# than consumed from test.yml's run (a different run = no shared artifact).
+# fail_ci_if_error stays false on purpose: cli.codecov.io intermittently serves
+# invalid OpenPGP data, which fails the action's CLI-binary signature check.
+# There is no "skip verification" flag; tolerating the error still lands the
+# upload.
 
 on:
   push:
@@ -27,9 +25,10 @@ concurrency:
 
 jobs:
   cover:
-    # Private-only workflow (scrubbed from the public mirror), so a straight
-    # flip to the self-hosted ARC pool is safe.
-    runs-on: fast-pass-v3
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mints the OIDC token codecov-action uses for tokenless upload
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
@@ -38,33 +37,12 @@ jobs:
           cache: true
       - name: test with coverage
         run: go test -coverprofile=coverage.out ./...
-      # The coverage-upload reusable runs on a separate runner with no shared
-      # filesystem, so the report crosses the job boundary as an artifact.
-      - name: Upload coverage report artifact
+      - name: Upload to Codecov
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
-          name: coverage-cli
-          path: coverage.out
-          retention-days: 1
-
-  # Push the report to Codecov via the shared reusable (upload-only, tokenless
-  # OIDC). flag "cli" = the single component; codecov.yml marks it informational +
-  # carryforward so a non-code PR never shows a false drop.
-  coverage-upload:
-    name: Upload coverage to Codecov
-    needs: cover
-    if: ${{ !cancelled() }}
-    # Tokenless OIDC: the reusable requests id-token: write; a caller that does not
-    # grant it startup-fails the whole workflow. Job-level perms replace the
-    # top-level block, so contents: read must be repeated here.
-    permissions:
-      contents: read
-      id-token: write
-    # Pinned to the dbg-shared-workflows #123 merge commit on main (coverage-upload.yml).
-    uses: furiousengineering/dbg-shared-workflows/.github/workflows/coverage-upload.yml@035a6879bca4e2373031cdd983611cb1f5ae0ae8
-    with:
-      artifact_name: coverage-cli
-      flags: cli
-      name: cli-unit
-    secrets: inherit
+          files: coverage.out
+          flags: cli
+          name: cli-unit
+          use_oidc: true
+          fail_ci_if_error: false
