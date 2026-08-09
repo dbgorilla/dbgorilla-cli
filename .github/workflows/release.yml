@@ -1,0 +1,164 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+# Serialize release runs against the same tag. A re-pushed tag (rare but
+# possible during an emergency rebuild) shouldn't race two goreleaser
+# invocations producing inconsistent Homebrew tap commits.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  goreleaser:
+    # GoReleaser publishes only from the PUBLIC repo (after the snapshot pushes
+    # the tag there). The same tag also lands on this private dev repo, but
+    # releasing is the public repo's job -- skip here (skipped = neutral).
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # `environment: homebrew-tap` scopes HOMEBREW_TAP_GITHUB_TOKEN to this
+    # environment instead of repo-wide, and lets us add approval/protection
+    # rules without re-tagging.
+    environment: homebrew-tap
+    permissions:
+      contents: write
+      # Required for cosign keyless signing + SLSA build-provenance attestation.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      - name: Install cosign (keyless signer via Fulcio + Rekor)
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin cosign to 2.x. cosign 3.x changed sign-blob to require an
+          # explicit --bundle and stopped writing detached .sig files,
+          # which breaks goreleaser's default upload pattern. Until we
+          # migrate the goreleaser signs config to bundle output, stay on
+          # cosign 2.x where ${signature} -> .sig works as goreleaser
+          # expects.
+          cosign-release: "v2.6.3"
+      # Release notes come from CHANGELOG.md, not from git history. The snapshot
+      # publish squashes an entire release into ONE "Release vX.Y.Z" commit on
+      # the public repo, so goreleaser's git-log changelog has exactly one
+      # subject to describe and produces a useless one-line body. Extract this
+      # tag's section instead and hand it over as the release body.
+      #
+      # A missing section fails the release. A version ships with notes or it
+      # does not ship.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          awk -v want="## ${GITHUB_REF_NAME}" '
+            $0 == want        { inside = 1; next }
+            inside && /^## /  { exit }
+            inside            { print }
+          ' CHANGELOG.md > "$notes"
+          if ! grep -q '[^[:space:]]' "$notes"; then
+            echo "::error::CHANGELOG.md has no '## ${GITHUB_REF_NAME}' section — add one and re-tag."
+            exit 1
+          fi
+          echo "RELEASE_NOTES=$notes" >> "$GITHUB_ENV"
+          echo "--- release notes for ${GITHUB_REF_NAME} ---"
+          cat "$notes"
+      - uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --release-notes=${{ env.RELEASE_NOTES }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+      # SLSA build-provenance over each release binary. Independent from
+      # cosign's signature (which proves who signed at release time); this
+      # attestation pins WHAT was built and HOW (the workflow run).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          # goreleaser writes per-build binaries to
+          # dist/<build-id>_<os>_<arch>_v<variant>/<binary>. Build id + binary are
+          # both "dbgorilla"; a glob is robust to the variant suffix (and future
+          # id renames), so provenance still covers all four platform binaries.
+          subject-path: dist/dbgorilla_*/dbgorilla
+
+  # Publish the collector's CloudFormation template. It is versioned
+  # independently of the CLI (Metadata.DBGorilla.TemplateVersion, mirrored by
+  # collector.TemplateVersion), so this republishes the same key on most
+  # releases and only writes a new one when the template's parameter contract
+  # actually changes. The CLI deploys this file by URL with no local copy, so a
+  # published version must never change underneath an already-released CLI --
+  # hence the overwrite guard below.
+  publish-template:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # OIDC federation into the dbgorilla-cli artifacts account
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_CFN_PUBLISH_ROLE }}
+          aws-region: us-east-1
+      - name: Validate the template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://internal/collector/cloudformation/collector-fargate.yaml
+      - name: Publish
+        env:
+          BUCKET: dbgorilla-cfn-us-east-1
+          TEMPLATE: internal/collector/cloudformation/collector-fargate.yaml
+        run: |
+          set -euo pipefail
+
+          # The version the template declares is the key it publishes under.
+          version=$(grep -oP "TemplateVersion:\s*'\K[^']+" "$TEMPLATE")
+          if [ -z "$version" ]; then
+            echo "::error::the template declares no Metadata.DBGorilla.TemplateVersion"
+            exit 1
+          fi
+          # It must match what the CLI pins, or the CLI requests a key we never wrote.
+          pinned=$(grep -oP 'TemplateVersion = "\K[^"]+' internal/collector/awstemplate.go)
+          if [ "$version" != "$pinned" ]; then
+            echo "::error::template says $version but collector.TemplateVersion says $pinned"
+            exit 1
+          fi
+
+          key="collector/fargate/${version}.yaml"
+          # Refuse to change a version that is already published: released CLIs
+          # deploy it by URL and would silently pick up the new content. A
+          # contract change needs a TemplateVersion bump instead.
+          if aws s3api head-object --bucket "$BUCKET" --key "$key" >/dev/null 2>&1; then
+            aws s3api get-object --bucket "$BUCKET" --key "$key" /tmp/published.yaml >/dev/null
+            if ! cmp -s /tmp/published.yaml "$TEMPLATE"; then
+              echo "::error::$version is already published with different content."
+              echo "::error::Bump TemplateVersion in the template and awstemplate.go instead of rewriting a released version."
+              diff -u /tmp/published.yaml "$TEMPLATE" || true
+              exit 1
+            fi
+            echo "$version already published and identical -- nothing to do"
+          else
+            aws s3api put-object --bucket "$BUCKET" --key "$key" \
+              --body "$TEMPLATE" --content-type text/yaml
+            echo "published s3://$BUCKET/$key"
+          fi
+
+          # latest.yaml backs the docs and the console quick-create link. The CLI
+          # never reads it -- it pins the version above.
+          aws s3api put-object --bucket "$BUCKET" --key collector/fargate/latest.yaml \
+            --body "$TEMPLATE" --content-type text/yaml
+          echo "published s3://$BUCKET/collector/fargate/latest.yaml"

@@ -1,0 +1,35 @@
+# golangci-lint config. Conservative defaults -- surface real bugs without
+# becoming the team's least-favorite gatekeeper.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck       # report unchecked errors
+    - govet          # built-in go vet
+    - ineffassign    # ineffective assignments
+    - misspell       # common typos
+    - staticcheck    # comprehensive static analysis
+    - unconvert      # unnecessary type conversions
+    - unused         # unused code
+
+  exclusions:
+    rules:
+      # Test files often have intentionally ignored errors.
+      - path: _test\.go
+        linters: [errcheck]
+      # ST1005: error strings shouldn't end with punctuation/newlines. Sound
+      # rule for wrappable errors but actively hurts our user-facing multi-
+      # line CLI error messages (which end with periods to read as English).
+      - linters: [staticcheck]
+        text: "ST1005:"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

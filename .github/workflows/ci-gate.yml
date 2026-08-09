@@ -1,0 +1,18 @@
+# All-green merge gate (dbgorilla#6703). Unfiltered pull_request trigger so the
+# ci-gate check is reported on EVERY PR (never left "pending"). The action waits
+# for every other check on the PR head and passes only if all passed -- require
+# ci-gate in branch protection and nothing merges on red CI. Immune to monorepo
+# path-filtering (a skipped-by-path workflow never creates a check, no deadlock).
+name: ci-gate
+on:
+  pull_request:
+permissions:
+  contents: read # the vendored action lives in-repo, so the checkout needs it
+  checks: read
+  statuses: read
+jobs:
+  ci-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/ci-gate

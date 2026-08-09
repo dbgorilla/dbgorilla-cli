@@ -1,0 +1,115 @@
+name: ci-gate
+description: >
+  All-green merge gate. Waits for every OTHER check on the PR's head commit to
+  finish, then passes only if all of them succeeded (or were skipped/neutral).
+  Require this one check ("ci-gate") in branch protection and nothing merges on
+  red CI -- uniform across every repo, and immune to monorepo path-filtering
+  (a path-filtered workflow that never runs never creates a check, so the gate
+  simply doesn't wait for it -> no deadlock).
+
+inputs:
+  timeout-minutes:
+    description: Max minutes to wait for other checks to complete before failing.
+    required: false
+    default: "45"
+  poll-seconds:
+    description: Seconds between polls of the checks API.
+    required: false
+    default: "20"
+  self-name:
+    description: This gate's own check name, excluded from the wait set.
+    required: false
+    default: ci-gate
+  github-token:
+    description: Token with checks:read + statuses:read on this repo.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for all other checks, then gate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        # On pull_request the checks live on the PR HEAD sha, not the merge sha.
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        TIMEOUT_MIN: ${{ inputs.timeout-minutes }}
+        POLL_SECS: ${{ inputs.poll-seconds }}
+        SELF: ${{ inputs.self-name }}
+      run: |
+        set -euo pipefail
+        [ -n "${HEAD_SHA:-}" ] || { echo "::error::ci-gate only runs on pull_request (no head sha)."; exit 1; }
+
+        deadline=$(( SECONDS + TIMEOUT_MIN * 60 ))
+        # Small initial grace so sibling workflows have registered their check
+        # runs before the first evaluation (avoids passing on an empty set).
+        sleep 25
+
+        # Pull every check-run + legacy commit-status for the head sha, drop our
+        # own gate check, and classify. PASSING = success|skipped|neutral|
+        # cancelled|stale. `cancelled`/`stale` are counted as passing on
+        # purpose: in this org they are concurrency artifacts of the PR-env
+        # pipeline (a run is cancelled by a superseding trigger, then re-runs as
+        # skipped; a nested child job can be left with only the cancelled entry
+        # and no re-run to supersede it). They are never a test result -- a real
+        # failure surfaces as `failure`. Pending = queued|in_progress|waiting|
+        # requested|pending. HARD FAIL = failure|timed_out|action_required|error.
+        snapshot() {
+          # check-runs (Actions + apps). CRUCIAL: dedupe by name and keep the
+          # LATEST run (max id) -- a re-run or superseded job leaves a stale
+          # entry (e.g. `cancelled`) alongside the newer one (e.g. `skipped`),
+          # and only the latest reflects reality. `--paginate --jq '.check_runs[]'`
+          # streams every run across pages; `jq -s` then slurps + dedupes so the
+          # grouping spans pages (a monorepo can have >100 checks).
+          gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs" \
+            --jq '.check_runs[]' 2>/dev/null \
+            | jq -sr 'group_by(.name) | map(max_by(.id)) | .[]
+                      | [.name, .status, (.conclusion // "")] | @tsv' 2>/dev/null || true
+          # legacy commit statuses (non-Actions integrations, e.g. CodeRabbit).
+          # Latest state per context. Map state -> our (status, conclusion): a
+          # `pending` status means STILL RUNNING (wait), not a failure -- an
+          # advisory bot often posts `pending` then flips to `success`.
+          gh api --paginate "repos/$REPO/commits/$HEAD_SHA/statuses" \
+            --jq '.[]' 2>/dev/null \
+            | jq -sr 'group_by(.context) | map(max_by(.id)) | .[]
+                      | .context as $c | .state as $s
+                      | if $s=="pending" then [$c,"in_progress",""]
+                        elif $s=="success" then [$c,"completed","success"]
+                        else [$c,"completed","failure"] end
+                      | @tsv' 2>/dev/null || true
+        }
+
+        while :; do
+          pending=0; failed=""; total=0
+          while IFS=$'\t' read -r name status concl; do
+            [ -n "${name:-}" ] || continue
+            [ "$name" = "$SELF" ] && continue          # never wait on ourselves
+            total=$((total+1))
+            case "$status" in
+              completed)
+                case "$concl" in
+                  success|skipped|neutral|cancelled|stale) : ;;   # passing (see header)
+                  *) failed="${failed}\n  - ${name}: ${concl:-unknown}" ;;  # failure|timed_out|action_required|...
+                esac ;;
+              *) pending=$((pending+1)) ;;              # queued/in_progress/...
+            esac
+          done < <(snapshot | sort -u)
+
+          if [ -n "$failed" ]; then
+            echo "::error::ci-gate: one or more checks did not pass:"
+            printf '%b\n' "$failed"
+            exit 1
+          fi
+          if [ "$pending" -eq 0 ]; then
+            echo "ci-gate: all ${total} other check(s) passed (success/skipped/neutral)."
+            exit 0
+          fi
+          if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "::error::ci-gate: timed out after ${TIMEOUT_MIN}m with ${pending} check(s) still pending."
+            exit 1
+          fi
+          echo "ci-gate: ${pending} check(s) still running (of ${total}); re-checking in ${POLL_SECS}s..."
+          sleep "$POLL_SECS"
+        done

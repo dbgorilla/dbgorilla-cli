@@ -1,0 +1,306 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  DBGorilla collector — a single AWS Fargate task that monitors one or more
+  RDS/Aurora databases and reports telemetry to DBGorilla over OTLP/OpAMP. The
+  whole collector configuration is one TOML document passed as the
+  CollectorConfig parameter (base64-encoded); see the commented example at the
+  top of this template. Deploy it with `dbg install --target aws`, or launch it
+  by hand from the console.
+
+# This template is versioned independently of the dbg CLI: its version tracks
+# its parameter contract, which changes far more rarely than the CLI does. CI
+# publishes it under this version, and refuses to overwrite a published version
+# with different content — so a contract change needs a bump here. It is pinned
+# against collector.TemplateVersion by TestTemplateVersionMatches.
+Metadata:
+  DBGorilla:
+    TemplateVersion: 'v1.0'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CollectorConfig — the collector's TOML config, base64-encoded.
+#
+# Encode with `dbg collector encode-config config.toml`, or `base64 -w0
+# config.toml` (macOS: `base64 -i config.toml`). It must be a single line with
+# no whitespace, and at most 4096 characters (a CloudFormation parameter limit).
+#
+# Secrets never go in here. Write them as ${VAR} references; this stack injects
+# the real values from Secrets Manager:
+#   secret   = "${DBG_SERVER_SECRET}"   <- the ServerSecret parameter
+#   password = "${DBG_DB_PASSWORD}"     <- the DbPassword parameter
+#
+# A full example exercising every option:
+#
+#   [dbgorilla]
+#   agent_id  = "11111111-1111-4111-8111-111111111111"  # OpAMP client_id
+#   tenant_id = "22222222-2222-4222-8222-222222222222"
+#   secret    = "${DBG_SERVER_SECRET}"
+#   # Endpoint overrides. Omit them all to use the production defaults
+#   # (wss://otlp.dbgorilla.com/v1/opamp, https://otlp.dbgorilla.com:443,
+#   # https://auth.dbgorilla.com).
+#   opamp_base_url = "wss://otlp.example.com/v1/opamp"
+#   otlp_base_url  = "https://otlp.example.com:443"
+#   auth_base_url  = "https://auth.example.com"
+#   max_message_bytes       = 67108864   # OpAMP frame cap, default 64 MiB
+#   opamp_idle_timeout_secs = 75         # reconnect if the socket goes quiet
+#
+#   # Query analysis: lets DBGorilla run EXPLAIN and read pg_stat_* views.
+#   # Off by default; omit `allowed` to grant everything the engine supports.
+#   [commands]
+#   enabled = true
+#   allowed = ["execute_query", "explain"]
+#
+#   [topology]
+#   interval = "60s"        # schema-graph re-scrape cadence, 60s floor
+#
+#   [otelcol]
+#   binary = "dbg_otelcol"  # already set in the image; override only for dev
+#
+#   # Opaque per-engine tuning, passed straight through to the engine plugin.
+#   [engine.postgres.pool]
+#   per_db_max = 5
+#
+#   # ── an RDS Postgres instance, IAM auth ──
+#   [[component]]
+#   name     = "prod-rds"
+#   engine   = "postgres"
+#   commands = ["explain"]        # per-component override of [commands]
+#   [component.provider]
+#   type        = "aws_rds"
+#   region      = "us-east-1"
+#   instance_id = "prod-pg"
+#   # role_arn  = "arn:aws:iam::123456789012:role/dbg-collector"  # cross-account
+#   [component.auth]
+#   method = "iam"
+#   user   = "dbgorilla"
+#   [component.connect]
+#   host      = "prod-pg.abc.us-east-1.rds.amazonaws.com"
+#   port      = 5432
+#   databases = ["app"]
+#   ssl_mode  = "verify-full"
+#
+#   # ── an Aurora MySQL cluster, password auth ──
+#   [[component]]
+#   name   = "prod-aurora-mysql"
+#   engine = "mysql"
+#   [component.provider]
+#   type       = "aws_aurora"
+#   region     = "us-east-1"
+#   cluster_id = "prod-aurora"
+#   [component.auth]
+#   method   = "password"
+#   user     = "dbgorilla"
+#   password = "${DBG_DB_PASSWORD}"
+#   [component.connect]
+#   host      = "prod-aurora.cluster-abc.us-east-1.rds.amazonaws.com"
+#   port      = 3306
+#   databases = ["app"]
+#
+# When a component uses IAM auth, its database must appear in
+# RdsConnectResources so the task role may call rds-db:connect for it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+Parameters:
+  # ── The collector's configuration ──
+  CollectorConfig:
+    Type: String
+    MinLength: 1
+    MaxLength: 4096
+    AllowedPattern: '^[A-Za-z0-9+/]+={0,2}$'
+    Description: >-
+      The collector's TOML config, base64-encoded on a single line (see the
+      commented example at the top of this template). Run
+      `dbg collector encode-config config.toml` to produce it. Contains no
+      secrets: those are referenced as ${DBG_SERVER_SECRET} / ${DBG_DB_PASSWORD}
+      and supplied by the two parameters below.
+
+  # ── Secrets (kept out of CollectorConfig; stored in Secrets Manager) ──
+  ServerSecret:
+    Type: String
+    NoEcho: true
+    Description: OpAMP client_secret, referenced by the config as ${DBG_SERVER_SECRET}
+  DbPassword:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >-
+      Optional database password for components using password auth, referenced
+      by the config as ${DBG_DB_PASSWORD}. Leave empty for IAM auth.
+
+  CollectorImage:
+    Type: String
+    Description: 'Fully-qualified collector image ref (tag or digest); the CLI resolves + digest-pins it'
+
+  # ── IAM ──
+  # CloudFormation cannot loop, so the per-database rds-db:connect grants arrive
+  # as a list the CLI computes (one ARN per distinct database user). The default
+  # is a wildcard so a hand-launched stack works without hunting DbiResourceIds;
+  # narrow it for a least-privilege deployment.
+  RdsConnectResources:
+    Type: CommaDelimitedList
+    Default: 'arn:aws:rds-db:*:*:dbuser:*/*'
+    Description: >-
+      rds-db:connect ARNs the collector's task role may use, e.g.
+      arn:aws:rds-db:us-east-1:123456789012:dbuser:db-ABCDEF/dbgorilla. The
+      default grants every database in this account; narrow it in production.
+
+  # ── Networking (discovered from the database's VPC) ──
+  Subnets:         { Type: List<AWS::EC2::Subnet::Id>, Description: Subnets that can reach the RDS instance }
+  SecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id, Description: SG allowing egress to RDS + DBGorilla }
+  AssignPublicIp:  { Type: String, Default: ENABLED, AllowedValues: [ENABLED, DISABLED] }
+
+Conditions:
+  IsPasswordAuth: !Not [!Equals [!Ref DbPassword, '']]
+
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/dbgorilla/collector/${AWS::StackName}'
+      RetentionInDays: 30
+
+  # The OpAMP secret lives here, injected into the container as DBG_SERVER_SECRET.
+  #
+  # Deliberately unnamed. A fixed Name is reserved by Secrets Manager for the
+  # whole recovery window after the stack is deleted, so an uninstall followed by
+  # a reinstall under the same stack name fails with "already scheduled for
+  # deletion" for up to 30 days. CloudFormation cannot force immediate deletion
+  # (RecoveryWindowInDays is not settable on the resource), so the fix is to let
+  # Secrets Manager generate a unique name. Everything here refers to the secret
+  # by ARN via !Ref, so nothing depends on the name.
+  ServerSecretStore:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub 'DBGorilla collector OpAMP secret for ${AWS::StackName}'
+      SecretString: !Ref ServerSecret
+
+  # Optional DB password (password auth), injected as DBG_DB_PASSWORD. Unnamed
+  # for the same reason as ServerSecretStore.
+  ComponentPasswordStore:
+    Type: AWS::SecretsManager::Secret
+    Condition: IsPasswordAuth
+    Properties:
+      Description: !Sub 'DBGorilla collector database password for ${AWS::StackName}'
+      SecretString: !Ref DbPassword
+
+  # Pulls the image and reads the secret. Standard ECS execution role + one grant.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-server-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref ServerSecretStore
+                  - !If [IsPasswordAuth, !Ref ComponentPasswordStore, !Ref AWS::NoValue]
+
+  # The collector's own runtime identity: IAM DB auth + RDS discovery, least privilege.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: collector-rds
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: rds-db:connect
+                Resource: !Ref RdsConnectResources
+              # Topology/infra discovery — read-only, describe-level.
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}'
+      CapacityProviders: [FARGATE]
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: collector
+          Image: !Ref CollectorImage
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: collector
+          # The collector reads its config from a file (--config-file), so the
+          # task decodes the CollectorConfig parameter to /tmp before exec'ing
+          # it. /tmp is writable by the image's uid 1000. `exec` keeps the
+          # collector as PID 1 so ECS signals reach it directly.
+          EntryPoint: ['/bin/sh', '-c']
+          Command:
+            - >-
+              set -e;
+              printf '%s' "$DBG_CONFIG_B64" | base64 -d > /tmp/dbg-collector.toml;
+              exec /usr/local/bin/dbg-collector --config-file /tmp/dbg-collector.toml
+          # DBG_SERVER_SECRET / DBG_DB_PASSWORD are injected from Secrets
+          # Manager, never from the plaintext env; the config references them
+          # as ${VAR}.
+          Secrets:
+            - Name: DBG_SERVER_SECRET
+              ValueFrom: !Ref ServerSecretStore
+            - !If
+              - IsPasswordAuth
+              - { Name: DBG_DB_PASSWORD, ValueFrom: !Ref ComponentPasswordStore }
+              - !Ref AWS::NoValue
+          Environment:
+            - { Name: DBG_CONFIG_B64, Value: !Ref CollectorConfig }
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub '${AWS::StackName}'
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      # Singleton supervisor — never run two. Recreate rather than roll.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref Subnets
+          SecurityGroups: [!Ref SecurityGroupId]
+          AssignPublicIp: !Ref AssignPublicIp
+
+Outputs:
+  ClusterName:    { Value: !Ref Cluster }
+  ServiceName:    { Value: !GetAtt Service.Name }
+  LogGroupName:   { Value: !Ref LogGroup }
+  TaskRoleArn:    { Value: !GetAtt TaskRole.Arn, Description: Grant this role rds_iam on the DB user }

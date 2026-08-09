@@ -1,0 +1,48 @@
+name: coverage
+
+# Unit-test coverage -> Codecov, tokenless via GitHub OIDC (id-token: write;
+# no static upload secret). Coverage is an INFORMATIONAL signal here, never a
+# merge gate: codecov.yml marks both project and patch statuses informational,
+# with carryforward so a non-code PR never shows a false drop.
+#
+# fail_ci_if_error stays false on purpose: cli.codecov.io intermittently serves
+# invalid OpenPGP data, which fails the action's CLI-binary signature check.
+# There is no "skip verification" flag; tolerating the error still lands the
+# upload.
+
+on:
+  push:
+    branches: [main, "feat/**", "release-**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mints the OIDC token codecov-action uses for tokenless upload
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      - name: test with coverage
+        run: go test -coverprofile=coverage.out ./...
+      - name: Upload to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          files: coverage.out
+          flags: cli
+          name: cli-unit
+          use_oidc: true
+          fail_ci_if_error: false

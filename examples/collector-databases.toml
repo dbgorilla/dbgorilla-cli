@@ -1,0 +1,26 @@
+# Multi-database collector install file.
+#
+#   dbg collector install --target aws --config collector-databases.toml
+#
+# One Fargate collector monitors every [[database]] listed here. Only
+# `instance-id` is required per entry — everything else is auto-discovered from
+# RDS/Aurora (endpoint, port, subnets, security group, DbiResourceId). Set a
+# field explicitly to override discovery.
+#
+# Networking is shared: the single Fargate task runs in one VPC, so every
+# database must be reachable from it (in practice, they share a VPC). The task's
+# subnets/security group are taken from the first database, or from the
+# top-level --subnets / --security-group-id flags.
+
+[[database]]
+instance-id = "prod-postgres"        # RDS instance identifier
+name        = "Production Postgres"  # display name in DBGorilla (default: the id)
+# user      = "dbgorilla"            # IAM database user (default: dbgorilla)
+# databases = ["app", "billing"]     # databases to monitor
+                                     # (default: just the instance's default
+                                     # database — NOT every database on it)
+
+[[database]]
+instance-id   = "analytics-aurora"   # Aurora cluster identifier
+provider-type = "aws_aurora"         # auto-detected if omitted
+databases     = ["warehouse", "events"]
