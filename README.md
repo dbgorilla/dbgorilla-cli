@@ -14,9 +14,12 @@ The DBGorilla CLI. Sign in to a DBGorilla deployment and connect your IDE/agent 
 ### Homebrew
 
 ```sh
+brew trust dbgorilla/tap   # recent Homebrew requires trusting third-party taps once
 brew install dbgorilla/tap/dbgorilla
 dbgorilla --api-url https://<your-deployment> login
 ```
+
+On Homebrew versions without a `brew trust` command, skip that line.
 
 Installs the `dbgorilla` binary with a `dbg` alias — use whichever you prefer.
 
