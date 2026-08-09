@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.4.0
+
+### Added
+
+- `collector install --target aws` deploys the collector as an AWS Fargate task
+  instead of a local Docker container, for monitoring RDS and Aurora Postgres.
+  It discovers the database, its subnets, and its security groups, then creates
+  a CloudFormation stack holding the ECS cluster, task, IAM roles, log group,
+  and a Secrets Manager secret for the collector's credentials. `--target
+  docker` remains the default and is unchanged.
+- Multi-database collectors. One Fargate collector can monitor several
+  databases: pass `--config` a TOML file with a `[[database]]` entry per
+  database, or pick them from a checklist when the CLI finds more than one.
+- Network-path verification before deploy. The CLI reads the VPC's
+  security-group rules and reports whether the collector will actually be
+  admitted to each database on its port, with the exact ingress rule to add
+  when it won't. This catches the "deployed successfully but silently cannot
+  connect" case before the stack is created.
+- IAM database authentication by default, with `rds-db:connect` scoped to each
+  database's resource ID rather than granted account-wide. The CLI prints the
+  SQL a database admin must run, or runs it directly with `--run-grant`.
+  `--db-password` opts a database into password authentication instead, and the
+  password is stored in Secrets Manager rather than the task definition.
+- Per-database query-analysis controls. `--commands` selects which analysis
+  queries (`execute_query`, `explain`) the collector may run against each
+  database; an interactive checklist appears when the flag is omitted, and
+  `--enable-commands=false` forbids them outright.
+- The AWS-target lifecycle commands: `collector status`, `logs`, `start`,
+  `stop`, `restart`, `upgrade`, and `uninstall` all operate on the Fargate
+  deployment when the collector was installed with `--target aws`. The target
+  is recorded at install time, so these need no extra flag.
+- `collector encode-config`, which encodes a collector config for the
+  CloudFormation `CollectorConfig` parameter — for launching the stack by hand
+  from the AWS console rather than through the CLI.
+- The CloudFormation template is published at a stable URL and versioned on its
+  own contract (currently v1.0), independent of the CLI's version. Customers
+  can read and security-review the exact file their account will deploy before
+  running anything, and `--template-url` deploys a self-hosted copy instead.
+
+### Changed
+
+- The default collector image moves to 0.3.3, which carries RDS certificates in
+  the container's system trust root. This matters for the AWS target, where the
+  CLI defaults to `verify-full` TLS against RDS and Aurora endpoints.
+
+### Notes
+
+- The AWS target requires HTTPS access to the published template. A CLI that
+  cannot reach it fails with an explanatory error rather than deploying a
+  possibly-stale local copy; use `--template-url` where egress is restricted.
+
 ## v0.3.1
 
 ### Changed

@@ -21,7 +21,7 @@ var (
 // reproducibility. Bump this on each release (see the collector repo's
 // "Releasing" docs). Override with `dbg collector install --image`. Used as the
 // fallback when the deployment advertises no preferred version.
-const DefaultImage = "dbgorillapublic.azurecr.io/dbg-collector:0.3.2@sha256:835b2c0b7a45e8e33c07acb4b3d4db45e8ebfdb736655aac6464c64e51e236ff"
+const DefaultImage = "dbgorillapublic.azurecr.io/dbg-collector:0.3.3@sha256:738969348c98fb5dba11322d44d38f60d53ec9cf76fdbbe9bb239def1b83e835"
 
 // ImageRepo is the published collector repository, used to build an image ref
 // from a deployment-advertised preferred version (`<ImageRepo>:<version>`).
