@@ -13,9 +13,3 @@
 
 # Test
 coverage.out
-
-.a2a-bootstrap*.md
-.a2a/
-
-# built binary
-/dbg

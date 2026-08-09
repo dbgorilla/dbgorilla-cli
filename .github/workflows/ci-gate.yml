@@ -7,10 +7,12 @@ name: ci-gate
 on:
   pull_request:
 permissions:
+  contents: read # the vendored action lives in-repo, so the checkout needs it
   checks: read
   statuses: read
 jobs:
   ci-gate:
     runs-on: ubuntu-24.04
     steps:
-      - uses: furiousengineering/dbg-shared-workflows/.github/actions/ci-gate@main
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/ci-gate
