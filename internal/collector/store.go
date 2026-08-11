@@ -128,35 +128,84 @@ func RemoveState() error {
 func secretKey(agentID string) string { return "collector-secret:" + agentID }
 func dbPassKey(agentID string) string { return "collector-dbpass:" + agentID }
 
+// secretsFallbackPath is the 0600 file used when the OS keyring is
+// unavailable. Headless Linux, WSL, CI and plain SSH sessions have no Secret
+// Service, and those are ordinary hosts for a local collector.
+func secretsFallbackPath() (string, error) { return inDir("secrets.json") }
+
+type storedSecrets struct {
+	Secret     string `json:"secret"`
+	DBPassword string `json:"db_password"`
+}
+
 // StoreSecrets persists the collector secret and DB password in the OS
 // keychain, keyed by agent id.
+//
+// A keyring failure falls back to a 0600 file rather than erroring, mirroring
+// auth.StoreTokens. Erroring here stranded a collector identity that had
+// ALREADY been minted server-side: the install died after provisioning, so the
+// user got an orphan they never saw and could not clean up.
 func StoreSecrets(agentID, secret, dbPassword string) error {
-	if err := keyring.Set(keyringService, secretKey(agentID), secret); err != nil {
-		return fmt.Errorf("cannot store collector secret in keychain: %w", err)
+	secErr := keyring.Set(keyringService, secretKey(agentID), secret)
+	if secErr == nil {
+		if err := keyring.Set(keyringService, dbPassKey(agentID), dbPassword); err == nil {
+			return nil
+		}
+		// Partial write: drop the half that landed so the two never disagree.
+		_ = keyring.Delete(keyringService, secretKey(agentID))
 	}
-	if err := keyring.Set(keyringService, dbPassKey(agentID), dbPassword); err != nil {
-		return fmt.Errorf("cannot store database password in keychain: %w", err)
+
+	path, err := secretsFallbackPath()
+	if err != nil {
+		return fmt.Errorf("cannot store collector secrets (keychain unavailable: %v): %w", secErr, err)
 	}
+	data, err := json.Marshal(storedSecrets{Secret: secret, DBPassword: dbPassword})
+	if err != nil {
+		return fmt.Errorf("cannot serialize collector secrets: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("cannot store collector secrets (keychain unavailable: %v): %w", secErr, err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Warning: OS keychain unavailable. Storing collector secrets in %s (0600).\n", path)
 	return nil
 }
 
-// LoadSecrets reads the collector secret and DB password from the keychain.
+// LoadSecrets reads the collector secret and DB password from the keychain,
+// falling back to the 0600 file written when the keychain was unavailable.
 func LoadSecrets(agentID string) (secret, dbPassword string, err error) {
 	secret, err = keyring.Get(keyringService, secretKey(agentID))
-	if err != nil {
-		return "", "", fmt.Errorf("cannot read collector secret from keychain: %w", err)
+	if err == nil {
+		dbPassword, err = keyring.Get(keyringService, dbPassKey(agentID))
+		if err == nil {
+			return secret, dbPassword, nil
+		}
 	}
-	dbPassword, err = keyring.Get(keyringService, dbPassKey(agentID))
-	if err != nil {
-		return "", "", fmt.Errorf("cannot read database password from keychain: %w", err)
+	path, perr := secretsFallbackPath()
+	if perr != nil {
+		return "", "", fmt.Errorf("cannot read collector secrets: %w", err)
 	}
-	return secret, dbPassword, nil
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		return "", "", fmt.Errorf("cannot read collector secrets from keychain or %s: %w", path, err)
+	}
+	var s storedSecrets
+	if jerr := json.Unmarshal(data, &s); jerr != nil {
+		return "", "", fmt.Errorf("cannot parse stored collector secrets %s: %w", path, jerr)
+	}
+	return s.Secret, s.DBPassword, nil
 }
 
-// ClearSecrets removes both keychain entries (best-effort).
+// ClearSecrets removes both keychain entries and the fallback file
+// (best-effort).
 func ClearSecrets(agentID string) {
 	_ = keyring.Delete(keyringService, secretKey(agentID))
 	_ = keyring.Delete(keyringService, dbPassKey(agentID))
+	if path, err := secretsFallbackPath(); err == nil {
+		_ = os.Remove(path)
+	}
 }
 
 // WriteEnvFile materializes the secrets into a 0600 env-file that `docker run

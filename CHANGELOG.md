@@ -2,7 +2,40 @@
 
 ## Unreleased
 
+### Changed
+
+- `collector install --target docker` now defaults to `--ssl-mode disable`.
+  The flag default (`verify-full`) is right for RDS and Aurora but cannot work
+  against the database a local-dev user actually has: stock Postgres ships with
+  `ssl=off`, so the documented `dbg collector install` failed on every standard
+  local setup with "server does not support SSL". An explicit `--ssl-mode`
+  still wins, and `--target aws` is unchanged. The guided flow now also asks
+  for the TLS mode instead of leaving it flag-only.
+- A missing `pg_stat_statements` in `shared_preload_libraries` is now a
+  preflight **warning** rather than a hard failure. The collector runs and
+  reports schema topology without it; it gates query-performance data only.
+  Blocking meant a new user had to `ALTER SYSTEM` and restart their database
+  before seeing anything work.
+
 ### Fixed
+
+- Preflight's remediation for a failed connection pointed the wrong way: a
+  server with TLS *disabled* was told to set `--ssl-mode require (or
+  verify-full)`, which fails again. The advice now matches the failure, and
+  names `disable` where that is the fix.
+- `collector install` no longer reports success over a collector that is
+  crash-looping. It re-checks the container's state and restart count after
+  start, prints the container's own last output, and names the likely cause
+  (commonly a config directory the container runtime cannot bind-mount)
+  instead of blaming a private CA.
+- Collector secrets fall back to a `0600` file when the OS keyring is
+  unavailable, mirroring how login tokens are already stored. Previously the
+  install aborted *after* the collector identity had been provisioned, leaving
+  an orphaned identity server-side on headless Linux, WSL, and CI hosts.
+- Backend errors carrying an HTML body (an SPA catch-all, proxy, or login
+  portal answering instead of the API) no longer dump the page into the
+  terminal. The CLI names the situation and points at `dbg config get api-url`;
+  long JSON bodies are truncated.
 
 - The AWS-target grant instructions (printed after install, or run by
   `--run-grant`) now include `GRANT pg_read_all_data` (PostgreSQL 14+). Without

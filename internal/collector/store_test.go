@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -322,21 +321,50 @@ func TestSecrets_roundTripAndClear(t *testing.T) {
 	}
 }
 
-func TestStoreSecrets_keychainError(t *testing.T) {
+// An unavailable keychain must NOT fail the install: the collector identity is
+// already minted by this point, so erroring here strands it server-side.
+// Secrets fall back to a 0600 file, and reading them back must find it.
+func TestStoreSecrets_keychainUnavailable_fallsBackToFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	keyring.MockInitWithError(errors.New("keychain locked"))
 	t.Cleanup(keyring.MockInit) // restore a working mock for later tests
 
-	err := StoreSecrets("agent-1", "s", "p")
-	if err == nil || !strings.Contains(err.Error(), "keychain") {
-		t.Fatalf("expected keychain store error, got %v", err)
+	if err := StoreSecrets("agent-1", "s3cret", "dbpass"); err != nil {
+		t.Fatalf("StoreSecrets should fall back to a file, got %v", err)
+	}
+
+	path, err := secretsFallbackPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("fallback file not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("fallback file mode = %o, want 600", perm)
+	}
+
+	secret, dbPass, err := LoadSecrets("agent-1")
+	if err != nil {
+		t.Fatalf("LoadSecrets from fallback: %v", err)
+	}
+	if secret != "s3cret" || dbPass != "dbpass" {
+		t.Errorf("got (%q,%q), want (s3cret,dbpass)", secret, dbPass)
+	}
+
+	ClearSecrets("agent-1")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("ClearSecrets should remove the fallback file")
 	}
 }
 
-func TestLoadSecrets_keychainError(t *testing.T) {
+func TestLoadSecrets_noKeychainAndNoFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	keyring.MockInitWithError(errors.New("keychain locked"))
 	t.Cleanup(keyring.MockInit)
 
 	if _, _, err := LoadSecrets("agent-1"); err == nil {
-		t.Fatal("expected keychain read error")
+		t.Fatal("expected an error when neither keychain nor fallback file has the secrets")
 	}
 }

@@ -48,7 +48,7 @@ func init() {
 	installCmd.Flags().String("db-name", "", "Comma-separated database names (empty = all databases on the server)")
 	installCmd.Flags().String("db-user", "", "Read-only database user (prompted if omitted)")
 	installCmd.Flags().String("db-password", "", "Database password (prompted without echo if omitted; or set "+collector.DBPasswordEnv+")")
-	installCmd.Flags().String("ssl-mode", "verify-full", "libpq ssl_mode: disable, require, verify-ca, verify-full")
+	installCmd.Flags().String("ssl-mode", "verify-full", "libpq ssl_mode: disable, require, verify-ca, verify-full (defaults to disable for --target docker, whose database is local and non-TLS by definition)")
 	installCmd.Flags().String("image", collector.DefaultImage, "Collector container image")
 	installCmd.Flags().Bool("yes", false, "Skip confirmation prompts")
 	installCmd.Flags().Bool("dry-run", false, "Render config and print the docker command without minting, writing, or starting anything")
@@ -281,6 +281,13 @@ func runInstallLocal(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Container started: %s", runner.Name)))
+
+	// A container that starts and immediately dies still "starts" as far as
+	// `docker run` is concerned. Confirm it is actually up before reporting a
+	// connection problem, or we blame the network for a crash on boot.
+	if crashLooping(runner) {
+		return errCollectorCrashLooping
+	}
 
 	// Verify connection (best-effort; not fatal).
 	verifyConnection(client, creds.AgentID, caCert)
@@ -1674,12 +1681,25 @@ func withDefaultPort(raw string) string {
 	return u.String()
 }
 
+// localSSLMode resolves --ssl-mode for the docker (local) target. The flag
+// default is verify-full, which is right for AWS but cannot work locally:
+// stock Postgres ships with ssl=off, so verify-full (and require) fail with
+// "server does not support SSL" on the database a local-dev user actually
+// has. An explicit --ssl-mode always wins.
+func localSSLMode(cmd *cobra.Command) string {
+	mode, _ := cmd.Flags().GetString("ssl-mode")
+	if cmd.Flags().Changed("ssl-mode") {
+		return mode
+	}
+	return "disable"
+}
+
 func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
 	host, _ := cmd.Flags().GetString("db-host")
 	port, _ := cmd.Flags().GetInt("db-port")
 	user, _ := cmd.Flags().GetString("db-user")
 	name, _ := cmd.Flags().GetString("name")
-	sslMode, _ := cmd.Flags().GetString("ssl-mode")
+	sslMode := localSSLMode(cmd)
 	dbList, _ := cmd.Flags().GetString("db-name")
 
 	if user == "" {
@@ -1690,6 +1710,12 @@ func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
 	}
 	if name == "" {
 		name = prompt("Name for this target", user)
+	}
+	// Offer the TLS mode in the guided flow. It was flag-only, so a user who
+	// answered the prompts had no way to reach it and hit a connection failure
+	// they could not act on from inside the prompts.
+	if !cmd.Flags().Changed("ssl-mode") && interactiveSelectable(cmd) {
+		sslMode = prompt("TLS mode (disable, require, verify-ca, verify-full)", sslMode)
 	}
 
 	var databases []string
@@ -1738,6 +1764,56 @@ func checkReachable(addr string) error {
 	}
 	_ = conn.Close()
 	return nil
+}
+
+// errCollectorCrashLooping ends the install non-zero once the container has
+// been shown to be restart-looping. The diagnosis is already printed.
+var errCollectorCrashLooping = errors.New("collector container is not staying up")
+
+// crashLooping watches the container briefly after start and reports whether it
+// is restart-looping rather than running. It prints the diagnosis (including
+// the container's own error lines) and returns true.
+//
+// Without this the install printed a green "Container started" over a container
+// that was dying every two seconds, then blamed the control plane -- and
+// suggested a private CA, which is the wrong fix for a crash on boot.
+func crashLooping(runner collector.Runner) bool {
+	// Two samples a few seconds apart: a restart loop shows either an explicit
+	// "restarting" state or a RestartCount that has moved.
+	state, restarts, err := runner.Health()
+	if err != nil {
+		return false // cannot tell; stay quiet rather than cry wolf
+	}
+	if state != "restarting" && restarts == 0 {
+		time.Sleep(4 * time.Second)
+		state, restarts, err = runner.Health()
+		if err != nil {
+			return false
+		}
+	}
+	if state != "restarting" && restarts == 0 {
+		return false
+	}
+
+	fmt.Println()
+	fmt.Println(style.Error(fmt.Sprintf(
+		"✗ The collector container is not staying up (docker state: %s, restarts: %d).", state, restarts)))
+	if logs := runner.RecentLogs(15); logs != "" {
+		fmt.Println()
+		fmt.Println("   Its last output:")
+		for _, line := range strings.Split(logs, "\n") {
+			fmt.Printf("     %s\n", line)
+		}
+	}
+	fmt.Println()
+	fmt.Println("   This is a startup failure, not a connection problem. Common causes:")
+	fmt.Println("     - the config file could not be read inside the container; on Docker Desktop,")
+	fmt.Println("       Colima or Rancher Desktop the config directory must be a shared path, or")
+	fmt.Println("       the bind mount silently becomes an empty directory")
+	fmt.Println("     - the image cannot run on this architecture")
+	fmt.Println()
+	fmt.Println("   Inspect with: dbg collector logs")
+	return true
 }
 
 // verifyConnection polls the control plane briefly for the collector to come
