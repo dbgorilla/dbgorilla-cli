@@ -50,6 +50,34 @@ Tests are unit-style and require no external services. If you add behavior that 
 4. Commit with a clear message. We use the loose convention `feat:`, `fix:`, `docs:`, `chore:`, `test:` as commit prefixes — not strict conventional commits, just enough for the auto-generated changelog to group things sensibly.
 5. Push and open a PR. Fill in the template.
 
+## Releasing
+
+Releases are tag-driven. Pushing a `vX.Y.Z` tag runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml): GoReleaser
+builds the cross-platform binaries, signs them (cosign) with build provenance,
+publishes the GitHub Release, and bumps the Homebrew tap formula.
+
+Three things are easy to get wrong, so check them every time:
+
+1. **`CHANGELOG.md` needs a `## vX.Y.Z` section before you tag.** The release
+   job extracts that section as the release body and fails the build when it is
+   missing. A version ships with notes or it does not ship.
+
+2. **Tag this repository** — `github.com/dbgorilla/dbgorilla-cli`. A tag pushed
+   to an archived mirror is a silent no-op: archived repositories run no
+   workflows, so there is no error, no release, and no tap bump. Confirm the tag
+   landed here and that the release workflow actually ran.
+
+3. **Bump the pinned CLI version wherever a deployment serves its own
+   binaries, in the same release.** Homebrew updates itself; the self-hosted
+   path does not. `scripts/install.sh.tmpl` downloads
+   `/cli/dbg-<os>-<arch>` from the deployment that served it, and those binaries
+   are baked into the deployment's image at build time against a pinned CLI
+   version. Ship a release without moving that pin and `brew` users get the new
+   CLI while every `curl … | sh` user silently stays on the old one — silently,
+   because the old binary keeps working. Bump the pin and rebuild the image as
+   part of the release, not after it.
+
 ## Reporting issues
 
 Open a GitHub issue with the bug-report template. Include:
