@@ -103,25 +103,14 @@ func resolveInsecure(cmd *cobra.Command) bool {
 	return config.ResolveInsecure(flagVal, flagSet)
 }
 
-// requireAPIURL returns the resolved API URL or an actionable error pointing
-// the user at all the ways they can configure it. Used by every command that
-// needs to talk to the backend.
+// requireAPIURL returns the resolved API URL. Resolution can no longer come
+// up empty (config.ResolveAPIURL falls back to the production default), so
+// the error return exists only for signature stability at the call sites;
+// a wrong-deployment mistake surfaces as a connection/auth error with the
+// URL in it, not here.
 func requireAPIURL(cmd *cobra.Command) (string, error) {
 	flagURL, _ := cmd.Flags().GetString("api-url")
-	url, source := config.ResolveAPIURL(flagURL)
-	if url == "" {
-		return "", fmt.Errorf(
-			"no DBGorilla API URL configured.\n" +
-				"  Set one of:\n" +
-				"    dbgorilla config set api-url https://your-deployment\n" +
-				"    export DBGORILLA_API_URL=https://your-deployment\n" +
-				"    dbgorilla --api-url https://your-deployment ...\n" +
-				"\n" +
-				"  Or have your IT team deploy /Library/Application Support/dbgorilla/cli.toml\n" +
-				"  with `[api]\\n  url = \"https://your-deployment\"`.",
-		)
-	}
-	_ = source // available to callers if they want to log it
+	url, _ := config.ResolveAPIURL(flagURL)
 	return url, nil
 }
 

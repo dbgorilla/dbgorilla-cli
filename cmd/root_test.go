@@ -9,18 +9,15 @@ import (
 )
 
 func TestRequireAPIURL(t *testing.T) {
-	t.Run("missing returns actionable error", func(t *testing.T) {
+	t.Run("missing falls back to production default", func(t *testing.T) {
 		isolate(t)
 		c := baseCmd()
 		url, err := requireAPIURL(c)
-		if err == nil {
-			t.Fatal("expected error when no API URL configured")
+		if err != nil {
+			t.Fatalf("err=%v, want nil (default fallback)", err)
 		}
-		if url != "" {
-			t.Errorf("url = %q, want empty", url)
-		}
-		if !strings.Contains(err.Error(), "config set api-url") {
-			t.Errorf("error should guide the user, got: %v", err)
+		if url != config.DefaultAPIURL {
+			t.Errorf("url = %q, want %q", url, config.DefaultAPIURL)
 		}
 	})
 

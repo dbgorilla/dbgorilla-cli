@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
+	"github.com/dbgorilla/dbgorilla-cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -191,7 +192,7 @@ func TestConfigGet(t *testing.T) {
 		}
 	})
 
-	t.Run("api-url not set", func(t *testing.T) {
+	t.Run("api-url not set falls back to default", func(t *testing.T) {
 		isolate(t)
 		c := baseCmd()
 		out := capture(t, func() {
@@ -199,8 +200,8 @@ func TestConfigGet(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 		})
-		if !strings.Contains(out, "(not set)") {
-			t.Errorf("out=%q", out)
+		if !strings.Contains(out, config.DefaultAPIURL) || !strings.Contains(out, "source: default") {
+			t.Errorf("out=%q, want the default URL with source: default", out)
 		}
 	})
 

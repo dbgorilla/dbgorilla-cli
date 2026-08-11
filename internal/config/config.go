@@ -9,17 +9,18 @@
 //     ~/.config/dbgorilla/cli.toml when XDG_CONFIG_HOME is unset)
 //  4. /etc/dbgorilla/cli.toml        (system-wide; macOS uses
 //     /Library/Application Support/dbgorilla/cli.toml)
-//  5. (no default; caller surfaces a helpful error pointing at `dbg config`)
+//  5. DefaultAPIURL (the hosted production deployment)
 //
 // The user-config location follows the XDG Base Directory spec rather than a
 // proprietary dotfile dir. Dotfile-walking credential stealers find both
 // anyway, and XDG alignment lets backup/sync tooling treat dbg like every
 // other modern CLI.
 //
-// On-prem deployments don't share a single canonical URL, so we deliberately
-// do not bake one in. The install script (scripts/install.sh.tmpl) writes
-// the user-level config file at install time so the dev never has to type
-// the URL.
+// The baked-in default targets the hosted product, where the vast majority
+// of installs (notably Homebrew, which cannot template a per-deployment URL)
+// point. Self-hosted deployments are unaffected in practice: their install
+// script (scripts/install.sh.tmpl) writes the user-level config file at
+// install time, which outranks the default.
 package config
 
 import (
@@ -35,6 +36,10 @@ import (
 const (
 	configSubdir = "dbgorilla"
 	configFile   = "cli.toml"
+
+	// DefaultAPIURL is the hosted production deployment, used when no flag,
+	// env var, or config file provides a URL. Any configured layer outranks it.
+	DefaultAPIURL = "https://app.dbgorilla.com"
 )
 
 // goos indirects runtime.GOOS so the OS-specific path resolution branches can
@@ -185,16 +190,16 @@ func (c *Config) SaveUser() error {
 type ResolvedSource string
 
 const (
-	SourceFlag   ResolvedSource = "flag"
-	SourceEnv    ResolvedSource = "env"
-	SourceUser   ResolvedSource = "user-config"
-	SourceSystem ResolvedSource = "system-config"
-	SourceNone   ResolvedSource = "none"
+	SourceFlag    ResolvedSource = "flag"
+	SourceEnv     ResolvedSource = "env"
+	SourceUser    ResolvedSource = "user-config"
+	SourceSystem  ResolvedSource = "system-config"
+	SourceDefault ResolvedSource = "default"
 )
 
 // ResolveAPIURL returns the API URL using the documented layered priority.
-// Returns the URL plus the source it came from. Empty URL + SourceNone means
-// nothing is configured and the caller should error with a helpful message.
+// Returns the URL plus the source it came from. Never returns an empty URL:
+// when nothing is configured it falls back to DefaultAPIURL / SourceDefault.
 func ResolveAPIURL(flagValue string) (string, ResolvedSource) {
 	if flagValue != "" {
 		return flagValue, SourceFlag
@@ -208,7 +213,7 @@ func ResolveAPIURL(flagValue string) (string, ResolvedSource) {
 	if s, _ := LoadSystem(); s != nil && s.API.URL != "" {
 		return s.API.URL, SourceSystem
 	}
-	return "", SourceNone
+	return DefaultAPIURL, SourceDefault
 }
 
 // ResolveInsecure returns whether TLS verification should be skipped.

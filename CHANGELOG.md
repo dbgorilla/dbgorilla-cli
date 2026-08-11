@@ -28,6 +28,15 @@
   reports schema topology without it; it gates query-performance data only.
   Blocking meant a new user had to `ALTER SYSTEM` and restart their database
   before seeing anything work.
+- The CLI now defaults its API URL to the hosted production deployment
+  (`https://app.dbgorilla.com`) when nothing is configured. Every existing
+  configuration layer still overrides it: `--api-url`, `DBGORILLA_API_URL`,
+  the user config file, then the system config file. Homebrew installs — which
+  cannot know a deployment URL at install time — now work with `dbg login`
+  alone; self-hosted deployments are unaffected because their install script
+  writes the deployment URL into the user config. `dbg config get api-url` and
+  `dbg doctor` report `source: default` when the fallback is in use, and
+  commands no longer error with "no DBGorilla API URL configured".
 
 ### Fixed
 

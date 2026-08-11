@@ -74,19 +74,14 @@ var configGetCmd = &cobra.Command{
 		case "api-url", "api_url":
 			flagURL, _ := cmd.Flags().GetString("api-url")
 			url, source := config.ResolveAPIURL(flagURL)
-			if url == "" {
-				fmt.Println("api-url: (not set)")
-				fmt.Println("  source: none")
-				fmt.Println()
-				fmt.Println("  Configure with:")
-				fmt.Println("    dbgorilla config set api-url https://your-deployment")
-				fmt.Println("    export DBGORILLA_API_URL=https://your-deployment")
-				return nil
-			}
 			fmt.Printf("api-url: %s\n", url)
 			fmt.Printf("  source: %s\n", source)
 			if source == config.SourceSystem {
 				fmt.Printf("  path:   %s\n", config.SystemConfigPath())
+			}
+			if source == config.SourceDefault {
+				fmt.Println("  (built-in production default; override with" +
+					" `dbgorilla config set api-url https://your-deployment`)")
 			}
 			return nil
 		case "insecure":

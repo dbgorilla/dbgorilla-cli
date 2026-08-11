@@ -91,13 +91,15 @@ func TestRunInstall_DryRun_RemoteHostNoRewrite(t *testing.T) {
 }
 
 func TestRunInstall_EarlyErrors(t *testing.T) {
-	t.Run("no api url", func(t *testing.T) {
+	t.Run("no api url falls through to the login gate", func(t *testing.T) {
 		isolate(t)
 		c := installTestCmd()
 		_ = c.Flags().Set("db-user", "ro")
 		err := runInstall(c, nil)
-		if err == nil || !strings.Contains(err.Error(), "API URL") {
-			t.Fatalf("err=%v, want api-url error", err)
+		// URL resolution now always succeeds (production default), so the
+		// first hard gate with nothing configured is authentication.
+		if err == nil || !strings.Contains(err.Error(), "not logged in") {
+			t.Fatalf("err=%v, want not-logged-in error", err)
 		}
 	})
 
