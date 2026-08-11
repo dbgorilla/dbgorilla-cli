@@ -32,6 +32,8 @@ var (
 	dockerAvailable = collector.DockerAvailable
 	// runPreflight runs the read-only database preflight against a DSN.
 	runPreflight = preflight.Run
+	// probeTLS asks the server whether it speaks TLS (seam for tests).
+	probeTLS = preflight.ProbeTLS
 	// runContainer starts the collector container (`docker run`). Method
 	// expression (not a wrapping closure) so the default carries no uncovered
 	// statement of its own -- collector.Runner.Run is func(collector.Runner) error.
@@ -175,6 +177,13 @@ func runInstallLocal(cmd *cobra.Command) error {
 		}
 	} else {
 		fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", target.HostDial())))
+	}
+
+	// Settle the TLS mode against what the server actually supports, before the
+	// preflight connects with it. Nothing is provisioned yet, so a refusal here
+	// costs the user nothing.
+	if err := resolveTLSMode(cmd, &target, password); err != nil {
+		return err
 	}
 
 	// Deep DB preflight (read-only) before we provision anything, so a
@@ -1048,6 +1057,9 @@ func dryRunInstall(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// Preview the TLS mode the real run would settle on, or the dry run would
+	// advertise a config the install does not produce. Never prompts here.
+	previewTLSMode(cmd, &target)
 	cfg := collector.Build("<minted-on-install>", "<minted-on-install>", target, endpointsFromFlags(cmd))
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -1681,17 +1693,102 @@ func withDefaultPort(raw string) string {
 	return u.String()
 }
 
-// localSSLMode resolves --ssl-mode for the docker (local) target. The flag
-// default is verify-full, which is right for AWS but cannot work locally:
-// stock Postgres ships with ssl=off, so verify-full (and require) fail with
-// "server does not support SSL" on the database a local-dev user actually
-// has. An explicit --ssl-mode always wins.
-func localSSLMode(cmd *cobra.Command) string {
-	mode, _ := cmd.Flags().GetString("ssl-mode")
-	if cmd.Flags().Changed("ssl-mode") {
-		return mode
+// isLocalDatabase reports whether a host is this machine. Loopback names plus
+// the Docker host alias, which is what a loopback target becomes for the
+// containerized collector. Only these may have TLS dropped automatically.
+func isLocalDatabase(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	h = strings.Trim(h, "[]")
+	return collector.IsLoopback(h) || h == collector.DockerHostInternal
+}
+
+// probeTLSSupport runs the capability probe with a bound timeout. A nil
+// command context (tests, or a command invoked outside Execute) is tolerated.
+func probeTLSSupport(cmd *cobra.Command, target collector.Target, password string) preflight.TLSSupport {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return "disable"
+	// The probe is a courtesy, not a gate: bound it so an unresponsive host
+	// delays the install by seconds rather than hanging it.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return probeTLS(ctx, preflight.ProbeTLSDSN(buildDSN(target, password)))
+}
+
+// previewTLSMode applies the dry run's share of the TLS decision: the safe,
+// automatic loopback case, and a note for the case that would need consent. It
+// never prompts and never changes anything outside target.
+func previewTLSMode(cmd *cobra.Command, target *collector.Target) {
+	if cmd.Flags().Changed("ssl-mode") {
+		return
+	}
+	if probeTLSSupport(cmd, *target, "") != preflight.TLSUnsupported {
+		return
+	}
+	if isLocalDatabase(target.Host) {
+		fmt.Println(style.Warn(fmt.Sprintf(
+			"⚠  %s does not accept TLS connections; it is on this machine, so the install would use ssl_mode=disable.",
+			target.HostDial())))
+		target.SSLMode = "disable"
+		return
+	}
+	fmt.Println(style.Warn(fmt.Sprintf(
+		"⚠  %s does not accept TLS connections and is not on this machine.", target.HostDial())))
+	fmt.Println("   The real install would stop and ask you to confirm sending credentials")
+	fmt.Println("   in clear text, or to pass --ssl-mode explicitly.")
+}
+
+// resolveTLSMode settles the connection's TLS mode by asking the server what it
+// supports, rather than making the user discover a flag.
+//
+// The rule that governs it: never silently drop TLS for a database that is not
+// on this machine. Auto-selecting no-TLS for loopback is safe -- the traffic
+// never leaves the host. For any other host, no-TLS means the collector's
+// queries and the database password cross a network in the clear, so it takes
+// an explicit choice. Negotiating that away because the far end said "no TLS"
+// is the shape of a downgrade attack.
+//
+// An explicit --ssl-mode is always honored and skips probing entirely.
+func resolveTLSMode(cmd *cobra.Command, target *collector.Target, password string) error {
+	if cmd.Flags().Changed("ssl-mode") {
+		return nil // the user chose; nothing to infer
+	}
+
+	support := probeTLSSupport(cmd, *target, password)
+	if support != preflight.TLSUnsupported {
+		// Supported, or undeterminable. Keep the secure default and let the
+		// real preflight report anything genuinely wrong.
+		return nil
+	}
+
+	if isLocalDatabase(target.Host) {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s does not accept TLS connections.", target.HostDial())))
+		fmt.Println("   It is on this machine, so the connection never leaves it — continuing without TLS.")
+		fmt.Println("   Pass --ssl-mode explicitly to choose for yourself.")
+		target.SSLMode = "disable"
+		return nil
+	}
+
+	// Remote and refusing TLS: state what was observed, then require a choice.
+	fmt.Println(style.Warn(fmt.Sprintf("⚠  %s does not accept TLS connections, and it is not on this machine.", target.HostDial())))
+	fmt.Println("   Without TLS the collector's queries and the database password cross")
+	fmt.Println("   the network in clear text, readable by anything in between.")
+	fmt.Println("   Nothing has been provisioned yet.")
+
+	if !interactiveSelectable(cmd) {
+		// Deterministic for CI: never auto-downgrade, including under --yes.
+		return fmt.Errorf(
+			"refusing to connect to %s without TLS on an unattended run.\n"+
+				"  If clear text is genuinely what you want, say so explicitly: --ssl-mode disable\n"+
+				"  If the database should have TLS, check the host and port first",
+			target.HostDial())
+	}
+	if !promptYesNo("Connect to this remote database without TLS?", false) {
+		return fmt.Errorf("aborted: %s refuses TLS and connecting without it was declined", target.HostDial())
+	}
+	target.SSLMode = "disable"
+	return nil
 }
 
 func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
@@ -1699,7 +1796,7 @@ func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
 	port, _ := cmd.Flags().GetInt("db-port")
 	user, _ := cmd.Flags().GetString("db-user")
 	name, _ := cmd.Flags().GetString("name")
-	sslMode := localSSLMode(cmd)
+	sslMode, _ := cmd.Flags().GetString("ssl-mode")
 	dbList, _ := cmd.Flags().GetString("db-name")
 
 	if user == "" {
@@ -1710,12 +1807,6 @@ func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
 	}
 	if name == "" {
 		name = prompt("Name for this target", user)
-	}
-	// Offer the TLS mode in the guided flow. It was flag-only, so a user who
-	// answered the prompts had no way to reach it and hit a connection failure
-	// they could not act on from inside the prompts.
-	if !cmd.Flags().Changed("ssl-mode") && interactiveSelectable(cmd) {
-		sslMode = prompt("TLS mode (disable, require, verify-ca, verify-full)", sslMode)
 	}
 
 	var databases []string

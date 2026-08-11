@@ -83,11 +83,82 @@ func Run(ctx context.Context, dsn string) Report {
 			Name:     "connect",
 			Severity: Fail,
 			Detail:   fmt.Sprintf("cannot connect: %v", err),
-			Fix: tlsAwareConnectFix(err),
+			Fix:      tlsAwareConnectFix(err),
 		}}}
 	}
 	defer func() { _ = conn.Close(ctx) }()
 	return RunWith(ctx, &pgxInspector{conn: conn, dsn: dsn})
+}
+
+// TLSSupport is what a probe learned about a server's TLS capability.
+type TLSSupport int
+
+const (
+	// TLSUnknown means the probe could not tell -- the server was unreachable,
+	// or it failed for a reason unrelated to TLS. Never act on this; let the
+	// real preflight report the actual error.
+	TLSUnknown TLSSupport = iota
+	// TLSSupported means the server completed a TLS handshake.
+	TLSSupported
+	// TLSUnsupported means the server explicitly refused TLS.
+	TLSUnsupported
+)
+
+// ProbeTLS asks the server whether it speaks TLS at all, so the CLI can react
+// to what the server actually is instead of making the user guess a flag.
+//
+// The probe deliberately uses sslmode=require, not verify-full: require tests
+// only whether a TLS handshake is possible, so a server with TLS behind a
+// private CA still answers "supported" (its certificate is a separate problem
+// with a separate fix). An authentication failure also means supported -- the
+// handshake got far enough for the server to reject the credentials.
+//
+// dsn must already carry sslmode=require; ProbeTLSDSN builds that form.
+func ProbeTLS(ctx context.Context, dsn string) TLSSupport {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err == nil {
+		_ = conn.Close(ctx)
+		return TLSSupported
+	}
+	if IsTLSUnsupported(err) {
+		return TLSUnsupported
+	}
+	if isAuthFailure(err) {
+		return TLSSupported
+	}
+	return TLSUnknown
+}
+
+// ProbeTLSDSN rewrites a DSN's sslmode to "require" for the capability probe.
+func ProbeTLSDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	q := u.Query()
+	q.Set("sslmode", "require")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// IsTLSUnsupported reports whether an error is the server saying it has no TLS.
+func IsTLSUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "server does not support ssl") ||
+		strings.Contains(msg, "server refused tls")
+}
+
+// isAuthFailure reports whether the server answered but rejected the login,
+// which still proves the transport worked.
+func isAuthFailure(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "password authentication failed") ||
+		strings.Contains(msg, "authentication failed") ||
+		strings.Contains(msg, "role") && strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no pg_hba.conf entry")
 }
 
 // tlsAwareConnectFix builds the remediation for a failed connection. The

@@ -4,13 +4,25 @@
 
 ### Changed
 
-- `collector install --target docker` now defaults to `--ssl-mode disable`.
-  The flag default (`verify-full`) is right for RDS and Aurora but cannot work
-  against the database a local-dev user actually has: stock Postgres ships with
-  `ssl=off`, so the documented `dbg collector install` failed on every standard
-  local setup with "server does not support SSL". An explicit `--ssl-mode`
-  still wins, and `--target aws` is unchanged. The guided flow now also asks
-  for the TLS mode instead of leaving it flag-only.
+- `collector install` now works out what TLS mode the database supports instead
+  of making you guess a flag. Stock Postgres ships with `ssl=off`, so the
+  documented command used to fail on every standard local setup with "server
+  does not support SSL" and a hint pointing the wrong way. The CLI now asks the
+  server first (nothing is provisioned at that point) and reacts:
+
+  - A database **on this machine** (loopback, or the Docker host alias) that
+    refuses TLS is handled automatically — the traffic never leaves the host —
+    and the CLI says so rather than failing.
+  - A database **anywhere else** that refuses TLS is never downgraded silently.
+    The CLI states plainly that queries and the database password would cross
+    the network in clear text and asks for an explicit yes; unattended runs
+    (including `--yes`) refuse outright and tell you to pass `--ssl-mode
+    disable` if that is genuinely intended.
+  - An explicit `--ssl-mode` is always honored and skips the probe entirely,
+    and `--target aws` is unchanged.
+
+  `--dry-run` previews the same decision, so it no longer advertises a config
+  the real install would not produce.
 - A missing `pg_stat_statements` in `shared_preload_libraries` is now a
   preflight **warning** rather than a hard failure. The collector runs and
   reports schema topology without it; it gates query-performance data only.
@@ -21,8 +33,8 @@
 
 - Preflight's remediation for a failed connection pointed the wrong way: a
   server with TLS *disabled* was told to set `--ssl-mode require (or
-  verify-full)`, which fails again. The advice now matches the failure, and
-  names `disable` where that is the fix.
+  verify-full)`, which fails again. The advice now reflects what actually
+  happened, and names `disable` where that is the fix.
 - `collector install` no longer reports success over a collector that is
   crash-looping. It re-checks the container's state and restart count after
   start, prints the container's own last output, and names the likely cause
@@ -36,7 +48,6 @@
   portal answering instead of the API) no longer dump the page into the
   terminal. The CLI names the situation and points at `dbg config get api-url`;
   long JSON bodies are truncated.
-
 - The AWS-target grant instructions (printed after install, or run by
   `--run-grant`) now include `GRANT pg_read_all_data` (PostgreSQL 14+). Without
   it the schema-topology scraper fails on every cycle -- its `pg_dump` needs
