@@ -2,7 +2,6 @@ package ide
 
 import (
 	"path/filepath"
-	"runtime"
 )
 
 // VSCode targets the official MCP support shipped in mid-2025. Its config
@@ -47,7 +46,7 @@ func (v *VSCode) ConfigPath(scope Scope) (string, error) {
 		}
 		return filepath.Join(cwd, ".vscode", "mcp.json"), nil
 	}
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		return filepath.Join(homeDir(), "Library", "Application Support", "Code", "User", "mcp.json"), nil
 	case "windows":

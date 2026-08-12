@@ -98,6 +98,9 @@ func TestHelperProcess(t *testing.T) {
 			emit("HP_INSPECT_DIGEST", os.Getenv("HP_INSPECT_DIGEST_OUT"))
 		case strings.Contains(format, "State.Running"):
 			emit("HP_INSPECT_RUNNING", os.Getenv("HP_INSPECT_RUNNING_OUT"))
+		case strings.Contains(format, "State.Status"):
+			// Runner.Health: "<status> <restartCount>".
+			emit("HP_INSPECT_HEALTH", os.Getenv("HP_INSPECT_HEALTH_OUT"))
 		case strings.Contains(format, "Config.Image"):
 			emit("HP_INSPECT_IMAGE", os.Getenv("HP_INSPECT_IMAGE_OUT"))
 		default:
