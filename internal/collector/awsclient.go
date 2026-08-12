@@ -22,10 +22,16 @@ var (
 	awsCfgErr  error
 )
 
-// loadAWSConfig resolves the default AWS config once (credential + region
-// resolution). A non-empty region overrides the resolved one, so uninstall /
-// status can target the same region the install captured.
-func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
+// loadAWSConfig resolves the AWS config every SDK client in this package is
+// built from. A package var rather than a plain func so tests can substitute a
+// config whose HTTP client answers from a fixture instead of the network —
+// without it, every AWS code path is only reachable against a live account.
+var loadAWSConfig = loadAWSConfigDefault
+
+// loadAWSConfigDefault resolves the default AWS config once (credential +
+// region resolution). A non-empty region overrides the resolved one, so
+// uninstall / status can target the same region the install captured.
+func loadAWSConfigDefault(ctx context.Context, region string) (aws.Config, error) {
 	awsCfgOnce.Do(func() {
 		awsCfg, awsCfgErr = config.LoadDefaultConfig(ctx)
 	})

@@ -43,6 +43,37 @@ var (
 	checkWorkload = preflight.CheckWorkload
 )
 
+// AWS-path seams. Same purpose as the block above, for the operations that
+// reach a live AWS account: without them the whole `--target aws` workflow is
+// only exercisable against a real account with a real RDS instance, which in
+// practice means it is exercised for the first time during a customer install.
+var (
+	awsAvailable      = collector.AwsAvailable
+	awsIdentity       = collector.AwsIdentity
+	awsAccountID      = collector.AwsAccountID
+	awsRegion         = collector.AwsRegion
+	discoverAwsTarget = collector.DiscoverAwsTarget
+	stackStatus       = collector.StackStatus
+	updateComponents  = collector.UpdateComponents
+	deleteStack       = collector.DeleteStack
+	upgradeImage      = collector.UpgradeImage
+	checkNetworkPath  = collector.VerifyNetworkPath
+	runGrant          = collector.RunGrant
+	reachable         = collector.Reachable
+	// runFargateDeploy / runFargateDeployQuiet are method expressions (not
+	// wrapping closures) so the production defaults carry no uncovered
+	// statement of their own.
+	runFargateDeploy      = collector.FargateDeploy.Run
+	runFargateDeployQuiet = collector.FargateDeploy.RunQuiet
+	// containerHealth / containerRecentLogs read the local container's state after
+	// start, so the crash-loop diagnosis is reachable without a Docker engine.
+	containerHealth     = collector.Runner.Health
+	containerRecentLogs = collector.Runner.RecentLogs
+	// pinImage resolves an image tag to its digest before a container is
+	// replaced, so an upgrade records what actually runs.
+	pinImage = collector.PinnedRef
+)
+
 func init() {
 	installCmd.Flags().String("name", "", "Display name for this database target (prompted if omitted)")
 	installCmd.Flags().String("db-host", "localhost", "Database host")
@@ -244,7 +275,7 @@ func runInstallLocal(cmd *cobra.Command) error {
 	// Pin to an immutable digest before running, so a deployment-blessed version
 	// (a bare tag) is as reproducible and tamper-evident as the hard-pinned
 	// default. Already-pinned refs pass through untouched.
-	pinned, err := collector.PinnedRef(image)
+	pinned, err := pinImage(image)
 	if err != nil {
 		return fmt.Errorf("resolving collector image digest: %w", err)
 	}
@@ -341,7 +372,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 		// could not deprovision the identity (an expired login, say). Updating a
 		// stack that is gone fails deep in the SDK with a raw DescribeStacks
 		// error, so check first and install fresh instead.
-		status, err := collector.StackStatus(st.StackName, st.Region)
+		status, err := stackStatus(st.StackName, st.Region)
 		if err != nil {
 			return err
 		}
@@ -356,10 +387,10 @@ func runInstallAWS(cmd *cobra.Command) error {
 
 	// Preflight: reuse the caller's own AWS CLI credentials; no keys pass
 	// through this tool (the ticket's "auto-detect local AWS credentials").
-	if err := collector.AwsAvailable(); err != nil {
+	if err := awsAvailable(); err != nil {
 		return err
 	}
-	identity, err := collector.AwsIdentity()
+	identity, err := awsIdentity()
 	if err != nil {
 		return err
 	}
@@ -404,8 +435,8 @@ func runInstallAWS(cmd *cobra.Command) error {
 	stackName, _ := cmd.Flags().GetString("stack-name")
 	assignIP, _ := cmd.Flags().GetString("assign-public-ip")
 	commandsEnabled := resolveCommands(cmd, targets)
-	region := collector.AwsRegion()
-	accountID, err := collector.AwsAccountID()
+	region := awsRegion()
+	accountID, err := awsAccountID()
 	if err != nil {
 		return err
 	}
@@ -432,7 +463,9 @@ func runInstallAWS(cmd *cobra.Command) error {
 		}
 		fmt.Printf("\nDry run — validating the template for stack %q (%d database(s), no identity minted):\n", stackName, len(targets))
 		printAwsParams(params)
-		return collector.FargateDeploy{StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL}.Run()
+		return runFargateDeploy(collector.FargateDeploy{
+			StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL,
+		})
 	}
 
 	fmt.Println("Provisioning collector identity...")
@@ -500,7 +533,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
 		}
-		if serr := collector.DeleteStack(stackName, region); serr != nil {
+		if serr := deleteStack(stackName, region); serr != nil {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v (delete it from the console)", stackName, serr)))
 		}
 		_ = collector.RemoveState()
@@ -518,7 +551,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 // secret, and networking — so "add or change a database" is one command with no
 // teardown. targets is the full desired set (declarative), not a delta.
 func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
-	if err := collector.AwsAvailable(); err != nil {
+	if err := awsAvailable(); err != nil {
 		return err
 	}
 	targets, err := resolveAwsTargets(cmd)
@@ -539,7 +572,7 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 	resolveCommands(cmd, targets)
 	fmt.Printf("Updating collector %s in place to monitor %d database(s)...\n", st.AgentID, len(targets))
 	if err := withSpinner("Updating collector…", func() error {
-		return collector.UpdateComponents(st.StackName, st.Region, targets, dbPassword)
+		return updateComponents(st.StackName, st.Region, targets, dbPassword)
 	}); err != nil {
 		return err
 	}
@@ -569,7 +602,7 @@ func applyGrants(cmd *cobra.Command, targets []collector.AwsTarget) {
 	offer := !run && !cmd.Flags().Changed("run-grant") && interactiveSelectable(cmd)
 	var probe func(string) error
 	if offer {
-		probe = collector.Reachable
+		probe = reachable
 	}
 	plan := collector.PlanGrants(targets, probe)
 	if len(plan.Targets) == 0 {
@@ -599,7 +632,7 @@ func applyGrants(cmd *cobra.Command, targets []collector.AwsTarget) {
 	fmt.Println("\nGranting the collector's IAM user access inside each database...")
 	for _, t := range plan.Targets {
 		dsn := collector.AdminDSN(adminUser, adminPass, t)
-		if err := collector.RunGrant(cmd.Context(), dsn, collector.GrantStatements(t.User, t.Databases)); err != nil {
+		if err := runGrant(cmd.Context(), dsn, collector.GrantStatements(t.User, t.Databases)); err != nil {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  couldn't reach/grant %s from here (%v).\n"+
 				"   A private database often isn't reachable from where you run the CLI — run this SQL where it is:", t.InstanceID, err)))
 			printGrantFor(t)
@@ -614,12 +647,12 @@ func applyGrants(cmd *cobra.Command, targets []collector.AwsTarget) {
 // progress so CI logs stay useful.
 func deployStack(deploy collector.FargateDeploy, title string) error {
 	if !interactiveTerminal() {
-		return deploy.Run()
+		return runFargateDeploy(deploy)
 	}
 	var out string
 	err := withSpinner(title, func() error {
 		var e error
-		out, e = deploy.RunQuiet()
+		out, e = runFargateDeployQuiet(deploy)
 		return e
 	})
 	if err != nil && out != "" {
@@ -655,7 +688,7 @@ func resolveAwsTargets(cmd *cobra.Command) ([]collector.AwsTarget, error) {
 		if awsDBPassword(cmd) != "" {
 			seed.AuthMethod = "password"
 		}
-		one, err := collector.DiscoverAwsTarget("", seed.ProviderType, seed)
+		one, err := discoverAwsTarget("", seed.ProviderType, seed)
 		var amb *collector.AmbiguousTargetError
 		switch {
 		case errors.As(err, &amb):
@@ -715,7 +748,7 @@ func pickTargets(amb *collector.AmbiguousTargetError) ([]collector.TargetChoice,
 func discoverChoices(choices []collector.TargetChoice, seed collector.AwsTarget) ([]collector.AwsTarget, error) {
 	targets := make([]collector.AwsTarget, 0, len(choices))
 	for _, c := range choices {
-		t, err := collector.DiscoverAwsTarget(c.ID, c.ProviderType, seed)
+		t, err := discoverAwsTarget(c.ID, c.ProviderType, seed)
 		if err != nil {
 			return nil, fmt.Errorf("resolving %q: %w", c.ID, err)
 		}
@@ -736,7 +769,7 @@ func resolveAwsTargetsFromConfig(path string) ([]collector.AwsTarget, error) {
 		seed := d.Seed()
 		t := seed
 		if !seed.Complete() {
-			t, err = collector.DiscoverAwsTarget(seed.InstanceID, seed.ProviderType, seed)
+			t, err = discoverAwsTarget(seed.InstanceID, seed.ProviderType, seed)
 			if err != nil {
 				return nil, fmt.Errorf("resolving database %q: %w", seed.InstanceID, err)
 			}
@@ -776,7 +809,7 @@ func taskNetworking(cmd *cobra.Command, targets []collector.AwsTarget) (subnets 
 // continue. A failure of the check itself (e.g. missing ec2:Describe*
 // permissions) never hard-blocks the install; it warns and proceeds.
 func verifyNetworkPath(cmd *cobra.Command, sg string, subnets []string, targets []collector.AwsTarget) error {
-	findings, err := collector.VerifyNetworkPath(cmd.Context(), sg, subnets, targets)
+	findings, err := checkNetworkPath(cmd.Context(), sg, subnets, targets)
 	if err != nil {
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not verify the network path (%v); continuing", err)))
 		return nil
@@ -842,7 +875,7 @@ func resolveAwsTarget(cmd *cobra.Command) (collector.AwsTarget, error) {
 		}
 		return t, nil
 	}
-	target, err := collector.DiscoverAwsTarget(t.InstanceID, provider, t)
+	target, err := discoverAwsTarget(t.InstanceID, provider, t)
 	// When auto-selection is ambiguous and we have a real terminal, let the
 	// user pick instead of failing. Non-interactive (piped/CI/--yes) keeps the
 	// old behavior: surface the error and ask for --db-instance-id.
@@ -852,7 +885,7 @@ func resolveAwsTarget(cmd *cobra.Command) (collector.AwsTarget, error) {
 		if perr != nil {
 			return collector.AwsTarget{}, perr
 		}
-		return collector.DiscoverAwsTarget(choice.ID, choice.ProviderType, t)
+		return discoverAwsTarget(choice.ID, choice.ProviderType, t)
 	}
 	return target, err
 }
@@ -863,7 +896,7 @@ func interactiveSelectable(cmd *cobra.Command) bool {
 	if yes, _ := cmd.Flags().GetBool("yes"); yes {
 		return false
 	}
-	return term.IsTerminal(int(os.Stdin.Fd()))
+	return stdinIsTerminal()
 }
 
 // pickTarget prints the ambiguous candidates and reads the user's choice.
@@ -1174,7 +1207,7 @@ func awsStatus(cmd *cobra.Command, st *collector.State) error {
 	fmt.Printf("Target:     aws — %s\n", st.TargetName)
 	fmt.Printf("Image:      %s\n", st.Image)
 	fmt.Printf("Stack:      %s\n", st.StackName)
-	status, err := collector.StackStatus(st.StackName, st.Region)
+	status, err := stackStatus(st.StackName, st.Region)
 	switch {
 	case err != nil:
 		fmt.Println(style.Warn(fmt.Sprintf("Deploy:     status unknown (%v)", err)))
@@ -1431,20 +1464,20 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("Upgrading to %s...\n", image)
 
 	if st.IsAWS() {
-		if err := collector.UpgradeImage(st.StackName, st.Region, image); err != nil {
+		if err := upgradeImage(st.StackName, st.Region, image); err != nil {
 			return err
 		}
 		fmt.Println(style.Success("✓ Upgrade initiated; ECS is rolling the task. Check `dbg collector status`."))
 		st.Image = image
 	} else {
-		pinned, err := collector.PinnedRef(image)
+		pinned, err := pinImage(image)
 		if err != nil {
 			return err
 		}
 		runner := dockerRunner(st)
 		runner.Image = pinned
 		_ = runner.Remove()
-		if err := runner.Run(); err != nil {
+		if err := runContainer(runner); err != nil {
 			return err
 		}
 		fmt.Println(style.Success(fmt.Sprintf("✓ Upgraded to %s", pinned)))
@@ -1520,7 +1553,7 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 
 	// Remove the runtime — an AWS CloudFormation stack or a local container.
 	if st.IsAWS() {
-		if err := collector.DeleteStack(st.StackName, st.Region); err != nil {
+		if err := deleteStack(st.StackName, st.Region); err != nil {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v", st.StackName, err)))
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Stack %s deletion started", st.StackName)))
@@ -1919,13 +1952,13 @@ var errCollectorCrashLooping = errors.New("collector container is not staying up
 func crashLooping(runner collector.Runner) bool {
 	// Two samples a few seconds apart: a restart loop shows either an explicit
 	// "restarting" state or a RestartCount that has moved.
-	state, restarts, err := runner.Health()
+	state, restarts, err := containerHealth(runner)
 	if err != nil {
 		return false // cannot tell; stay quiet rather than cry wolf
 	}
 	if state != "restarting" && restarts == 0 {
 		time.Sleep(4 * time.Second)
-		state, restarts, err = runner.Health()
+		state, restarts, err = containerHealth(runner)
 		if err != nil {
 			return false
 		}
@@ -1937,7 +1970,7 @@ func crashLooping(runner collector.Runner) bool {
 	fmt.Println()
 	fmt.Println(style.Error(fmt.Sprintf(
 		"✗ The collector container is not staying up (docker state: %s, restarts: %d).", state, restarts)))
-	if logs := runner.RecentLogs(15); logs != "" {
+	if logs := containerRecentLogs(runner, 15); logs != "" {
 		fmt.Println()
 		fmt.Println("   Its last output:")
 		for _, line := range strings.Split(logs, "\n") {

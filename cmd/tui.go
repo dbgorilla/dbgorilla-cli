@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"os"
 
 	"github.com/charmbracelet/huh"
@@ -32,15 +33,47 @@ func lowkeyTheme() *huh.Theme {
 	return t
 }
 
+// stdinIsTerminal reports whether stdin is a real terminal. A seam because
+// every "ask the user" branch in the CLI hangs off it, and a test process never
+// has one -- without it those branches are unreachable, which is precisely
+// backwards for the paths that decide whether to drop TLS or which databases to
+// monitor.
+var stdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+
 // interactiveTerminal reports whether stdin is a real terminal (so a huh prompt
 // or spinner can run). CI / piped / redirected input gets the plain path.
 func interactiveTerminal() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
+	return stdinIsTerminal()
+}
+
+// formIO, when set, redirects a form's keystrokes and rendering. Nil in
+// production (the form owns the real terminal); tests set it to drive a real
+// form with scripted input, so the prompts are exercised rather than stubbed
+// out — the selection and validation logic inside them is the part that decides
+// what gets deployed.
+var formIO struct {
+	in  io.Reader
+	out io.Writer
+	// accessible selects huh's line-based mode. Tests use it because the full
+	// terminal UI drives a render loop that never terminates against a
+	// non-terminal reader; the field values, validation and our own handling of
+	// the result are the same either way.
+	accessible bool
 }
 
 // runForm runs the given huh fields as one themed form.
 func runForm(fields ...huh.Field) error {
-	return huh.NewForm(huh.NewGroup(fields...)).WithTheme(lowkeyTheme()).Run()
+	f := huh.NewForm(huh.NewGroup(fields...)).WithTheme(lowkeyTheme())
+	if formIO.in != nil {
+		f = f.WithInput(formIO.in)
+	}
+	if formIO.out != nil {
+		f = f.WithOutput(formIO.out)
+	}
+	if formIO.accessible {
+		f = f.WithAccessible(true)
+	}
+	return f.Run()
 }
 
 // withSpinner runs a slow action under a spinner when interactive; otherwise it

@@ -3,7 +3,6 @@ package ide
 import (
 	"fmt"
 	"path/filepath"
-	"runtime"
 )
 
 // ClaudeDesktop is the Anthropic desktop app. It supports remote HTTP MCP
@@ -43,7 +42,7 @@ func (c *ClaudeDesktop) Hint(mcpURL string) string {
 }
 
 func claudeDesktopAppPaths() []string {
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		return []string{
 			"/Applications/Claude.app",

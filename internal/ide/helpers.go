@@ -3,6 +3,7 @@ package ide
 import (
 	"os"
 	"os/exec"
+	"runtime"
 )
 
 // findBinary checks if a binary is on PATH.
@@ -24,3 +25,9 @@ func getCWD() (string, error) {
 	}
 	return cwd, nil
 }
+
+// goos indirects runtime.GOOS so the OS-specific config-path branches are
+// reachable from tests on any host. Every adapter resolves a different
+// directory per platform, and a wrong path writes an MCP config the IDE never
+// reads -- a silent failure this seam lets us pin.
+var goos = runtime.GOOS

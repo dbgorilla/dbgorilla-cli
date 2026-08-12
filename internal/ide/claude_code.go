@@ -2,7 +2,6 @@ package ide
 
 import (
 	"path/filepath"
-	"runtime"
 )
 
 // ClaudeCode is the Anthropic CLI agent. The preferred MCP-setup path is
@@ -38,7 +37,7 @@ func (c *ClaudeCode) ConfigPath(scope Scope) (string, error) {
 		}
 		return filepath.Join(cwd, ".mcp.json"), nil
 	default: // user
-		if runtime.GOOS == "windows" {
+		if goos == "windows" {
 			return filepath.Join(homeDir(), "AppData", "Roaming", "Claude", "claude.json"), nil
 		}
 		return filepath.Join(homeDir(), ".claude.json"), nil
