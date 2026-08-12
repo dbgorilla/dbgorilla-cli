@@ -86,6 +86,7 @@ func init() {
 	logsCmd.Flags().String("tail", "100", "Number of trailing log lines to show")
 
 	collectorUpgradeCmd.Flags().String("image", collector.DefaultImage, "Collector image to upgrade to (default: this CLI's current version)")
+	collectorUpgradeCmd.Flags().Bool("allow-downgrade", false, "Install an older collector version than the one currently running")
 
 	collectorCmd.AddCommand(installCmd, statusCmd, listCmd, logsCmd, startCmd, stopCmd, restartCmd, collectorUpgradeCmd, uninstallCmd, encodeConfigCmd)
 	rootCmd.AddCommand(collectorCmd)
@@ -1292,7 +1293,7 @@ var encodeConfigCmd = &cobra.Command{
 parameter.
 
 The console renders stack parameters as a single-line field, so the config is
-base64-encoded. ` + "`dbg install --target aws`" + ` does this for you; run this only when
+base64-encoded. ` + "`dbg collector install --target aws`" + ` does this for you; run this only when
 launching the template by hand:
 
     dbgorilla collector encode-config config.toml
@@ -1420,6 +1421,13 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// --image override, else the version this CLI ships as current. (Resolving a
 	// deployment-blessed version without re-provisioning isn't wired yet.)
 	image, _ := resolveImage(cmd, nil)
+
+	// The fallback image is compiled into this binary, so "upgrade" from an
+	// out-of-date CLI would otherwise roll a newer collector BACKWARDS and
+	// print a success message doing it. Compare before touching anything.
+	if done, err := checkUpgradeDirection(cmd, st.Image, image); done || err != nil {
+		return err
+	}
 	fmt.Printf("Upgrading to %s...\n", image)
 
 	if st.IsAWS() {
@@ -1447,6 +1455,46 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  upgraded, but could not update stored state: %v", err)))
 	}
 	return nil
+}
+
+// checkUpgradeDirection decides whether an upgrade should go ahead, given what
+// the collector is running now and what this run resolved.
+//
+// done=true means there is nothing to do and the command should exit cleanly;
+// a non-nil error means the upgrade was refused. Both leave the running
+// collector untouched.
+//
+// The rule: never move a collector backwards without being told to. An
+// unrecognisable pair (a different repository, a digest-only reference, a tag
+// like "latest" or a commit sha) is NOT refused — that would block every
+// legitimate upgrade to a custom or locally-built image.
+func checkUpgradeDirection(cmd *cobra.Command, current, target string) (done bool, err error) {
+	cmp, ok := collector.CompareImages(current, target)
+	if !ok {
+		return false, nil // cannot tell; proceed as before
+	}
+	if cmp == 0 {
+		// Rebuilding the container to install what is already running is pure
+		// downtime for no change.
+		fmt.Println(style.Success(fmt.Sprintf("✓ Already on %s — nothing to upgrade.", target)))
+		return true, nil
+	}
+	if cmp > 0 {
+		return false, nil // a real upgrade
+	}
+	if allow, _ := cmd.Flags().GetBool("allow-downgrade"); allow {
+		fmt.Println(style.Warn(fmt.Sprintf(
+			"⚠  Downgrading from %s to %s because --allow-downgrade was passed.", current, target)))
+		return false, nil
+	}
+	return false, fmt.Errorf(
+		"refusing to downgrade the collector.\n"+
+			"  Running: %s\n"+
+			"  This CLI would install: %s\n\n"+
+			"  The version to install comes from this CLI when --image is not given, so an\n"+
+			"  out-of-date dbg downgrades a newer collector. Update dbg first: dbg upgrade\n"+
+			"  To install the older version anyway, pass --allow-downgrade",
+		current, target)
 }
 
 // --- uninstall ------------------------------------------------------------

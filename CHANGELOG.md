@@ -40,6 +40,18 @@
 
 ### Fixed
 
+- `collector upgrade` no longer silently downgrades a running collector. The
+  version it installs comes from the CLI binary itself when `--image` is not
+  given, so running it from an out-of-date `dbg` rolled a newer collector
+  backwards and printed "✓ Upgraded" doing it. It now compares the two
+  versions first: an older target is refused (with `--allow-downgrade` to
+  override), an identical one exits without rebuilding the container, and a
+  reference it cannot order — a custom image, a floating tag, a collector
+  installed before the version was recorded — proceeds as before.
+- Three shipped messages told users to run `dbg install --target aws`, which is
+  not a command: `install` lives under `collector`, so anyone who copied the
+  printed text got "unknown command". Corrected in the `encode-config` help,
+  both stack-parameter errors, and `examples/collector-aws.toml`.
 - Preflight's remediation for a failed connection pointed the wrong way: a
   server with TLS *disabled* was told to set `--ssl-mode require (or
   verify-full)`, which fails again. The advice now reflects what actually

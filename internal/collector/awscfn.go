@@ -354,14 +354,14 @@ func stackParam(ctx context.Context, client *cloudformation.Client, stackName, k
 		return "", fmt.Errorf("could not describe stack %q: %w", stackName, err)
 	}
 	if len(out.Stacks) == 0 {
-		return "", fmt.Errorf("stack %q does not exist. Run: dbg install --target aws", stackName)
+		return "", fmt.Errorf("stack %q does not exist. Run: dbg collector install --target aws", stackName)
 	}
 	for _, p := range out.Stacks[0].Parameters {
 		if aws.ToString(p.ParameterKey) == key {
 			return aws.ToString(p.ParameterValue), nil
 		}
 	}
-	return "", fmt.Errorf("stack %q has no %s parameter; it predates this CLI version. Re-run: dbg install --target aws", stackName, key)
+	return "", fmt.Errorf("stack %q has no %s parameter; it predates this CLI version. Re-run: dbg collector install --target aws", stackName, key)
 }
 
 // UpgradeImage rolls the collector to a new image, holding every other parameter
