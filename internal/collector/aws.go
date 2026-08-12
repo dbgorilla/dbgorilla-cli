@@ -680,9 +680,19 @@ func rdsConnectARNs(targets []AwsTarget, region, accountID string) []string {
 // --- IAM database grant (printed, or run with --run-grant) -----------------
 
 // GrantStatements is the SQL a database admin runs so the collector's IAM user
-// can authenticate (rds_iam) and read the database (pg_monitor for stats, plus
-// CONNECT on each monitored database). Shared by the printed instructions and
-// the optional automated grant, so the two never drift.
+// can authenticate (rds_iam) and read the database. Shared by the printed
+// instructions and the optional automated grant, so the two never drift.
+//
+// Why each grant:
+//   - rds_iam: IAM database authentication.
+//   - pg_monitor: the pg_stat_* views behind metrics and query insights.
+//   - pg_read_all_data (PG 14+): the topology scraper runs pg_dump, whose
+//     ACCESS SHARE table locks require SELECT on every table -- pg_monitor
+//     alone leaves topology failing on every scrape (verified live: RDS PG,
+//     "permission denied for table ..."). This DOES let the collector read
+//     table contents, not just schema; there is no narrower builtin that
+//     covers future tables. A policy that forbids it can drop this line at
+//     the cost of the schema-topology feature.
 func GrantStatements(user string, databases []string) []string {
 	u := quoteIdent(user)
 	stmts := []string{
@@ -693,6 +703,9 @@ func GrantStatements(user string, databases []string) []string {
 	for _, db := range databases {
 		stmts = append(stmts, "GRANT CONNECT ON DATABASE "+quoteIdent(db)+" TO "+u+";")
 	}
+	// Last on purpose: pg_read_all_data does not exist before PG 14, and
+	// RunGrant stops at the first hard error -- everything above still lands.
+	stmts = append(stmts, "GRANT pg_read_all_data TO "+u+";")
 	return stmts
 }
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The AWS-target grant instructions (printed after install, or run by
+  `--run-grant`) now include `GRANT pg_read_all_data` (PostgreSQL 14+). Without
+  it the schema-topology scraper fails on every cycle -- its `pg_dump` needs
+  SELECT on the monitored tables, which `pg_monitor` does not confer. Note this
+  permits the collector to read table contents; installations that must forbid
+  that can omit the grant at the cost of the topology feature. The grant runs
+  last, so on PostgreSQL 13 and older every other grant still lands.
+
 ## v0.4.0
 
 ### Added
