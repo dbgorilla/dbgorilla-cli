@@ -83,15 +83,113 @@ func Run(ctx context.Context, dsn string) Report {
 			Name:     "connect",
 			Severity: Fail,
 			Detail:   fmt.Sprintf("cannot connect: %v", err),
-			Fix: []string{
-				"Verify the host/port and that PostgreSQL is reachable.",
-				"Check the read-only user and password.",
-				"If the server requires TLS, set --ssl-mode require (or verify-full).",
-			},
+			Fix:      tlsAwareConnectFix(err),
 		}}}
 	}
 	defer func() { _ = conn.Close(ctx) }()
 	return RunWith(ctx, &pgxInspector{conn: conn, dsn: dsn})
+}
+
+// TLSSupport is what a probe learned about a server's TLS capability.
+type TLSSupport int
+
+const (
+	// TLSUnknown means the probe could not tell -- the server was unreachable,
+	// or it failed for a reason unrelated to TLS. Never act on this; let the
+	// real preflight report the actual error.
+	TLSUnknown TLSSupport = iota
+	// TLSSupported means the server completed a TLS handshake.
+	TLSSupported
+	// TLSUnsupported means the server explicitly refused TLS.
+	TLSUnsupported
+)
+
+// ProbeTLS asks the server whether it speaks TLS at all, so the CLI can react
+// to what the server actually is instead of making the user guess a flag.
+//
+// The probe deliberately uses sslmode=require, not verify-full: require tests
+// only whether a TLS handshake is possible, so a server with TLS behind a
+// private CA still answers "supported" (its certificate is a separate problem
+// with a separate fix). An authentication failure also means supported -- the
+// handshake got far enough for the server to reject the credentials.
+//
+// dsn must already carry sslmode=require; ProbeTLSDSN builds that form.
+func ProbeTLS(ctx context.Context, dsn string) TLSSupport {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err == nil {
+		_ = conn.Close(ctx)
+		return TLSSupported
+	}
+	if IsTLSUnsupported(err) {
+		return TLSUnsupported
+	}
+	if isAuthFailure(err) {
+		return TLSSupported
+	}
+	return TLSUnknown
+}
+
+// ProbeTLSDSN rewrites a DSN's sslmode to "require" for the capability probe.
+func ProbeTLSDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	q := u.Query()
+	q.Set("sslmode", "require")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// IsTLSUnsupported reports whether an error is the server saying it has no TLS.
+func IsTLSUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "server does not support ssl") ||
+		strings.Contains(msg, "server refused tls")
+}
+
+// isAuthFailure reports whether the server answered but rejected the login,
+// which still proves the transport worked.
+func isAuthFailure(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "password authentication failed") ||
+		strings.Contains(msg, "authentication failed") ||
+		strings.Contains(msg, "role") && strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no pg_hba.conf entry")
+}
+
+// tlsAwareConnectFix builds the remediation for a failed connection. The
+// direction matters: a server that does not SUPPORT TLS and a server that
+// REQUIRES it fail with opposite fixes, and telling a local-dev user to add
+// more TLS when their database has none sends them the wrong way.
+func tlsAwareConnectFix(err error) []string {
+	base := []string{
+		"Verify the host/port and that PostgreSQL is reachable.",
+		"Check the read-only user and password.",
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "server does not support ssl"):
+		// Typical local dev: stock Postgres ships with ssl=off.
+		return append(base,
+			"This server has TLS disabled, so set --ssl-mode disable.",
+			"(Local Postgres — Docker image, Postgres.app, Homebrew — has no TLS by default.)",
+		)
+	case strings.Contains(msg, "server refused tls") ||
+		strings.Contains(msg, "sslmode") ||
+		strings.Contains(msg, "tls error"):
+		return append(base,
+			"TLS negotiation failed. If the server has no TLS, set --ssl-mode disable;",
+			"if it has TLS with a private CA, keep verify-full and pass --ca-cert /path/to/ca.pem.",
+		)
+	default:
+		return append(base,
+			"Set --ssl-mode to match the server: disable (no TLS), require, verify-ca, or verify-full.",
+		)
+	}
 }
 
 // CheckWorkload opens a connection to dsn and returns ONLY the workload
@@ -159,12 +257,16 @@ func CheckSharedPreload(ctx context.Context, ins Inspector) Result {
 		return Result{Name: "shared_preload_libraries", Severity: Fail, Detail: err.Error()}
 	}
 	if !ContainsLib(libs, "pg_stat_statements") {
+		// Warn, not Fail: the collector runs and reports schema topology without
+		// pg_stat_statements. It gates query-performance data only. Blocking here
+		// made a stock local Postgres un-onboardable, forcing an ALTER SYSTEM and
+		// a full database restart before the user had seen anything work.
 		return Result{
 			Name:     "shared_preload_libraries",
-			Severity: Fail,
-			Detail:   fmt.Sprintf("pg_stat_statements not loaded (current: %q)", libs),
+			Severity: Warn,
+			Detail:   fmt.Sprintf("pg_stat_statements not loaded (current: %q) -- query-performance data will be unavailable; everything else works", libs),
 			Fix: []string{
-				"As a superuser, add pg_stat_statements to shared_preload_libraries:",
+				"To capture query performance, add pg_stat_statements as a superuser:",
 				"  ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';",
 				"Then RESTART the server (a reload is not enough for this parameter).",
 			},

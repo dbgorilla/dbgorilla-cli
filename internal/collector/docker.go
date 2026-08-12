@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -174,6 +175,36 @@ func (r Runner) Running() (exists bool, running bool, err error) {
 		return false, false, nil
 	}
 	return true, strings.TrimSpace(string(out)) == "true", nil
+}
+
+// Health reports the container's docker state and how many times it has
+// restarted. A container that is restart-looping (crash on boot, e.g. an
+// unreadable config mount) reports State "restarting" with a climbing
+// RestartCount, which from the outside looks nothing like a healthy start.
+func (r Runner) Health() (state string, restarts int, err error) {
+	out, err := execCommand("docker", "inspect", "-f", "{{.State.Status}} {{.RestartCount}}", r.Name).CombinedOutput()
+	if err != nil {
+		return "", 0, fmt.Errorf("cannot inspect container %s: %w", r.Name, err)
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) != 2 {
+		return "", 0, fmt.Errorf("unexpected docker inspect output for %s: %q", r.Name, strings.TrimSpace(string(out)))
+	}
+	n, convErr := strconv.Atoi(fields[1])
+	if convErr != nil {
+		return fields[0], 0, nil
+	}
+	return fields[0], n, nil
+}
+
+// RecentLogs returns the last n lines of the container's logs as a string, for
+// embedding in a diagnostic message. Runner.Logs streams to stdout instead.
+func (r Runner) RecentLogs(n int) string {
+	out, err := execCommand("docker", "logs", "--tail", strconv.Itoa(n), r.Name).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // ImageRef returns the image the container was created from (for status).

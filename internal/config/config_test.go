@@ -59,12 +59,12 @@ func TestResolveAPIURL_UserConfigUsed(t *testing.T) {
 	}
 }
 
-func TestResolveAPIURL_EmptyWhenNothingSet(t *testing.T) {
+func TestResolveAPIURL_DefaultWhenNothingSet(t *testing.T) {
 	setup(t)
 
 	url, src := ResolveAPIURL("")
-	if url != "" || src != SourceNone {
-		t.Errorf("got (%q,%v), want empty/none", url, src)
+	if url != DefaultAPIURL || src != SourceDefault {
+		t.Errorf("got (%q,%v), want (%q,%v)", url, src, DefaultAPIURL, SourceDefault)
 	}
 }
 

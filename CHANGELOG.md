@@ -2,8 +2,73 @@
 
 ## Unreleased
 
+### Changed
+
+- `collector install` now works out what TLS mode the database supports instead
+  of making you guess a flag. Stock Postgres ships with `ssl=off`, so the
+  documented command used to fail on every standard local setup with "server
+  does not support SSL" and a hint pointing the wrong way. The CLI now asks the
+  server first (nothing is provisioned at that point) and reacts:
+
+  - A database **on this machine** (loopback, or the Docker host alias) that
+    refuses TLS is handled automatically — the traffic never leaves the host —
+    and the CLI says so rather than failing.
+  - A database **anywhere else** that refuses TLS is never downgraded silently.
+    The CLI states plainly that queries and the database password would cross
+    the network in clear text and asks for an explicit yes; unattended runs
+    (including `--yes`) refuse outright and tell you to pass `--ssl-mode
+    disable` if that is genuinely intended.
+  - An explicit `--ssl-mode` is always honored and skips the probe entirely,
+    and `--target aws` is unchanged.
+
+  `--dry-run` previews the same decision, so it no longer advertises a config
+  the real install would not produce.
+- A missing `pg_stat_statements` in `shared_preload_libraries` is now a
+  preflight **warning** rather than a hard failure. The collector runs and
+  reports schema topology without it; it gates query-performance data only.
+  Blocking meant a new user had to `ALTER SYSTEM` and restart their database
+  before seeing anything work.
+- The CLI now defaults its API URL to the hosted production deployment
+  (`https://app.dbgorilla.com`) when nothing is configured. Every existing
+  configuration layer still overrides it: `--api-url`, `DBGORILLA_API_URL`,
+  the user config file, then the system config file. Homebrew installs — which
+  cannot know a deployment URL at install time — now work with `dbg login`
+  alone; self-hosted deployments are unaffected because their install script
+  writes the deployment URL into the user config. `dbg config get api-url` and
+  `dbg doctor` report `source: default` when the fallback is in use, and
+  commands no longer error with "no DBGorilla API URL configured".
+
 ### Fixed
 
+- `collector upgrade` no longer silently downgrades a running collector. The
+  version it installs comes from the CLI binary itself when `--image` is not
+  given, so running it from an out-of-date `dbg` rolled a newer collector
+  backwards and printed "✓ Upgraded" doing it. It now compares the two
+  versions first: an older target is refused (with `--allow-downgrade` to
+  override), an identical one exits without rebuilding the container, and a
+  reference it cannot order — a custom image, a floating tag, a collector
+  installed before the version was recorded — proceeds as before.
+- Three shipped messages told users to run `dbg install --target aws`, which is
+  not a command: `install` lives under `collector`, so anyone who copied the
+  printed text got "unknown command". Corrected in the `encode-config` help,
+  both stack-parameter errors, and `examples/collector-aws.toml`.
+- Preflight's remediation for a failed connection pointed the wrong way: a
+  server with TLS *disabled* was told to set `--ssl-mode require (or
+  verify-full)`, which fails again. The advice now reflects what actually
+  happened, and names `disable` where that is the fix.
+- `collector install` no longer reports success over a collector that is
+  crash-looping. It re-checks the container's state and restart count after
+  start, prints the container's own last output, and names the likely cause
+  (commonly a config directory the container runtime cannot bind-mount)
+  instead of blaming a private CA.
+- Collector secrets fall back to a `0600` file when the OS keyring is
+  unavailable, mirroring how login tokens are already stored. Previously the
+  install aborted *after* the collector identity had been provisioned, leaving
+  an orphaned identity server-side on headless Linux, WSL, and CI hosts.
+- Backend errors carrying an HTML body (an SPA catch-all, proxy, or login
+  portal answering instead of the API) no longer dump the page into the
+  terminal. The CLI names the situation and points at `dbg config get api-url`;
+  long JSON bodies are truncated.
 - The AWS-target grant instructions (printed after install, or run by
   `--run-grant`) now include `GRANT pg_read_all_data` (PostgreSQL 14+). Without
   it the schema-topology scraper fails on every cycle -- its `pg_dump` needs

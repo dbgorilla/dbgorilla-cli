@@ -50,6 +50,26 @@ Tests are unit-style and require no external services. If you add behavior that 
 4. Commit with a clear message. We use the loose convention `feat:`, `fix:`, `docs:`, `chore:`, `test:` as commit prefixes — not strict conventional commits, just enough for the auto-generated changelog to group things sensibly.
 5. Push and open a PR. Fill in the template.
 
+## Releasing
+
+Releases are tag-driven. Pushing a `vX.Y.Z` tag runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml): GoReleaser
+builds the cross-platform binaries, signs them (cosign) with build provenance,
+publishes the GitHub Release, and bumps the Homebrew tap formula.
+
+Two things are easy to get wrong, so check them every time:
+
+1. **`CHANGELOG.md` needs a `## vX.Y.Z` section before you tag.** The release
+   job extracts that section as the release body and fails the build when it is
+   missing. A version ships with notes or it does not ship.
+
+2. **Confirm the release workflow actually ran** after you push the tag. Its
+   failure mode is silence rather than an error, so an unnoticed no-op looks
+   exactly like a release that has not finished yet.
+
+Deployments that serve their own `dbg` binaries pin a CLI version separately;
+bumping that pin is part of the same release. See the internal release runbook.
+
 ## Reporting issues
 
 Open a GitHub issue with the bug-report template. Include:

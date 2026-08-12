@@ -195,15 +195,16 @@ func TestPrintCheck(t *testing.T) {
 }
 
 func TestRunDoctor(t *testing.T) {
-	t.Run("no api url aborts", func(t *testing.T) {
+	t.Run("no api url falls back to production default", func(t *testing.T) {
 		isolate(t)
+		stubDetect(t) // no clients
 		var err error
 		out := capture(t, func() { err = runDoctor(baseCmd(), nil) })
 		if err != errDoctorFailed {
-			t.Fatalf("err=%v, want errDoctorFailed", err)
+			t.Fatalf("err=%v, want errDoctorFailed (not signed in)", err)
 		}
-		if !strings.Contains(out, "not configured") || !strings.Contains(out, "Cannot continue") {
-			t.Errorf("out=%q", out)
+		if !strings.Contains(out, config.DefaultAPIURL) || !strings.Contains(out, "source: default") {
+			t.Errorf("out=%q, want the default URL reported with source: default", out)
 		}
 	})
 

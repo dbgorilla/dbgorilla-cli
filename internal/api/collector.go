@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // ErrCollectorUnsupported is returned when the deployment has no managed
@@ -16,13 +17,47 @@ var ErrCollectorUnsupported = errors.New("this deployment does not support the m
 // instead of dumping a raw 401 body.
 var ErrSessionExpired = errors.New("your DBGorilla login has expired — run `dbg login` to sign in again")
 
+// maxErrBody caps how much of an error body reaches the terminal. Enough to
+// show a real API error, not enough to paint the screen with markup.
+const maxErrBody = 400
+
 // httpError turns a non-2xx response into an error, mapping 401 to the clear
 // "log in again" message rather than a raw status + body dump.
 func httpError(action string, status int, body []byte) error {
 	if status == http.StatusUnauthorized {
 		return ErrSessionExpired
 	}
-	return fmt.Errorf("backend returned HTTP %d %s:\n%s", status, action, string(body))
+	return fmt.Errorf("backend returned HTTP %d %s:\n%s", status, action, summarizeBody(body))
+}
+
+// summarizeBody renders an error body for humans. An HTML body means something
+// other than the API answered -- an SPA catch-all, a proxy, a login portal --
+// and dumping the whole page buries the one fact the user needs. Non-JSON
+// bodies are named rather than printed; JSON is passed through, truncated.
+func summarizeBody(body []byte) string {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return "  (empty response body)"
+	}
+	if looksLikeHTML(trimmed) {
+		return "  (HTML response, not JSON — an SPA catch-all, proxy, or login portal is answering\n" +
+			"   this path instead of the DBGorilla API. Check the API URL: dbg config get api-url)"
+	}
+	if len(trimmed) > maxErrBody {
+		return trimmed[:maxErrBody] + "… (truncated)"
+	}
+	return trimmed
+}
+
+func looksLikeHTML(s string) bool {
+	head := strings.ToLower(s)
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	return strings.HasPrefix(head, "<!doctype html") ||
+		strings.HasPrefix(head, "<html") ||
+		strings.Contains(head, "<head") ||
+		strings.Contains(head, "<body")
 }
 
 // CollectorCredentials is the response from POST /api/v0_2/collectors. The

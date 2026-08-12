@@ -32,6 +32,8 @@ var (
 	dockerAvailable = collector.DockerAvailable
 	// runPreflight runs the read-only database preflight against a DSN.
 	runPreflight = preflight.Run
+	// probeTLS asks the server whether it speaks TLS (seam for tests).
+	probeTLS = preflight.ProbeTLS
 	// runContainer starts the collector container (`docker run`). Method
 	// expression (not a wrapping closure) so the default carries no uncovered
 	// statement of its own -- collector.Runner.Run is func(collector.Runner) error.
@@ -48,7 +50,7 @@ func init() {
 	installCmd.Flags().String("db-name", "", "Comma-separated database names (empty = all databases on the server)")
 	installCmd.Flags().String("db-user", "", "Read-only database user (prompted if omitted)")
 	installCmd.Flags().String("db-password", "", "Database password (prompted without echo if omitted; or set "+collector.DBPasswordEnv+")")
-	installCmd.Flags().String("ssl-mode", "verify-full", "libpq ssl_mode: disable, require, verify-ca, verify-full")
+	installCmd.Flags().String("ssl-mode", "verify-full", "libpq ssl_mode: disable, require, verify-ca, verify-full (defaults to disable for --target docker, whose database is local and non-TLS by definition)")
 	installCmd.Flags().String("image", collector.DefaultImage, "Collector container image")
 	installCmd.Flags().Bool("yes", false, "Skip confirmation prompts")
 	installCmd.Flags().Bool("dry-run", false, "Render config and print the docker command without minting, writing, or starting anything")
@@ -84,6 +86,7 @@ func init() {
 	logsCmd.Flags().String("tail", "100", "Number of trailing log lines to show")
 
 	collectorUpgradeCmd.Flags().String("image", collector.DefaultImage, "Collector image to upgrade to (default: this CLI's current version)")
+	collectorUpgradeCmd.Flags().Bool("allow-downgrade", false, "Install an older collector version than the one currently running")
 
 	collectorCmd.AddCommand(installCmd, statusCmd, listCmd, logsCmd, startCmd, stopCmd, restartCmd, collectorUpgradeCmd, uninstallCmd, encodeConfigCmd)
 	rootCmd.AddCommand(collectorCmd)
@@ -175,6 +178,13 @@ func runInstallLocal(cmd *cobra.Command) error {
 		}
 	} else {
 		fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", target.HostDial())))
+	}
+
+	// Settle the TLS mode against what the server actually supports, before the
+	// preflight connects with it. Nothing is provisioned yet, so a refusal here
+	// costs the user nothing.
+	if err := resolveTLSMode(cmd, &target, password); err != nil {
+		return err
 	}
 
 	// Deep DB preflight (read-only) before we provision anything, so a
@@ -281,6 +291,13 @@ func runInstallLocal(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Container started: %s", runner.Name)))
+
+	// A container that starts and immediately dies still "starts" as far as
+	// `docker run` is concerned. Confirm it is actually up before reporting a
+	// connection problem, or we blame the network for a crash on boot.
+	if crashLooping(runner) {
+		return errCollectorCrashLooping
+	}
 
 	// Verify connection (best-effort; not fatal).
 	verifyConnection(client, creds.AgentID, caCert)
@@ -1041,6 +1058,9 @@ func dryRunInstall(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// Preview the TLS mode the real run would settle on, or the dry run would
+	// advertise a config the install does not produce. Never prompts here.
+	previewTLSMode(cmd, &target)
 	cfg := collector.Build("<minted-on-install>", "<minted-on-install>", target, endpointsFromFlags(cmd))
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -1273,7 +1293,7 @@ var encodeConfigCmd = &cobra.Command{
 parameter.
 
 The console renders stack parameters as a single-line field, so the config is
-base64-encoded. ` + "`dbg install --target aws`" + ` does this for you; run this only when
+base64-encoded. ` + "`dbg collector install --target aws`" + ` does this for you; run this only when
 launching the template by hand:
 
     dbgorilla collector encode-config config.toml
@@ -1401,6 +1421,13 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// --image override, else the version this CLI ships as current. (Resolving a
 	// deployment-blessed version without re-provisioning isn't wired yet.)
 	image, _ := resolveImage(cmd, nil)
+
+	// The fallback image is compiled into this binary, so "upgrade" from an
+	// out-of-date CLI would otherwise roll a newer collector BACKWARDS and
+	// print a success message doing it. Compare before touching anything.
+	if done, err := checkUpgradeDirection(cmd, st.Image, image); done || err != nil {
+		return err
+	}
 	fmt.Printf("Upgrading to %s...\n", image)
 
 	if st.IsAWS() {
@@ -1428,6 +1455,46 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  upgraded, but could not update stored state: %v", err)))
 	}
 	return nil
+}
+
+// checkUpgradeDirection decides whether an upgrade should go ahead, given what
+// the collector is running now and what this run resolved.
+//
+// done=true means there is nothing to do and the command should exit cleanly;
+// a non-nil error means the upgrade was refused. Both leave the running
+// collector untouched.
+//
+// The rule: never move a collector backwards without being told to. An
+// unrecognisable pair (a different repository, a digest-only reference, a tag
+// like "latest" or a commit sha) is NOT refused — that would block every
+// legitimate upgrade to a custom or locally-built image.
+func checkUpgradeDirection(cmd *cobra.Command, current, target string) (done bool, err error) {
+	cmp, ok := collector.CompareImages(current, target)
+	if !ok {
+		return false, nil // cannot tell; proceed as before
+	}
+	if cmp == 0 {
+		// Rebuilding the container to install what is already running is pure
+		// downtime for no change.
+		fmt.Println(style.Success(fmt.Sprintf("✓ Already on %s — nothing to upgrade.", target)))
+		return true, nil
+	}
+	if cmp > 0 {
+		return false, nil // a real upgrade
+	}
+	if allow, _ := cmd.Flags().GetBool("allow-downgrade"); allow {
+		fmt.Println(style.Warn(fmt.Sprintf(
+			"⚠  Downgrading from %s to %s because --allow-downgrade was passed.", current, target)))
+		return false, nil
+	}
+	return false, fmt.Errorf(
+		"refusing to downgrade the collector.\n"+
+			"  Running: %s\n"+
+			"  This CLI would install: %s\n\n"+
+			"  The version to install comes from this CLI when --image is not given, so an\n"+
+			"  out-of-date dbg downgrades a newer collector. Update dbg first: dbg upgrade\n"+
+			"  To install the older version anyway, pass --allow-downgrade",
+		current, target)
 }
 
 // --- uninstall ------------------------------------------------------------
@@ -1674,6 +1741,104 @@ func withDefaultPort(raw string) string {
 	return u.String()
 }
 
+// isLocalDatabase reports whether a host is this machine. Loopback names plus
+// the Docker host alias, which is what a loopback target becomes for the
+// containerized collector. Only these may have TLS dropped automatically.
+func isLocalDatabase(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	h = strings.Trim(h, "[]")
+	return collector.IsLoopback(h) || h == collector.DockerHostInternal
+}
+
+// probeTLSSupport runs the capability probe with a bound timeout. A nil
+// command context (tests, or a command invoked outside Execute) is tolerated.
+func probeTLSSupport(cmd *cobra.Command, target collector.Target, password string) preflight.TLSSupport {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The probe is a courtesy, not a gate: bound it so an unresponsive host
+	// delays the install by seconds rather than hanging it.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return probeTLS(ctx, preflight.ProbeTLSDSN(buildDSN(target, password)))
+}
+
+// previewTLSMode applies the dry run's share of the TLS decision: the safe,
+// automatic loopback case, and a note for the case that would need consent. It
+// never prompts and never changes anything outside target.
+func previewTLSMode(cmd *cobra.Command, target *collector.Target) {
+	if cmd.Flags().Changed("ssl-mode") {
+		return
+	}
+	if probeTLSSupport(cmd, *target, "") != preflight.TLSUnsupported {
+		return
+	}
+	if isLocalDatabase(target.Host) {
+		fmt.Println(style.Warn(fmt.Sprintf(
+			"⚠  %s does not accept TLS connections; it is on this machine, so the install would use ssl_mode=disable.",
+			target.HostDial())))
+		target.SSLMode = "disable"
+		return
+	}
+	fmt.Println(style.Warn(fmt.Sprintf(
+		"⚠  %s does not accept TLS connections and is not on this machine.", target.HostDial())))
+	fmt.Println("   The real install would stop and ask you to confirm sending credentials")
+	fmt.Println("   in clear text, or to pass --ssl-mode explicitly.")
+}
+
+// resolveTLSMode settles the connection's TLS mode by asking the server what it
+// supports, rather than making the user discover a flag.
+//
+// The rule that governs it: never silently drop TLS for a database that is not
+// on this machine. Auto-selecting no-TLS for loopback is safe -- the traffic
+// never leaves the host. For any other host, no-TLS means the collector's
+// queries and the database password cross a network in the clear, so it takes
+// an explicit choice. Negotiating that away because the far end said "no TLS"
+// is the shape of a downgrade attack.
+//
+// An explicit --ssl-mode is always honored and skips probing entirely.
+func resolveTLSMode(cmd *cobra.Command, target *collector.Target, password string) error {
+	if cmd.Flags().Changed("ssl-mode") {
+		return nil // the user chose; nothing to infer
+	}
+
+	support := probeTLSSupport(cmd, *target, password)
+	if support != preflight.TLSUnsupported {
+		// Supported, or undeterminable. Keep the secure default and let the
+		// real preflight report anything genuinely wrong.
+		return nil
+	}
+
+	if isLocalDatabase(target.Host) {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s does not accept TLS connections.", target.HostDial())))
+		fmt.Println("   It is on this machine, so the connection never leaves it — continuing without TLS.")
+		fmt.Println("   Pass --ssl-mode explicitly to choose for yourself.")
+		target.SSLMode = "disable"
+		return nil
+	}
+
+	// Remote and refusing TLS: state what was observed, then require a choice.
+	fmt.Println(style.Warn(fmt.Sprintf("⚠  %s does not accept TLS connections, and it is not on this machine.", target.HostDial())))
+	fmt.Println("   Without TLS the collector's queries and the database password cross")
+	fmt.Println("   the network in clear text, readable by anything in between.")
+	fmt.Println("   Nothing has been provisioned yet.")
+
+	if !interactiveSelectable(cmd) {
+		// Deterministic for CI: never auto-downgrade, including under --yes.
+		return fmt.Errorf(
+			"refusing to connect to %s without TLS on an unattended run.\n"+
+				"  If clear text is genuinely what you want, say so explicitly: --ssl-mode disable\n"+
+				"  If the database should have TLS, check the host and port first",
+			target.HostDial())
+	}
+	if !promptYesNo("Connect to this remote database without TLS?", false) {
+		return fmt.Errorf("aborted: %s refuses TLS and connecting without it was declined", target.HostDial())
+	}
+	target.SSLMode = "disable"
+	return nil
+}
+
 func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
 	host, _ := cmd.Flags().GetString("db-host")
 	port, _ := cmd.Flags().GetInt("db-port")
@@ -1738,6 +1903,56 @@ func checkReachable(addr string) error {
 	}
 	_ = conn.Close()
 	return nil
+}
+
+// errCollectorCrashLooping ends the install non-zero once the container has
+// been shown to be restart-looping. The diagnosis is already printed.
+var errCollectorCrashLooping = errors.New("collector container is not staying up")
+
+// crashLooping watches the container briefly after start and reports whether it
+// is restart-looping rather than running. It prints the diagnosis (including
+// the container's own error lines) and returns true.
+//
+// Without this the install printed a green "Container started" over a container
+// that was dying every two seconds, then blamed the control plane -- and
+// suggested a private CA, which is the wrong fix for a crash on boot.
+func crashLooping(runner collector.Runner) bool {
+	// Two samples a few seconds apart: a restart loop shows either an explicit
+	// "restarting" state or a RestartCount that has moved.
+	state, restarts, err := runner.Health()
+	if err != nil {
+		return false // cannot tell; stay quiet rather than cry wolf
+	}
+	if state != "restarting" && restarts == 0 {
+		time.Sleep(4 * time.Second)
+		state, restarts, err = runner.Health()
+		if err != nil {
+			return false
+		}
+	}
+	if state != "restarting" && restarts == 0 {
+		return false
+	}
+
+	fmt.Println()
+	fmt.Println(style.Error(fmt.Sprintf(
+		"✗ The collector container is not staying up (docker state: %s, restarts: %d).", state, restarts)))
+	if logs := runner.RecentLogs(15); logs != "" {
+		fmt.Println()
+		fmt.Println("   Its last output:")
+		for _, line := range strings.Split(logs, "\n") {
+			fmt.Printf("     %s\n", line)
+		}
+	}
+	fmt.Println()
+	fmt.Println("   This is a startup failure, not a connection problem. Common causes:")
+	fmt.Println("     - the config file could not be read inside the container; on Docker Desktop,")
+	fmt.Println("       Colima or Rancher Desktop the config directory must be a shared path, or")
+	fmt.Println("       the bind mount silently becomes an empty directory")
+	fmt.Println("     - the image cannot run on this architecture")
+	fmt.Println()
+	fmt.Println("   Inspect with: dbg collector logs")
+	return true
 }
 
 // verifyConnection polls the control plane briefly for the collector to come

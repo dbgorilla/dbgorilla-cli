@@ -118,15 +118,39 @@ func TestCheckSharedPreload_QueryError(t *testing.T) {
 	}
 }
 
-func TestCheckSharedPreload_NotLoaded(t *testing.T) {
+// Missing pg_stat_statements warns, it does not block: the collector still
+// reports schema topology without it, so blocking made a stock local Postgres
+// un-onboardable behind an ALTER SYSTEM and a database restart.
+func TestCheckSharedPreload_NotLoadedWarnsNotFails(t *testing.T) {
 	r := CheckSharedPreload(bg(), fakePreflightInspector{
 		params: map[string]string{"shared_preload_libraries": "auto_explain"},
 	})
-	if r.Severity != Fail {
-		t.Fatalf("want Fail when lib absent, got %s", r.Severity)
+	if r.Severity != Warn {
+		t.Fatalf("want Warn when lib absent, got %s", r.Severity)
 	}
 	if len(r.Fix) == 0 {
 		t.Error("expected a copy-pastable ALTER SYSTEM / RESTART fix")
+	}
+	if !strings.Contains(r.Detail, "query-performance") {
+		t.Errorf("detail should say what is actually lost, got %q", r.Detail)
+	}
+}
+
+// The remediation for a connection failure must point the RIGHT WAY: a server
+// with no TLS needs less TLS, not more.
+func TestConnectFix_TLSDirection(t *testing.T) {
+	noTLS := strings.Join(tlsAwareConnectFix(errors.New(
+		`failed to connect: server does not support SSL, but SSL was required`)), " ")
+	if !strings.Contains(noTLS, "--ssl-mode disable") {
+		t.Errorf("a server without TLS must be told to use disable, got: %s", noTLS)
+	}
+	if strings.Contains(noTLS, "set --ssl-mode require (or verify-full)") {
+		t.Errorf("must not advise MORE TLS against a server that has none: %s", noTLS)
+	}
+
+	generic := strings.Join(tlsAwareConnectFix(errors.New("connection refused")), " ")
+	if !strings.Contains(generic, "disable") {
+		t.Errorf("generic advice should still name every mode including disable, got: %s", generic)
 	}
 }
 

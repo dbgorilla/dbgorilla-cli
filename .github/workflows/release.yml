@@ -1,3 +1,9 @@
+# Tag-driven release: binaries, cosign signatures, SLSA provenance, GitHub
+# Release, Homebrew tap bump.
+#
+# Before tagging, read the "Releasing" section in CONTRIBUTING.md. The failures
+# this guards against are silent ones -- confirm the run happened rather than
+# assuming a missing release means the job is still going.
 name: release
 
 on:

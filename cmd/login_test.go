@@ -44,12 +44,10 @@ func TestRunLogin_UnknownMode(t *testing.T) {
 	}
 }
 
-func TestRunLogin_NoAPIURL(t *testing.T) {
-	isolate(t)
-	if err := runLogin(loginTestCmd(), nil); err == nil {
-		t.Fatal("want api-url error")
-	}
-}
+// Login with nothing configured no longer errors -- it resolves the built-in
+// production default and proceeds. That resolution is covered by
+// TestRequireAPIURL and the config package tests; exercising it here would
+// hit the real production endpoint.
 
 func TestRunLogin_SSOModeDeviceConfigUnavailable(t *testing.T) {
 	isolate(t)

@@ -86,13 +86,8 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	allOK := true
 
-	// Check 1: API URL configured
-	if apiURL == "" {
-		printCheck("API URL", false, "not configured -- run: dbgorilla config set api-url <url>")
-		fmt.Println()
-		fmt.Println("Cannot continue without an API URL. Aborting remaining checks.")
-		return errDoctorFailed
-	}
+	// Check 1: API URL. Resolution always succeeds (production default as the
+	// last layer), so the check reports which URL won and where it came from.
 	printCheck("API URL", true, fmt.Sprintf("%s  (source: %s)", apiURL, source))
 
 	// Checks 2 & 3: Auth+reachability and MCP-key existence in parallel.

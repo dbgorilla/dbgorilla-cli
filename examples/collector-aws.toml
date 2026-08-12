@@ -1,6 +1,6 @@
 # Example dbg-collector config for the AWS Fargate target.
 #
-# `dbg install --target aws` generates this for you from RDS discovery. Write it
+# `dbg collector install --target aws` generates this for you from RDS discovery. Write it
 # by hand only when launching the CloudFormation template from the console:
 #
 #     dbgorilla collector encode-config collector-aws.toml
