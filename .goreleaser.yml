@@ -110,6 +110,9 @@ brews:
     # downloaded for the current platform.
     install: |
       bin.install Dir["dbg-*"].first => "dbgorilla"
+      # The raw release asset downloads without an exec bit; set it before
+      # generate_completions_from_executable tries to run the binary.
+      (bin/"dbgorilla").chmod 0755
       bin.install_symlink "dbgorilla" => "dbg"
       # Cobra's built-in `dbgorilla completion <shell>` already emits a valid
       # script for each shell; this Homebrew helper runs it and installs the

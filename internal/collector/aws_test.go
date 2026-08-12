@@ -45,12 +45,13 @@ func TestGrantStatements(t *testing.T) {
 		`GRANT pg_monitor TO "dbgorilla";`,
 		`GRANT CONNECT ON DATABASE "app" TO "dbgorilla";`,
 		`GRANT CONNECT ON DATABASE "billing" TO "dbgorilla";`,
+		`GRANT pg_read_all_data TO "dbgorilla";`,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("GrantStatements:\n got  %q\n want %q", got, want)
 	}
 	// No databases -> auth + stats grants only, no CONNECT lines.
-	if n := len(GrantStatements("u", nil)); n != 3 {
+	if n := len(GrantStatements("u", nil)); n != 4 {
 		t.Errorf("no-databases grant should be 3 statements, got %d", n)
 	}
 	// Identifiers are quoted (defends against odd names).
