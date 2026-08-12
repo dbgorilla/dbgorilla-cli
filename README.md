@@ -16,14 +16,20 @@ The DBGorilla CLI. Sign in to a DBGorilla deployment and connect your IDE/agent 
 ```sh
 brew trust dbgorilla/tap   # recent Homebrew requires trusting third-party taps once
 brew install dbgorilla/tap/dbgorilla
-dbgorilla --api-url https://<your-deployment> login
+dbgorilla login
 ```
 
 On Homebrew versions without a `brew trust` command, skip that line.
 
 Installs the `dbgorilla` binary with a `dbg` alias — use whichever you prefer.
 
-The first `dbgorilla login` persists the API URL (and `--insecure` if you pass it) to `~/.config/dbgorilla/cli.toml` (or `$XDG_CONFIG_HOME/dbgorilla/cli.toml`), so every subsequent command runs without flags.
+`login` with no flags signs you in to the hosted deployment at `https://app.dbgorilla.com`, which is where the CLI points when nothing else is configured. For a self-hosted deployment, name it once:
+
+```sh
+dbgorilla --api-url https://<your-deployment> login
+```
+
+The first `dbgorilla login` persists the API URL (and `--insecure` if you pass it) to `~/.config/dbgorilla/cli.toml` (or `$XDG_CONFIG_HOME/dbgorilla/cli.toml`), so every subsequent command runs without flags. Installing from a self-hosted deployment's `install.sh` writes that file for you, so the URL is already set before you log in.
 
 ### Go install
 
@@ -161,10 +167,17 @@ Two persisted settings: `api-url` and `insecure`. Both follow the same priority 
 2. Environment variable (`DBGORILLA_API_URL`; there is no `DBGORILLA_INSECURE` env var — persist via `dbg config set insecure true` or pass `--insecure` on each call)
 3. `$XDG_CONFIG_HOME/dbgorilla/cli.toml` (per-user; defaults to `~/.config/dbgorilla/cli.toml`; written by `dbg login` and `dbg config set`)
 4. `/etc/dbgorilla/cli.toml` (or `/Library/Application Support/dbgorilla/cli.toml` on macOS, `C:\ProgramData\dbgorilla\cli.toml` on Windows) — IT-deployed via MDM, read-only from the CLI
+5. Built-in default: `https://app.dbgorilla.com`, the hosted deployment. `insecure` has no built-in default and stays off.
 
-If nothing is configured, `dbgorilla` exits with an actionable error pointing at the layers above.
+`api-url` therefore never comes up empty. A Homebrew install can't know a deployment URL, so with nothing configured the CLI targets the hosted product rather than refusing to run. Every layer above outranks it — including the user config file that a self-hosted `install.sh` writes at install time.
 
-`dbg config get <key>` shows which layer won the lookup.
+If you self-host and installed some other way (`go install`, a downloaded binary, a build from source), set the URL before you log in, or you'll be signing in to the hosted deployment instead of your own:
+
+```sh
+dbg config set api-url https://<your-deployment>
+```
+
+`dbg config get <key>` shows which layer won the lookup — `source: default` means the built-in above is in use. `dbg doctor` reports the same thing.
 
 ### Persisted on successful login
 
@@ -175,6 +188,7 @@ If nothing is configured, `dbgorilla` exits with an actionable error pointing at
 - `--api-url https://other` — one-shot override; doesn't change config.
 - `--insecure=false` on `dbg login` — turns off any persisted `insecure = true`.
 - `dbg config unset insecure` — clears `insecure` without re-logging in.
+- `dbg config unset api-url` — clears the saved URL and falls back to the built-in default.
 
 ## Compatibility
 
