@@ -57,26 +57,18 @@ Releases are tag-driven. Pushing a `vX.Y.Z` tag runs
 builds the cross-platform binaries, signs them (cosign) with build provenance,
 publishes the GitHub Release, and bumps the Homebrew tap formula.
 
-Three things are easy to get wrong, so check them every time:
+Two things are easy to get wrong, so check them every time:
 
 1. **`CHANGELOG.md` needs a `## vX.Y.Z` section before you tag.** The release
    job extracts that section as the release body and fails the build when it is
    missing. A version ships with notes or it does not ship.
 
-2. **Tag this repository** — `github.com/dbgorilla/dbgorilla-cli`. A tag pushed
-   to an archived mirror is a silent no-op: archived repositories run no
-   workflows, so there is no error, no release, and no tap bump. Confirm the tag
-   landed here and that the release workflow actually ran.
+2. **Confirm the release workflow actually ran** after you push the tag. Its
+   failure mode is silence rather than an error, so an unnoticed no-op looks
+   exactly like a release that has not finished yet.
 
-3. **Bump the pinned CLI version wherever a deployment serves its own
-   binaries, in the same release.** Homebrew updates itself; the self-hosted
-   path does not. `scripts/install.sh.tmpl` downloads
-   `/cli/dbg-<os>-<arch>` from the deployment that served it, and those binaries
-   are baked into the deployment's image at build time against a pinned CLI
-   version. Ship a release without moving that pin and `brew` users get the new
-   CLI while every `curl … | sh` user silently stays on the old one — silently,
-   because the old binary keeps working. Bump the pin and rebuild the image as
-   part of the release, not after it.
+Deployments that serve their own `dbg` binaries pin a CLI version separately;
+bumping that pin is part of the same release. See the internal release runbook.
 
 ## Reporting issues
 

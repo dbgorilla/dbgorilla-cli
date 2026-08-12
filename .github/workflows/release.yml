@@ -1,12 +1,9 @@
 # Tag-driven release: binaries, cosign signatures, SLSA provenance, GitHub
 # Release, Homebrew tap bump.
 #
-# Before tagging, read the "Releasing" section in CONTRIBUTING.md. The two
-# failure modes it exists to prevent are both silent: tagging an archived
-# mirror (no workflow runs, no release, no error), and shipping a release
-# without moving the pinned CLI version in deployments that serve their own
-# /cli/dbg-<os>-<arch> binaries (Homebrew users move ahead, curl-installed
-# users stay on the old binary indefinitely).
+# Before tagging, read the "Releasing" section in CONTRIBUTING.md. The failures
+# this guards against are silent ones -- confirm the run happened rather than
+# assuming a missing release means the job is still going.
 name: release
 
 on:
