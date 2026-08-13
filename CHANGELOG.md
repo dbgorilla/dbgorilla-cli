@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `dbg login` printed every device-flow endpoint warning twice. Auto-detecting
+  the sign-in mode fetched and validated the device configuration, discarded
+  it, and the device flow then fetched and validated the same thing again --
+  so a deployment whose Keycloak runs on its own subdomain (the normal case)
+  produced four alarming warning blocks for two conditions, on the first
+  command after install. The configuration is now fetched once and reused, and
+  each warning prints once. The warning text is unchanged.
+
 ## v0.5.0
 
 ### Changed
