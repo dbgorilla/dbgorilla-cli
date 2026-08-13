@@ -47,7 +47,7 @@ func runUpgrade(_ *cobra.Command, _ []string) error {
 	fmt.Println("Not a Homebrew install. Re-run the install command for your environment:")
 	fmt.Println()
 	fmt.Println("  # On-prem (curl from your DBGorilla backend):")
-	fmt.Println("    curl -fsSL https://<your-deployment>/install.sh | sh")
+	fmt.Println("    curl -fsSL https://<your-deployment>/install.sh | bash")
 	fmt.Println()
 	fmt.Println("  # Or download a binary from GitHub Releases and replace the file:")
 	fmt.Println("    https://github.com/dbgorilla/dbgorilla-cli/releases/latest")
