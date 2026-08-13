@@ -50,18 +50,33 @@ checksum:
 #
 # Verify with:
 #   cosign verify-blob \
-#     --certificate-identity-regexp 'https://github.com/dbgorilla/dbgorilla-cli/' \
+#     --bundle dbg-darwin-arm64.sigstore.json \
+#     --certificate-identity-regexp '^https://github\.com/dbgorilla/dbgorilla-cli/\.github/workflows/release\.yml@refs/tags/' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-#     --signature dbg-darwin-arm64.sig \
 #     dbg-darwin-arm64
+#
+# The identity pattern is anchored and its dots escaped. cosign matches it
+# unanchored, so an unanchored pattern would also accept an identity that
+# merely contains this text.
+
+# Keyless signing. Publishes a Sigstore bundle per artifact rather than a bare
+# detached signature: keyless verification needs the short-lived Fulcio
+# certificate that proves who signed, and a detached .sig does not carry it.
+# The bundle holds the signature, the certificate and the transparency-log
+# entry in one file, so cosign verify-blob works against a downloaded artifact
+# on its own.
+#
+# `signature:` names the file GoReleaser tracks and uploads as a release
+# asset, so it has to be the bundle.
 signs:
   - cmd: cosign
     artifacts: all
     output: true
+    signature: "${artifact}.sigstore.json"
     args:
       - "sign-blob"
       - "--yes"
-      - "--output-signature=${signature}"
+      - "--bundle=${signature}"
       - "${artifact}"
 
 snapshot:
