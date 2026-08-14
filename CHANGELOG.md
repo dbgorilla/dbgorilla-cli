@@ -36,6 +36,17 @@
   produced four alarming warning blocks for two conditions, on the first
   command after install. The configuration is now fetched once and reused, and
   each warning prints once. The warning text is unchanged.
+- A configured API URL that redirects elsewhere now says so. A deployment that
+  has moved answers every path with a redirect to its new home, usually the
+  site root rather than the matching path. The CLI followed it, landed on a web
+  page that returns HTTP 200, and failed while reading JSON — reporting
+  `invalid character '<' looking for beginning of value`, which gives the user
+  nothing to act on. Redirects to a different host are now refused, and the
+  error names the host, states that nothing beyond the original request was
+  sent, and gives the command to point at it deliberately. Same-host redirects
+  are unaffected.
+- Relatedly, an endpoint that answers with a web page rather than JSON is now
+  named as such instead of surfacing a decoder error about a stray `<`.
 
 ## v0.5.0
 
