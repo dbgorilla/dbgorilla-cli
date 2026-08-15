@@ -90,6 +90,13 @@ type tokenResponse struct {
 // DiscoverDeviceConfig fetches the device-config from the backend and
 // validates the returned endpoints. Returns an error if any required field
 // is missing or (when !insecure) any endpoint URL uses a non-https scheme.
+// ErrAPIUnreachable marks a device-config failure where the configured
+// deployment never answered as itself -- a connection that did not land, or
+// something other than the API replying. Distinct from a deployment that
+// answers and simply has no SSO, which is a 404 and a legitimate reason to
+// fall back to password sign-in.
+var ErrAPIUnreachable = errors.New("the DBGorilla API did not answer")
+
 // maxDeviceConfigBytes bounds how much of the response is read before giving
 // up. The real document is a few hundred bytes; anything answering with a
 // large body is not the endpoint we asked for.
@@ -110,7 +117,7 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 		if errors.As(err, &crossHost) {
 			return nil, crossHost
 		}
-		return nil, fmt.Errorf("cannot reach %s: %w", apiURL, err)
+		return nil, fmt.Errorf("%w: cannot reach %s: %w", ErrAPIUnreachable, apiURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -125,11 +132,11 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 	// letting the JSON decoder report a stray "<" the user cannot act on.
 	if httpx.IsHTML(body) {
 		return nil, fmt.Errorf(
-			"%s returned a web page, not the sign-in configuration.\n"+
+			"%w: %s returned a web page, not the sign-in configuration.\n"+
 				"  Something other than the DBGorilla API is answering this address --\n"+
 				"  commonly a login portal, a proxy, or a deployment that has moved.\n"+
 				"  Check where the CLI is pointed: dbg config get api-url",
-			apiURL)
+			ErrAPIUnreachable, apiURL)
 	}
 	var cfg DeviceConfig
 	if err := json.Unmarshal(body, &cfg); err != nil {

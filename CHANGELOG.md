@@ -47,6 +47,12 @@
   are unaffected.
 - Relatedly, an endpoint that answers with a web page rather than JSON is now
   named as such instead of surfacing a decoder error about a stray `<`.
+- Auto-detecting the sign-in mode no longer hides a wrong API URL. `dbg login`
+  with no `--mode` treated every device-config failure as "this deployment has
+  no SSO" and dropped to a password prompt — so a stale URL produced a prompt
+  for credentials on behalf of a deployment the CLI never reached, and the error
+  explaining it was discarded. A 404 still falls back to password sign-in; a
+  deployment that never answered as itself now surfaces the reason.
 
 ## v0.5.0
 
