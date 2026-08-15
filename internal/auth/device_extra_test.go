@@ -38,44 +38,6 @@ func fastPoll(t *testing.T) {
 	t.Cleanup(func() { pollUnit = old })
 }
 
-// --- IsDeviceFlowAvailable -------------------------------------------------
-
-func TestIsDeviceFlowAvailable(t *testing.T) {
-	valid := DeviceConfig{
-		DeviceAuthorizationEndpoint: "https://idp.example/device",
-		TokenEndpoint:               "https://idp.example/token",
-		ClientID:                    "dbgorilla-cli",
-	}
-	t.Run("available", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_ = json.NewEncoder(w).Encode(valid)
-		}))
-		defer srv.Close()
-		if !IsDeviceFlowAvailable(context.Background(), srv.URL, false) {
-			t.Error("want available=true")
-		}
-	})
-	t.Run("not configured (404)", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		defer srv.Close()
-		if IsDeviceFlowAvailable(context.Background(), srv.URL, false) {
-			t.Error("want available=false on 404")
-		}
-	})
-	t.Run("unreachable", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-		url := srv.URL
-		srv.Close()
-		if IsDeviceFlowAvailable(context.Background(), url, true) {
-			t.Error("want available=false when unreachable")
-		}
-	})
-}
-
-// --- DiscoverDeviceConfig error branches -----------------------------------
-
 func TestDiscoverDeviceConfig_ErrorBranches(t *testing.T) {
 	t.Run("non-200 status", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

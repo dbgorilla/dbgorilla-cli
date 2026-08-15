@@ -62,10 +62,14 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	defer cancel()
 
 	mode, _ := cmd.Flags().GetString("mode")
+	// Auto-detect keeps the config it discovered. Probing and then discarding
+	// it meant the device flow re-fetched and re-validated the same endpoints,
+	// so every endpoint warning printed twice on the first command a new user
+	// runs -- alarm fatigue on exactly the warning that should be read.
+	var deviceCfg *auth.DeviceConfig
 	if mode == "" {
-		// Auto-detect: device-config endpoint exists → SSO; else password.
-		if auth.IsDeviceFlowAvailable(ctx, apiURL, insecure) {
-			mode = "sso"
+		if cfg, err := auth.DiscoverDeviceConfig(ctx, apiURL, insecure); err == nil {
+			deviceCfg, mode = cfg, "sso"
 		} else {
 			mode = "password"
 		}
@@ -74,7 +78,14 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	switch mode {
 	case "sso":
 		fmt.Println(style.Info("Signing in via SSO (Keycloak device flow)..."))
-		if _, err := auth.LoginDevice(ctx, apiURL, insecure); err != nil {
+		var err error
+		if deviceCfg == nil {
+			// --mode sso was forced, so nothing has been discovered yet.
+			_, err = auth.LoginDevice(ctx, apiURL, insecure)
+		} else {
+			_, err = auth.LoginDeviceWithConfig(ctx, deviceCfg, insecure)
+		}
+		if err != nil {
 			return err
 		}
 	case "password":

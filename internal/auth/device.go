@@ -86,14 +86,6 @@ type tokenResponse struct {
 	ErrorDescription string `json:"error_description,omitempty"`
 }
 
-// IsDeviceFlowAvailable returns true if the backend at apiURL exposes the
-// Keycloak device-config endpoint. Used by `dbg login` to auto-pick mode.
-// Network errors return false (fall back to password mode).
-func IsDeviceFlowAvailable(ctx context.Context, apiURL string, insecure bool) bool {
-	_, err := DiscoverDeviceConfig(ctx, apiURL, insecure)
-	return err == nil
-}
-
 // DiscoverDeviceConfig fetches the device-config from the backend and
 // validates the returned endpoints. Returns an error if any required field
 // is missing or (when !insecure) any endpoint URL uses a non-https scheme.
@@ -155,15 +147,22 @@ func validateEndpoint(field, endpointURL, apiURL string, insecure bool) error {
 	return nil
 }
 
-// LoginDevice runs the full device flow against the given backend URL.
-// Stores tokens in the keychain on success and returns them. Honors ctx
-// cancellation between polls and during HTTP calls.
+// LoginDevice runs the full device flow against the given backend URL,
+// discovering the device-config itself. Callers that have already discovered
+// it (to auto-detect the login mode, say) should use LoginDeviceWithConfig so
+// the endpoint checks are not run -- and their warnings not printed -- twice.
 func LoginDevice(ctx context.Context, apiURL string, insecure bool) (*Tokens, error) {
 	cfg, err := DiscoverDeviceConfig(ctx, apiURL, insecure)
 	if err != nil {
 		return nil, err
 	}
+	return LoginDeviceWithConfig(ctx, cfg, insecure)
+}
 
+// LoginDeviceWithConfig runs the device flow against an already-discovered
+// config. Stores tokens in the keychain on success and returns them. Honors
+// ctx cancellation between polls and during HTTP calls.
+func LoginDeviceWithConfig(ctx context.Context, cfg *DeviceConfig, insecure bool) (*Tokens, error) {
 	dc, err := requestDeviceCode(ctx, cfg, insecure)
 	if err != nil {
 		return nil, err
