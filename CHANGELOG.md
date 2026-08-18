@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Changed
+
+- Release artifacts are now signed to a Sigstore bundle
+  (`<artifact>.sigstore.json`) instead of a detached `.sig`. Signing is
+  keyless, and the bundle carries the signature, the signing certificate and
+  the transparency-log entry together, so a download can be verified straight
+  from the release page:
+
+  ```sh
+  cosign verify-blob \
+    --bundle dbg-darwin-arm64.sigstore.json \
+    --certificate-identity-regexp '^https://github\.com/dbgorilla/dbgorilla-cli/\.github/workflows/release\.yml@refs/tags/' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    dbg-darwin-arm64
+  ```
+
+  Releases up to and including v0.5.0 publish `.sig` files; verify those
+  through their build provenance with
+  `gh attestation verify <file> --repo dbgorilla/dbgorilla-cli`.
+
+- A prerelease tag no longer bumps the Homebrew formula. The tap upload was
+  unconditional, so a release candidate — or a tag cut to exercise the release
+  pipeline — would have pointed every `brew upgrade` at a build that was not
+  meant for general use.
+
 ### Fixed
 
 - `dbg login` printed every device-flow endpoint warning twice. Auto-detecting

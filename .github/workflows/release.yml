@@ -49,13 +49,10 @@ jobs:
       - name: Install cosign (keyless signer via Fulcio + Rekor)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Pin cosign to 2.x. cosign 3.x changed sign-blob to require an
-          # explicit --bundle and stopped writing detached .sig files,
-          # which breaks goreleaser's default upload pattern. Until we
-          # migrate the goreleaser signs config to bundle output, stay on
-          # cosign 2.x where ${signature} -> .sig works as goreleaser
-          # expects.
-          cosign-release: "v2.6.3"
+          # Pinned so a cosign release cannot change what a tag produces.
+          # 3.x signs to a Sigstore bundle rather than a detached .sig, which
+          # is what .goreleaser.yml now asks for.
+          cosign-release: "v3.1.3"
       # Release notes come from CHANGELOG.md, not from git history. The snapshot
       # publish squashes an entire release into ONE "Release vX.Y.Z" commit on
       # the public repo, so goreleaser's git-log changelog has exactly one
