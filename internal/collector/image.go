@@ -63,6 +63,16 @@ func CompareImages(current, target string) (cmp int, ok bool) {
 	if current == target {
 		return 0, true
 	}
+	// Same digest is the same image, whatever the tags say. This is what makes
+	// a moving tag comparable: "repo:0.5.0@sha256:abc" and "repo:latest@sha256:abc"
+	// are one image, so an upgrade to latest that resolves to what is already
+	// running is recognised as a no-op rather than tearing down a healthy
+	// container to install what it is already running.
+	if cd, td := ImageDigestOf(current), ImageDigestOf(target); cd != "" && td != "" {
+		if cd == td {
+			return 0, true
+		}
+	}
 	if ImageRepoOf(current) != ImageRepoOf(target) {
 		return 0, false // a different image entirely; not ours to order
 	}

@@ -18,15 +18,20 @@ var (
 	goos         = runtime.GOOS
 )
 
-// DefaultImage is the published GA collector image, pinned by digest for
-// reproducibility. Bump this on each release (see the collector repo's
-// "Releasing" docs). Override with `dbg collector install --image`. Used as the
-// fallback when the deployment advertises no preferred version.
-const DefaultImage = "dbgorillapublic.azurecr.io/dbg-collector:0.3.3@sha256:738969348c98fb5dba11322d44d38f60d53ec9cf76fdbbe9bb239def1b83e835"
-
 // ImageRepo is the published collector repository, used to build an image ref
 // from a deployment-advertised preferred version (`<ImageRepo>:<version>`).
 const ImageRepo = "dbgorillapublic.azurecr.io/dbg-collector"
+
+// DefaultImage is the newest published collector.
+//
+// A moving tag rather than a fixed version: a version baked in here is only as
+// current as the binary holding it, so `collector upgrade` could not move a
+// collector forward once this CLI fell behind.
+//
+// Reproducibility is kept where it matters. PinnedRef resolves this to an
+// immutable digest before anything runs locally, so an install records exactly
+// what it started. Pass `--image <repo>:<version>` for a specific version.
+const DefaultImage = ImageRepo + ":latest"
 
 // ImageForVersion returns the image ref for a deployment-blessed version string.
 func ImageForVersion(version string) string {

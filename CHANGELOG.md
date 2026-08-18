@@ -29,6 +29,19 @@
 
 ### Fixed
 
+- `collector upgrade` installs the newest published collector. It previously
+  installed a version fixed when the CLI was built, so re-running it could not
+  move a collector forward. `--image <repo>:<version>` installs a specific
+  version instead.
+
+  Local installs still record an immutable digest, so what a collector is
+  running stays exact. On `--target aws` the image resolves when the task
+  starts, so a restart can pick up a newer collector without `upgrade` being
+  run.
+
+  An upgrade that resolves to what is already running is now a no-op rather
+  than a container rebuild.
+
 - `dbg login` printed every device-flow endpoint warning twice. Auto-detecting
   the sign-in mode fetched and validated the device configuration, discarded
   it, and the device flow then fetched and validated the same thing again --

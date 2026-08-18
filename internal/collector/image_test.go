@@ -121,3 +121,27 @@ func TestCompareImages_UnorderableCases(t *testing.T) {
 		})
 	}
 }
+
+// The default image is a moving tag, so the tag itself says nothing about
+// which version it is. The digest does. Without this, an upgrade to latest
+// could never be recognised as "already running", and every run would tear
+// down a healthy container to install the image it is already running.
+func TestCompareImages_SameDigestIsTheSameImage(t *testing.T) {
+	const repo = "dbgorillapublic.azurecr.io/dbg-collector"
+	got, ok := CompareImages(repo+":0.5.0@sha256:abc", repo+":latest@sha256:abc")
+	if !ok {
+		t.Fatal("a shared digest is comparable even when the tags differ")
+	}
+	if got != 0 {
+		t.Errorf("got %d, want 0 -- same digest is the same image", got)
+	}
+}
+
+// Different digests under a moving tag must NOT be called equal, and must not
+// be ordered by the tag either: "latest" carries no version to compare.
+func TestCompareImages_MovingTagWithADifferentDigestIsUnorderable(t *testing.T) {
+	const repo = "dbgorillapublic.azurecr.io/dbg-collector"
+	if _, ok := CompareImages(repo+":0.5.0@sha256:abc", repo+":latest@sha256:def"); ok {
+		t.Error("a moving tag with a different digest cannot be ordered by version")
+	}
+}
