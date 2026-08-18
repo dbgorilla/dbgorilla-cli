@@ -72,6 +72,9 @@ var (
 	// pinImage resolves an image tag to its digest before a container is
 	// replaced, so an upgrade records what actually runs.
 	pinImage = collector.PinnedRef
+	// pinImageRemote resolves a tag to a digest over the registry's HTTP API,
+	// for the AWS path where there is no container runtime to ask.
+	pinImageRemote = collector.RemoteDigest
 )
 
 func init() {
@@ -475,9 +478,20 @@ func runInstallAWS(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	// ECS pulls the image at task start, so no local digest-pin here (PinnedRef
-	// needs a Docker daemon the AWS installer may not have).
+	// Pin to a digest before it reaches CloudFormation. ECS re-pulls whenever a
+	// task starts, so an unresolved tag means the collector's version can change
+	// on a restart nobody asked for -- and the stack parameter never changing
+	// means an upgrade has nothing to act on. Resolved over the registry's HTTP
+	// API, since the AWS installer may have no container runtime.
 	image, imageSource := resolveImage(cmd, creds)
+	if pinned, perr := pinImageRemote(image); perr == nil {
+		image = pinned
+	} else {
+		fmt.Println(style.Warn(fmt.Sprintf(
+			"⚠  could not resolve %s to a fixed version (%v).\n"+
+				"   Deploying the tag as-is: the collector may change version when its task restarts.",
+			image, perr)))
+	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
 	params, err := collector.AwsStackParams(collector.AwsStackInput{
@@ -1461,7 +1475,16 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// install the image it is already running. Costs a pull on a run that then
 	// declines to do anything, which is the cheaper mistake.
 	target := image
-	if !st.IsAWS() {
+	if st.IsAWS() {
+		// Over HTTP: the AWS path has no container runtime to pull with, and an
+		// unresolved tag leaves CloudFormation with an unchanged parameter and
+		// therefore nothing to do.
+		pinned, err := pinImageRemote(image)
+		if err != nil {
+			return fmt.Errorf("cannot resolve %s to a fixed version: %w", image, err)
+		}
+		target = pinned
+	} else {
 		pinned, err := pinImage(image)
 		if err != nil {
 			return err
