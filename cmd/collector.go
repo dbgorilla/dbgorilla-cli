@@ -1474,7 +1474,7 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// so without this, every run would tear down a healthy container to
 	// install the image it is already running. Costs a pull on a run that then
 	// declines to do anything, which is the cheaper mistake.
-	target := image
+	var target string
 	if st.IsAWS() {
 		// Over HTTP: the AWS path has no container runtime to pull with, and an
 		// unresolved tag leaves CloudFormation with an unchanged parameter and
