@@ -13,3 +13,9 @@
 
 # Test
 coverage.out
+
+# Internal notes for agents/humans working here. CLAUDE.md is public and
+# contributor-facing; anything that must not be published goes in the local
+# file instead.
+CLAUDE.local.md
+.claude/settings.local.json

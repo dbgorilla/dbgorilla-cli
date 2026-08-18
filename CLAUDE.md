@@ -40,14 +40,33 @@ CI also runs golangci-lint v2 (`.golangci.yml`).
 
 ## Public-repo discipline
 
-This repo is public. Do not commit:
+This repo is public. It is not only the code that is public: **commit messages,
+PR titles and PR descriptions are permanent and world-readable too**, and they
+are where this is most often forgotten. A commit message cannot be edited once
+it is merged.
+
+Do not publish, in code or in the text around it:
 
 - Customer names, deployment URLs, or tenant identifiers.
+- Names of internal environments (staging, preview, per-developer envs) or of
+  internal hosts and services.
+- People. No "reported by X", no "found by Y", no naming who asked for a change
+  or who reviewed it. Describe the defect, not the discovery.
+- Internal process detail: how a release is coordinated, what went wrong
+  internally, which internal repo or ticket something came from, what an
+  internal tool found.
 - Internal release-branch names, dev-environment paths, or internal-only
   feature flags.
 - Test fixtures with real-looking secrets (use `https://x/mcp/` and
   `key123`-style placeholders — see existing tests).
 - Coordination metadata from sibling repos or chat tools.
 
-When in doubt, scrub it. Everything in `cmd/`, `internal/`, and tests is
-visible to anyone with `git clone` access.
+Publish what a stranger needs to understand the change and use the software:
+what behaviour changed, why it matters to them, and what they should do
+differently. A behaviour change a user will hit **is** pertinent, including an
+unwelcome one — state it plainly rather than omitting it.
+
+Internal notes belong in `CLAUDE.local.md`, which is gitignored.
+
+When in doubt, scrub it. Everything in `cmd/`, `internal/`, tests, and every
+commit message and PR description is visible to anyone with `git clone` access.
