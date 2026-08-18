@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
@@ -20,6 +21,7 @@ func stubAWSOK(t *testing.T) {
 	stubAwsAccount(t, "111122223333", nil)
 	stubAwsRegion(t, "us-east-1")
 	stubNetworkPath(t, nil, nil)
+	stubRemoteDigest(t, nil)
 }
 
 func stubAwsAvailable(t *testing.T, err error) {
@@ -176,6 +178,23 @@ func stubReachable(t *testing.T, err error) {
 	orig := reachable
 	reachable = func(string) error { return err }
 	t.Cleanup(func() { reachable = orig })
+}
+
+// stubRemoteDigest replaces the registry digest lookup. The AWS path resolves
+// a tag over the registry's HTTP API, which a test must never actually reach.
+func stubRemoteDigest(t *testing.T, err error) {
+	t.Helper()
+	orig := pinImageRemote
+	pinImageRemote = func(ref string) (string, error) {
+		if err != nil {
+			return "", err
+		}
+		if strings.Contains(ref, "@sha256:") {
+			return ref, nil
+		}
+		return ref + "@sha256:testdigest", nil
+	}
+	t.Cleanup(func() { pinImageRemote = orig })
 }
 
 // awsCmd builds a command carrying the flags the AWS install path reads.

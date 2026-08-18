@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `collector install --target aws` and `collector upgrade --target aws` pin the
+  collector to an exact image rather than a tag. A tag left the CloudFormation
+  parameter unchanged between releases, so an upgrade had nothing to act on and
+  did nothing; and ECS re-pulls a tag whenever a task starts, so the collector
+  could change version on a restart nobody asked for. AWS now behaves like a
+  local install: upgrade moves it, nothing else does, and `collector status`
+  reports the exact version running.
+
 ## v0.5.1
 
 ### Changed

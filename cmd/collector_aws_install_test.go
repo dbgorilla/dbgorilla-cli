@@ -551,6 +551,7 @@ func TestAwsStatus(t *testing.T) {
 
 func TestRunCollectorUpgrade_AWSRollsTheImage(t *testing.T) {
 	isolate(t)
+	stubRemoteDigest(t, nil)
 	got := stubUpgradeImage(t, nil)
 	if err := collector.SaveState(&collector.State{
 		AgentID: "agent-aws", Target: "aws", StackName: "dbg-collector",
@@ -567,18 +568,47 @@ func TestRunCollectorUpgrade_AWSRollsTheImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCollectorUpgrade: %v\n%s", err, out)
 	}
-	if *got != "ghcr.io/dbgorilla/collector:v2" {
-		t.Errorf("upgraded to %q", *got)
+	// CloudFormation must receive a digest, not a tag. A tag leaves the stack
+	// parameter unchanged between releases, so CloudFormation finds nothing to
+	// do and the upgrade silently does nothing -- while ECS re-pulls the tag on
+	// any task restart, changing the version when nobody asked.
+	want := "ghcr.io/dbgorilla/collector:v2@sha256:testdigest"
+	if *got != want {
+		t.Errorf("upgraded to %q, want the digest-pinned %q", *got, want)
 	}
 	// State has to move too, or `status` keeps reporting the old image.
 	st, _ := collector.LoadState()
-	if st == nil || st.Image != "ghcr.io/dbgorilla/collector:v2" {
-		t.Errorf("state image = %+v", st)
+	if st == nil || st.Image != want {
+		t.Errorf("state image = %+v, want %q", st, want)
+	}
+}
+
+// If the registry cannot be reached, an AWS upgrade stops rather than sending
+// a bare tag that CloudFormation would decline to act on.
+func TestRunCollectorUpgrade_AWSStopsWhenTheDigestCannotBeResolved(t *testing.T) {
+	isolate(t)
+	stubRemoteDigest(t, errors.New("registry unreachable"))
+	got := stubUpgradeImage(t, nil)
+	if err := collector.SaveState(&collector.State{
+		AgentID: "agent-aws", Target: "aws", StackName: "dbg-collector",
+		Region: "us-east-1", Image: "img:v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var err error
+	capture(t, func() { err = runCollectorUpgrade(awsCmd(t), nil) })
+	if err == nil {
+		t.Fatal("expected the upgrade to stop")
+	}
+	if *got != "" {
+		t.Errorf("nothing should have been sent to CloudFormation, got %q", *got)
 	}
 }
 
 func TestRunCollectorUpgrade_AWSFailureStops(t *testing.T) {
 	isolate(t)
+	stubRemoteDigest(t, nil)
 	stubUpgradeImage(t, errors.New("stack is UPDATE_IN_PROGRESS"))
 	if err := collector.SaveState(&collector.State{
 		AgentID: "agent-aws", Target: "aws", StackName: "dbg-collector", Image: "img:v1",
