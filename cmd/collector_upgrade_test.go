@@ -130,3 +130,70 @@ func TestRunCollectorUpgrade_StaleCLIDoesNotReplaceANewerCollector(t *testing.T)
 		t.Errorf("state image = %+v, want %q unchanged", st, newer)
 	}
 }
+
+// The default image is a moving tag now, so the image the CLI resolves is not
+// something that can be compared against what is running. Pinning it to a
+// digest first is what makes "already on this" detectable -- otherwise every
+// upgrade run removes and recreates a healthy container to install the image
+// it is already running.
+func TestRunCollectorUpgrade_LatestAlreadyRunningIsANoOp(t *testing.T) {
+	isolate(t)
+	const digest = "sha256:783f3f13899f1bb87952bffa07b8bea78c249b6365d72f639a28446f5817c261"
+	stubPinnedRef(t, repoRef+":latest@"+digest, nil)
+
+	replaced := false
+	orig := runContainer
+	runContainer = func(collector.Runner) error { replaced = true; return nil }
+	t.Cleanup(func() { runContainer = orig })
+
+	// Running the same digest under its version tag.
+	if err := collector.SaveState(&collector.State{
+		AgentID: "agent-1", Target: "docker", ContainerName: "dbg-collector",
+		Image: repoRef + ":0.5.0@" + digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var err error
+	out := capture(t, func() { err = runCollectorUpgrade(upgradeTestCmd(t), nil) })
+	if err != nil {
+		t.Fatalf("runCollectorUpgrade: %v", err)
+	}
+	if replaced {
+		t.Error("the container must not be rebuilt to install what it is already running")
+	}
+	if !strings.Contains(out, "nothing to upgrade") {
+		t.Errorf("out = %q, want it to say so plainly", out)
+	}
+}
+
+// A genuinely newer digest under the moving tag still upgrades.
+func TestRunCollectorUpgrade_LatestWithANewDigestProceeds(t *testing.T) {
+	isolate(t)
+	stubPinnedRef(t, repoRef+":latest@sha256:newdigest", nil)
+
+	replaced := false
+	orig := runContainer
+	runContainer = func(collector.Runner) error { replaced = true; return nil }
+	t.Cleanup(func() { runContainer = orig })
+
+	if err := collector.SaveState(&collector.State{
+		AgentID: "agent-1", Target: "docker", ContainerName: "dbg-collector",
+		Image: repoRef + ":0.5.0@sha256:olddigest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var err error
+	capture(t, func() { err = runCollectorUpgrade(upgradeTestCmd(t), nil) })
+	if err != nil {
+		t.Fatalf("runCollectorUpgrade: %v", err)
+	}
+	if !replaced {
+		t.Error("a different digest is a real upgrade and must be installed")
+	}
+	st, _ := collector.LoadState()
+	if st == nil || st.Image != repoRef+":latest@sha256:newdigest" {
+		t.Errorf("state should record the pinned digest, got %+v", st)
+	}
+}

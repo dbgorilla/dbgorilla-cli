@@ -19,11 +19,16 @@ import (
 // driven without a real engine or database.
 func setInstallStubs(t *testing.T, dockerErr error, rep preflight.Report, runErr error) {
 	t.Helper()
-	origD, origP, origR := dockerAvailable, runPreflight, runContainer
+	origD, origP, origR, origI := dockerAvailable, runPreflight, runContainer, pinImage
 	dockerAvailable = func() error { return dockerErr }
 	runPreflight = func(context.Context, string) preflight.Report { return rep }
 	runContainer = func(collector.Runner) error { return runErr }
-	t.Cleanup(func() { dockerAvailable, runPreflight, runContainer = origD, origP, origR })
+	// The default image is a moving tag, so resolving it to a digest now shells
+	// out to `docker pull`. isolate() empties PATH on purpose, so stub it.
+	pinImage = func(ref string) (string, error) { return ref + "@sha256:testdigest", nil }
+	t.Cleanup(func() {
+		dockerAvailable, runPreflight, runContainer, pinImage = origD, origP, origR, origI
+	})
 }
 
 func cleanReport() preflight.Report {

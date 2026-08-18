@@ -1455,25 +1455,36 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// deployment-blessed version without re-provisioning isn't wired yet.)
 	image, _ := resolveImage(cmd, nil)
 
-	// The fallback image is compiled into this binary, so "upgrade" from an
-	// out-of-date CLI would otherwise roll a newer collector BACKWARDS and
-	// print a success message doing it. Compare before touching anything.
-	if done, err := checkUpgradeDirection(cmd, st.Image, image); done || err != nil {
-		return err
-	}
-	fmt.Printf("Upgrading to %s...\n", image)
-
-	if st.IsAWS() {
-		if err := upgradeImage(st.StackName, st.Region, image); err != nil {
-			return err
-		}
-		fmt.Println(style.Success("✓ Upgrade initiated; ECS is rolling the task. Check `dbg collector status`."))
-		st.Image = image
-	} else {
+	// Resolve the tag to a digest BEFORE deciding whether to act. The default
+	// is a moving tag, and a tag cannot be compared against what is running --
+	// so without this, every run would tear down a healthy container to
+	// install the image it is already running. Costs a pull on a run that then
+	// declines to do anything, which is the cheaper mistake.
+	target := image
+	if !st.IsAWS() {
 		pinned, err := pinImage(image)
 		if err != nil {
 			return err
 		}
+		target = pinned
+	}
+
+	// The default image comes from this binary, so "upgrade" from an
+	// out-of-date CLI would otherwise roll a newer collector BACKWARDS and
+	// print a success message doing it. Compare before touching anything.
+	if done, err := checkUpgradeDirection(cmd, st.Image, target); done || err != nil {
+		return err
+	}
+	fmt.Printf("Upgrading to %s...\n", target)
+
+	if st.IsAWS() {
+		if err := upgradeImage(st.StackName, st.Region, target); err != nil {
+			return err
+		}
+		fmt.Println(style.Success("✓ Upgrade initiated; ECS is rolling the task. Check `dbg collector status`."))
+		st.Image = target
+	} else {
+		pinned := target
 		runner := dockerRunner(st)
 		runner.Image = pinned
 		_ = runner.Remove()
