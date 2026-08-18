@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Auto-detecting the sign-in mode no longer reads a broken deployment as one
+  without SSO. Every non-200 from the device-config endpoint was treated as
+  "this deployment has no SSO" and dropped to a password prompt, so a 502 from
+  a proxy in front of a dead backend, a 503 mid-deploy, or a 401 from something
+  guarding the path all produced a request for credentials on behalf of a
+  deployment that was not working — and discarded the status code that would
+  have explained it. Only a 404, the deployment answering that it genuinely has
+  no SSO, still falls back to password sign-in. Everything else now names the
+  status.
+
 ## v0.5.2
 
 ### Fixed

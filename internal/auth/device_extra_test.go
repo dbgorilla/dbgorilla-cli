@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,9 +41,12 @@ func fastPoll(t *testing.T) {
 }
 
 func TestDiscoverDeviceConfig_ErrorBranches(t *testing.T) {
-	t.Run("non-200 status", func(t *testing.T) {
+	// 404 is the deployment answering "no SSO here". Other error statuses mean
+	// the deployment is failing, and are covered separately by
+	// TestDiscoverDeviceConfig_ErrorStatusIsNotMistakenForNoSSO.
+	t.Run("404 status", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusNotFound)
 		}))
 		defer srv.Close()
 		_, err := DiscoverDeviceConfig(context.Background(), srv.URL, false)
@@ -526,5 +530,53 @@ func TestDiscoverDeviceConfig_HTMLBodyIsNamedNotParsed(t *testing.T) {
 	}
 	if !strings.Contains(msg, "web page") || !strings.Contains(msg, "dbg config get api-url") {
 		t.Errorf("should name the situation and how to check it, got: %s", msg)
+	}
+}
+
+// A 404 is the deployment saying "no SSO here". Anything else in the error
+// range is the deployment failing, and must not be mistaken for the same
+// thing: a 502 from a proxy in front of a dead backend would otherwise hand
+// the user a password prompt for a deployment that is not currently working.
+func TestDiscoverDeviceConfig_ErrorStatusIsNotMistakenForNoSSO(t *testing.T) {
+	t.Run("404 is a plain no-SSO answer, not unreachable", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		_, err := DiscoverDeviceConfig(context.Background(), srv.URL, true)
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if errors.Is(err, ErrAPIUnreachable) {
+			t.Errorf("a 404 means the deployment answered; got ErrAPIUnreachable: %v", err)
+		}
+	})
+
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			_, err := DiscoverDeviceConfig(context.Background(), srv.URL, true)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !errors.Is(err, ErrAPIUnreachable) {
+				t.Errorf("HTTP %d must not be read as no-SSO; got: %v", status, err)
+			}
+			// The status the user needs in order to tell "down" from "no SSO".
+			if !strings.Contains(err.Error(), http.StatusText(status)) &&
+				!strings.Contains(err.Error(), fmt.Sprint(status)) {
+				t.Errorf("should name the status, got: %v", err)
+			}
+		})
 	}
 }
