@@ -22,6 +22,11 @@
   through their build provenance with
   `gh attestation verify <file> --repo dbgorilla/dbgorilla-cli`.
 
+- A prerelease tag no longer bumps the Homebrew formula. The tap upload was
+  unconditional, so a release candidate — or a tag cut to exercise the release
+  pipeline — would have pointed every `brew upgrade` at a build that was not
+  meant for general use.
+
 ### Fixed
 
 - `dbg login` printed every device-flow endpoint warning twice. Auto-detecting

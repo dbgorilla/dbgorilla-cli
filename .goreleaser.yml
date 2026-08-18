@@ -109,6 +109,12 @@ release:
 # write access to that tap repo.
 brews:
   - name: dbgorilla
+    # A prerelease tag must not move the formula every `brew upgrade` follows.
+    # The default here is to upload on every tag, so a release-candidate or a
+    # tag cut to exercise this pipeline would hand Homebrew users a build that
+    # was never meant for them. "auto" uploads for v1.2.3 and stays out of the
+    # way for v1.2.3-rc1.
+    skip_upload: "auto"
     repository:
       owner: dbgorilla
       name: homebrew-tap
