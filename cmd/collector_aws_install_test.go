@@ -636,3 +636,62 @@ func TestRunCollectorUpgrade_NoCollectorInstalled(t *testing.T) {
 		t.Fatal("upgrading with nothing installed must error")
 	}
 }
+
+// An AWS install must not fail because a version lookup did. Deploying the tag
+// is worse than deploying a digest, but far better than refusing to install --
+// so it warns, says what the consequence is, and carries on.
+func TestRunInstallAWS_UnresolvableDigestWarnsAndProceeds(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	stubRemoteDigest(t, errors.New("registry unreachable"))
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	srv := installServer(t, "agent-aws")
+	defer srv.Close()
+
+	c := awsCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("a failed version lookup must not fail the install: %v\n%s", err, out)
+	}
+	if deploys.count != 1 {
+		t.Fatalf("the stack should still deploy, got %d deploys", deploys.count)
+	}
+	// The operator has to learn what they traded away.
+	if !strings.Contains(out, "restarts") {
+		t.Errorf("the consequence should be stated, got: %s", out)
+	}
+}
+
+// The happy path: the image reaching CloudFormation is digest-pinned, so the
+// stack parameter changes when the collector does and not otherwise.
+func TestRunInstallAWS_DeploysADigestPinnedImage(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	srv := installServer(t, "agent-aws")
+	defer srv.Close()
+
+	c := awsCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("runInstallAWS: %v\n%s", err, out)
+	}
+	img := deploys.params["CollectorImage"]
+	if !strings.Contains(img, "@sha256:") {
+		t.Errorf("CollectorImage = %q, want a digest-pinned reference", img)
+	}
+}
