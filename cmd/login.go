@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
+	"github.com/dbgorilla/dbgorilla-cli/internal/httpx"
 	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
 )
@@ -68,10 +70,20 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	// runs -- alarm fatigue on exactly the warning that should be read.
 	var deviceCfg *auth.DeviceConfig
 	if mode == "" {
-		if cfg, err := auth.DiscoverDeviceConfig(ctx, apiURL, insecure); err == nil {
+		cfg, err := auth.DiscoverDeviceConfig(ctx, apiURL, insecure)
+		switch {
+		case err == nil:
 			deviceCfg, mode = cfg, "sso"
-		} else {
+		case reachedTheAPI(err):
+			// The deployment answered and has no SSO. Password mode is right.
 			mode = "password"
+		default:
+			// We never reached the API -- a stale URL redirecting elsewhere, or
+			// something that is not the API answering. Falling through to a
+			// password prompt would ask for credentials on behalf of a
+			// deployment we could not find, and would bury the one error that
+			// says how to fix it.
+			return err
 		}
 	}
 
@@ -172,4 +184,18 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// reachedTheAPI reports whether a failed device-config lookup still tells us
+// the configured deployment answered as itself. A 404 means "this deployment
+// has no SSO", and dropping to password mode is correct. A refused cross-host
+// redirect, a web page where JSON belongs, or a connection that never landed
+// mean the API was never reached, and the user needs to see why rather than be
+// handed a password prompt on behalf of a deployment we could not find.
+func reachedTheAPI(err error) bool {
+	var crossHost *httpx.CrossHostRedirectError
+	if errors.As(err, &crossHost) {
+		return false
+	}
+	return !errors.Is(err, auth.ErrAPIUnreachable)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -467,5 +468,63 @@ func TestFirstNonEmpty(t *testing.T) {
 	}
 	if got := firstNonEmpty("", ""); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// The failure a user actually hits when their configured URL points at a
+// deployment that has moved: every path answers with a redirect to the new
+// home, the redirect lands on a web page that returns 200, and the CLI used to
+// report `invalid character '<' looking for beginning of value` -- a message
+// with no route back to the cause.
+func TestDiscoverDeviceConfig_MovedDeploymentNamesTheNewHost(t *testing.T) {
+	newHome := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<!doctype html>\n<html lang=\"en\"><head></head></html>")
+	}))
+	defer newHome.Close()
+
+	oldHome := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, newHome.URL, http.StatusFound)
+	}))
+	defer oldHome.Close()
+
+	// insecure=true only because httptest serves plain http; the host rule is
+	// what is under test.
+	_, err := DiscoverDeviceConfig(context.Background(), oldHome.URL, true)
+	if err == nil {
+		t.Fatal("expected the cross-host redirect to be refused")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "invalid character") {
+		t.Errorf("must not degrade into a JSON parse error, got: %s", msg)
+	}
+	// It has to name where it was sent, and how to go there deliberately.
+	if !strings.Contains(msg, newHome.URL) {
+		t.Errorf("should name the host it was redirected to, got: %s", msg)
+	}
+	if !strings.Contains(msg, "dbg config set api-url") {
+		t.Errorf("should say how to point at it, got: %s", msg)
+	}
+}
+
+// Same shape without a redirect: something on the configured host answers 200
+// with a web page. A login portal or an SPA catch-all does this.
+func TestDiscoverDeviceConfig_HTMLBodyIsNamedNotParsed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<!doctype html><html><body>sign in</body></html>")
+	}))
+	defer srv.Close()
+
+	_, err := DiscoverDeviceConfig(context.Background(), srv.URL, true)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "invalid character") {
+		t.Errorf("the decoder error must not be what the user sees, got: %s", msg)
+	}
+	if !strings.Contains(msg, "web page") || !strings.Contains(msg, "dbg config get api-url") {
+		t.Errorf("should name the situation and how to check it, got: %s", msg)
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
+	"github.com/dbgorilla/dbgorilla-cli/internal/httpx"
 )
 
 // Version is overridden by the cmd package at init via SetUserAgentVersion.
@@ -102,17 +102,9 @@ func NewInsecureClient(baseURL string) *Client {
 // redirects unless insecure.
 func buildHTTPClient(insecure bool) *http.Client {
 	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: sharedTransport(insecure),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !insecure && req.URL.Scheme != "https" {
-				return fmt.Errorf("refusing redirect to non-https URL: %s", req.URL.Redacted())
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		},
+		Timeout:       30 * time.Second,
+		Transport:     sharedTransport(insecure),
+		CheckRedirect: httpx.RedirectPolicy(insecure),
 	}
 }
 

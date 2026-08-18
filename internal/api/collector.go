@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/dbgorilla/dbgorilla-cli/internal/httpx"
 )
 
 // ErrCollectorUnsupported is returned when the deployment has no managed
@@ -49,16 +51,9 @@ func summarizeBody(body []byte) string {
 	return trimmed
 }
 
-func looksLikeHTML(s string) bool {
-	head := strings.ToLower(s)
-	if len(head) > 512 {
-		head = head[:512]
-	}
-	return strings.HasPrefix(head, "<!doctype html") ||
-		strings.HasPrefix(head, "<html") ||
-		strings.Contains(head, "<head") ||
-		strings.Contains(head, "<body")
-}
+// looksLikeHTML defers to httpx so the API and auth paths agree on what counts
+// as "a web page answered instead of the API".
+func looksLikeHTML(s string) bool { return httpx.IsHTML([]byte(s)) }
 
 // CollectorCredentials is the response from POST /api/v0_2/collectors. The
 // secret is returned exactly once. agent_id is the OAuth client_id; domain is

@@ -45,6 +45,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbgorilla/dbgorilla-cli/internal/httpx"
 	"github.com/pkg/browser"
 )
 
@@ -89,6 +90,18 @@ type tokenResponse struct {
 // DiscoverDeviceConfig fetches the device-config from the backend and
 // validates the returned endpoints. Returns an error if any required field
 // is missing or (when !insecure) any endpoint URL uses a non-https scheme.
+// ErrAPIUnreachable marks a device-config failure where the configured
+// deployment never answered as itself -- a connection that did not land, or
+// something other than the API replying. Distinct from a deployment that
+// answers and simply has no SSO, which is a 404 and a legitimate reason to
+// fall back to password sign-in.
+var ErrAPIUnreachable = errors.New("the DBGorilla API did not answer")
+
+// maxDeviceConfigBytes bounds how much of the response is read before giving
+// up. The real document is a few hundred bytes; anything answering with a
+// large body is not the endpoint we asked for.
+const maxDeviceConfigBytes = 1 << 20
+
 func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*DeviceConfig, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimRight(apiURL, "/")+"/api/v0_1/auth/keycloak/device-config", nil)
@@ -97,14 +110,36 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 	}
 	resp, err := httpClient(insecure).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach %s: %w", apiURL, err)
+		// A refused cross-host redirect is a configured-URL problem, and its
+		// message already says which host and how to point at it. Wrapping it
+		// in "cannot reach ..." would bury that.
+		var crossHost *httpx.CrossHostRedirectError
+		if errors.As(err, &crossHost) {
+			return nil, crossHost
+		}
+		return nil, fmt.Errorf("%w: cannot reach %s: %w", ErrAPIUnreachable, apiURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("device-config endpoint returned HTTP %d (SSO not configured?)", resp.StatusCode)
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDeviceConfigBytes))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read device-config response: %w", err)
+	}
+	// A 200 carrying a web page means something other than the API answered --
+	// a login portal, an SPA catch-all, or a proxy. Say that, rather than
+	// letting the JSON decoder report a stray "<" the user cannot act on.
+	if httpx.IsHTML(body) {
+		return nil, fmt.Errorf(
+			"%w: %s returned a web page, not the sign-in configuration.\n"+
+				"  Something other than the DBGorilla API is answering this address --\n"+
+				"  commonly a login portal, a proxy, or a deployment that has moved.\n"+
+				"  Check where the CLI is pointed: dbg config get api-url",
+			ErrAPIUnreachable, apiURL)
+	}
 	var cfg DeviceConfig
-	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+	if err := json.Unmarshal(body, &cfg); err != nil {
 		return nil, fmt.Errorf("cannot parse device-config: %w", err)
 	}
 	if cfg.DeviceAuthorizationEndpoint == "" || cfg.TokenEndpoint == "" || cfg.ClientID == "" {
@@ -302,21 +337,13 @@ func pollForToken(ctx context.Context, cfg *DeviceConfig, dc *deviceCodeResponse
 }
 
 // httpClient returns an HTTP client honouring the --insecure flag for
-// self-signed dev backends. The CheckRedirect policy refuses to follow a
-// redirect to a non-https URL when !insecure, preventing TLS downgrade
-// via a malicious redirect.
+// self-signed dev backends. Redirect handling is httpx.RedirectPolicy, shared
+// with the API client: no TLS downgrade, no endless chain, and no leaving the
+// host the request was aimed at.
 func httpClient(insecure bool) *http.Client {
 	c := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !insecure && req.URL.Scheme != "https" {
-				return fmt.Errorf("refusing redirect to non-https URL: %s", req.URL.Redacted())
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		},
+		Timeout:       30 * time.Second,
+		CheckRedirect: httpx.RedirectPolicy(insecure),
 	}
 	if insecure {
 		c.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
