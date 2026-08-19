@@ -87,14 +87,11 @@ type tokenResponse struct {
 	ErrorDescription string `json:"error_description,omitempty"`
 }
 
-// DiscoverDeviceConfig fetches the device-config from the backend and
-// validates the returned endpoints. Returns an error if any required field
-// is missing or (when !insecure) any endpoint URL uses a non-https scheme.
 // ErrAPIUnreachable marks a device-config failure where the configured
-// deployment never answered as itself -- a connection that did not land, or
-// something other than the API replying. Distinct from a deployment that
-// answers and simply has no SSO, which is a 404 and a legitimate reason to
-// fall back to password sign-in.
+// deployment never answered as itself -- a connection that did not land,
+// something other than the API replying, or the API replying with an error of
+// its own. Distinct from a deployment that answers and simply has no SSO,
+// which is a 404 and a legitimate reason to fall back to password sign-in.
 var ErrAPIUnreachable = errors.New("the DBGorilla API did not answer")
 
 // maxDeviceConfigBytes bounds how much of the response is read before giving
@@ -102,6 +99,9 @@ var ErrAPIUnreachable = errors.New("the DBGorilla API did not answer")
 // large body is not the endpoint we asked for.
 const maxDeviceConfigBytes = 1 << 20
 
+// DiscoverDeviceConfig fetches the device-config from the backend and
+// validates the returned endpoints. Returns an error if any required field
+// is missing or (when !insecure) any endpoint URL uses a non-https scheme.
 func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*DeviceConfig, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimRight(apiURL, "/")+"/api/v0_1/auth/keycloak/device-config", nil)
@@ -120,8 +120,19 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 		return nil, fmt.Errorf("%w: cannot reach %s: %w", ErrAPIUnreachable, apiURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// Only a 404 means "this deployment answered, and it has no SSO" -- the one
+	// status that justifies dropping to a password prompt. Every other error
+	// status is the deployment failing, not declining: a 502 from a proxy in
+	// front of a dead backend, a 503 mid-deploy, a 401 from something guarding
+	// the path. Treating those as "no SSO here" asks for credentials on behalf
+	// of a deployment that is not currently working, and throws away the status
+	// code that would have explained it.
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errors.New("device-config endpoint returned HTTP 404 (SSO not configured?)")
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("device-config endpoint returned HTTP %d (SSO not configured?)", resp.StatusCode)
+		return nil, fmt.Errorf("%w: %s returned HTTP %d for the sign-in configuration",
+			ErrAPIUnreachable, apiURL, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDeviceConfigBytes))
 	if err != nil {
