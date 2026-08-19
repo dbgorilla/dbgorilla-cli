@@ -92,7 +92,7 @@ type tokenResponse struct {
 // something other than the API replying, or the API replying with an error of
 // its own. Distinct from a deployment that answers and simply has no SSO,
 // which is a 404 and a legitimate reason to fall back to password sign-in.
-var ErrAPIUnreachable = errors.New("the DBGorilla API did not answer")
+var ErrAPIUnreachable = errors.New("sign-in configuration unavailable")
 
 // maxDeviceConfigBytes bounds how much of the response is read before giving
 // up. The real document is a few hundred bytes; anything answering with a
@@ -131,8 +131,7 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 		return nil, errors.New("device-config endpoint returned HTTP 404 (SSO not configured?)")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: %s returned HTTP %d for the sign-in configuration",
-			ErrAPIUnreachable, apiURL, resp.StatusCode)
+		return nil, fmt.Errorf("%w: %s returned HTTP %d", ErrAPIUnreachable, apiURL, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDeviceConfigBytes))
 	if err != nil {
@@ -143,7 +142,7 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 	// letting the JSON decoder report a stray "<" the user cannot act on.
 	if httpx.IsHTML(body) {
 		return nil, fmt.Errorf(
-			"%w: %s returned a web page, not the sign-in configuration.\n"+
+			"%w: %s answered with a web page.\n"+
 				"  Something other than the DBGorilla API is answering this address --\n"+
 				"  commonly a login portal, a proxy, or a deployment that has moved.\n"+
 				"  Check where the CLI is pointed: dbg config get api-url",
