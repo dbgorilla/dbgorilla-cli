@@ -19,3 +19,8 @@ coverage.out
 # file instead.
 CLAUDE.local.md
 .claude/settings.local.json
+
+# Local tooling state: machine-specific, regenerated, never useful to a reader
+# of this repo. Scoped deliberately -- .claude/rules/ stays tracked.
+/.dbg/
+/.claude/settings.json

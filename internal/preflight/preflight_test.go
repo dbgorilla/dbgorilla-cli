@@ -551,3 +551,57 @@ func TestPgxInspector_UnreadableUserTables(t *testing.T) {
 		t.Error("expected scan error to propagate")
 	}
 }
+
+// --- CloudNativePG remediation notes ---------------------------------------
+
+// Every remediation that tells the operator to run ALTER SYSTEM must also say
+// what a CloudNativePG operator should do instead, because CNPG disables ALTER
+// SYSTEM by default and the command fails outright there. Preflight sees only a
+// DSN, so it cannot detect CNPG and the note is unconditional -- this test is
+// what stops a future edit adding a fifth ALTER SYSTEM fix without one.
+func TestFixes_AlterSystemAlwaysCarriesCNPGNote(t *testing.T) {
+	failing := fakePreflightInspector{
+		params: map[string]string{
+			"shared_preload_libraries": "auto_explain",
+			"track_io_timing":          "off",
+			"track_functions":          "none",
+		},
+		maintExtMissing: true,
+	}
+	checks := map[string]func() Result{
+		"shared_preload_libraries": func() Result { return CheckSharedPreload(bg(), failing) },
+		"track_io_timing":          func() Result { return CheckTrackIOTiming(bg(), failing) },
+		"track_functions":          func() Result { return CheckTrackFunctions(bg(), failing) },
+	}
+	for name, run := range checks {
+		joined := strings.Join(run().Fix, " ")
+		if !strings.Contains(joined, "ALTER SYSTEM") {
+			t.Fatalf("%s: test premise broken -- no ALTER SYSTEM in fix %q", name, joined)
+		}
+		if !strings.Contains(joined, "CloudNativePG") {
+			t.Errorf("%s: ALTER SYSTEM remediation with no CloudNativePG alternative: %q", name, joined)
+		}
+	}
+}
+
+// The pg_stat_statements remediations are the pair CNPG automates outright: one
+// spec.postgresql.parameters key loads the library AND creates the extension, so
+// both psql steps collapse. Assert the note names that key rather than the
+// generic parameters advice.
+func TestFixes_StatStatementsCarriesCNPGAutomationNote(t *testing.T) {
+	for name, ins := range map[string]fakePreflightInspector{
+		"missing everywhere": {maintExtMissing: true, extMissing: true},
+		"target-only":        {maintExtMissing: true, extMissing: false},
+	} {
+		joined := strings.Join(CheckExtension(bg(), ins).Fix, " ")
+		if !strings.Contains(joined, "pg_stat_statements.") {
+			t.Errorf("%s: expected the CNPG parameter-prefix hint, got %q", name, joined)
+		}
+	}
+	joined := strings.Join(CheckSharedPreload(bg(), fakePreflightInspector{
+		params: map[string]string{"shared_preload_libraries": "auto_explain"},
+	}).Fix, " ")
+	if !strings.Contains(joined, "pg_stat_statements.") {
+		t.Errorf("shared_preload_libraries: expected the CNPG parameter-prefix hint, got %q", joined)
+	}
+}

@@ -72,13 +72,59 @@ type Component struct {
 
 // Provider is [component.provider]. self_hosted carries no extra fields; the
 // aws_rds / aws_aurora providers add the region and the instance or cluster id
-// (exactly one of the two, per the collector's provider contract).
+// (exactly one of the two); cnpg adds the Kubernetes namespace and
+// CloudNativePG Cluster name.
 type Provider struct {
 	Type       string `toml:"type"`
 	Region     string `toml:"region,omitempty"`
 	InstanceID string `toml:"instance_id,omitempty"`
 	ClusterID  string `toml:"cluster_id,omitempty"`
 	RoleArn    string `toml:"role_arn,omitempty"`
+
+	// cnpg. Namespace + Cluster are the whole of the component's identity: the
+	// collector keys it as cnpg:{namespace}/{cluster}, deliberately excluding the
+	// instance so a failover -- the event the operator exists to handle -- does
+	// not re-key the component and detach its history.
+	Namespace string `toml:"namespace,omitempty"`
+	Cluster   string `toml:"cluster,omitempty"`
+
+	Kubernetes *KubernetesConfig `toml:"kubernetes,omitempty"`
+	Metrics    *MetricsConfig    `toml:"metrics,omitempty"`
+}
+
+// KubernetesConfig is [component.provider.kubernetes]. Mode decides what happens
+// when the Kubernetes API is unreachable or RBAC was refused:
+//
+//	auto     probe at discovery; full mode if reachable, metrics-only if not
+//	enabled  require it; fail loudly when the grant is missing
+//	disabled never call the API; metrics-only, no permissions needed
+//
+// auto is the default, which is what makes a refused RBAC grant a degradation
+// rather than a failed install -- and makes enabling full mode later a
+// permission grant rather than a reinstall.
+type KubernetesConfig struct {
+	Mode string `toml:"mode"`
+}
+
+// MetricsConfig is [component.provider.metrics] -- the instance-manager scrape.
+//
+// Scheme/CACert/ServerName exist for metrics-only mode specifically. In full
+// mode the provider reads .spec.monitoring.tls.enabled off the Cluster resource
+// and configures the scrape itself. With no Kubernetes API there is no Cluster
+// to read, so the one fact that decides plain HTTP versus HTTPS-with-a-verified
+// name has to come from config -- otherwise the collector guesses, scrapes
+// nothing, and an empty series set reads as a healthy cluster.
+type MetricsConfig struct {
+	Port int `toml:"port"`
+	// Scheme is http (the CNPG 1.29/1.30 default) or https.
+	Scheme string `toml:"scheme,omitempty"`
+	// CACert is the in-container path to the cluster CA bundle, required when
+	// Scheme is https.
+	CACert string `toml:"ca_cert,omitempty"`
+	// ServerName is the name the certificate is verified against. CNPG issues one
+	// shared server certificate whose SANs cover only the three role services, so
+	// this is <cluster>-rw even though the scrape dials a pod IP.
+	ServerName string `toml:"server_name,omitempty"`
 }
 
 // Auth is [component.auth]. Password is a ${VAR} reference, never a literal, so
