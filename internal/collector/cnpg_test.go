@@ -201,3 +201,28 @@ func TestDegradedCapabilities_NamesBackupAndWAL(t *testing.T) {
 		}
 	}
 }
+
+// --- state discrimination --------------------------------------------------
+
+// IsHelm is exercised from cmd/, but cross-package use is not attributed to
+// this package's coverage -- and a predicate that decides which runtime the
+// lifecycle commands drive deserves a direct test in the package that owns it.
+func TestState_IsHelmAndIsAWSAreExclusive(t *testing.T) {
+	for target, want := range map[string]struct{ helm, aws bool }{
+		"helm":   {true, false},
+		"aws":    {false, true},
+		"docker": {false, false},
+		"":       {false, false}, // predates the field; means docker
+	} {
+		st := &State{Target: target}
+		if got := st.IsHelm(); got != want.helm {
+			t.Errorf("target %q: IsHelm() = %v, want %v", target, got, want.helm)
+		}
+		if got := st.IsAWS(); got != want.aws {
+			t.Errorf("target %q: IsAWS() = %v, want %v", target, got, want.aws)
+		}
+		if st.IsHelm() && st.IsAWS() {
+			t.Errorf("target %q: both predicates true", target)
+		}
+	}
+}

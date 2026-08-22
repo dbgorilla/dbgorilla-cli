@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -338,4 +340,116 @@ func TestHelmTestCmd_MatchesTheRealCommand(t *testing.T) {
 			t.Errorf("test fixture has --%s but the real command does not", f.Name)
 		}
 	})
+}
+
+// --- the failure paths on the minted run -----------------------------------
+
+// Every early return in the minted path is a case where the user has typed a
+// real command and something is wrong. Each must fail with an actionable
+// message rather than proceeding to mint an identity nobody can use.
+func TestRunHelmValues_MintedPathFailures(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup func(t *testing.T) *cobra.Command
+		want  string
+	}{
+		"no api url": {
+			func(t *testing.T) *cobra.Command {
+				isolate(t)
+				writeTokens(t)
+				c := helmTestCmd()
+				mustSet(t, c, "namespace", "prod-db")
+				mustSet(t, c, "cluster", "app-db")
+				return c // api-url unset and no ambient default
+			},
+			// Deliberately not asserting the wording: with no API URL the shared
+			// precondition helpers report an expired login rather than a missing
+			// URL. That is pre-existing behaviour in a helper this change does not
+			// touch. What matters here is that the run stops and mints nothing.
+			"",
+		},
+		"not logged in": {
+			func(t *testing.T) *cobra.Command {
+				isolate(t) // no writeTokens
+				srv := installServer(t, "agent-x")
+				t.Cleanup(srv.Close)
+				c := helmTestCmd()
+				mustSet(t, c, "api-url", srv.URL)
+				mustSet(t, c, "namespace", "prod-db")
+				mustSet(t, c, "cluster", "app-db")
+				return c
+			},
+			"login",
+		},
+		"backend unreachable": {
+			func(t *testing.T) *cobra.Command {
+				isolate(t)
+				writeTokens(t)
+				c := helmTestCmd()
+				// A port nothing is listening on: CollectorSupported must error,
+				// and the command must not mint against an unreachable backend.
+				mustSet(t, c, "api-url", "http://127.0.0.1:1")
+				mustSet(t, c, "namespace", "prod-db")
+				mustSet(t, c, "cluster", "app-db")
+				return c
+			},
+			"",
+		},
+	} {
+		c := tc.setup(t)
+		var err error
+		_ = capture(t, func() { err = runHelmValues(c, nil) })
+		if err == nil {
+			t.Errorf("%s: expected an error, got nil", name)
+			continue
+		}
+		if tc.want != "" && !strings.Contains(strings.ToLower(err.Error()), tc.want) {
+			t.Errorf("%s: error %q should mention %q", name, err, tc.want)
+		}
+		// Nothing may be left behind by a failed run.
+		if st, _ := collector.LoadState(); st != nil {
+			t.Errorf("%s: failed run saved state: %+v", name, st)
+		}
+	}
+}
+
+// A deployment that does not offer the managed collector must say so, rather
+// than minting an identity its backend will not accept.
+func TestRunHelmValues_UnsupportedDeployment(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0_2/collectors", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // capability probe says "not here"
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := helmTestCmd()
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "namespace", "prod-db")
+	mustSet(t, c, "cluster", "app-db")
+
+	var err error
+	_ = capture(t, func() { err = runHelmValues(c, nil) })
+	if err == nil {
+		t.Fatal("expected an error when the deployment has no managed collector")
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		t.Errorf("unsupported deployment must not save state, got %+v", st)
+	}
+}
+
+// Declining the metrics-only warning aborts before anything is minted. The
+// warning exists to be actionable, which means "no" has to actually stop.
+func TestRunHelmValues_MetricsOnlyDeclineAborts(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+	mustSet(t, c, "k8s-mode", collector.K8sModeDisabled)
+	// yes=false and no terminal -> confirm() declines.
+
+	var err error
+	_ = capture(t, func() { err = runHelmValues(c, nil) })
+	if err == nil || !strings.Contains(err.Error(), "aborted") {
+		t.Fatalf("declining metrics-only should abort, got %v", err)
+	}
 }
