@@ -37,6 +37,18 @@ CI also runs golangci-lint v2 (`.golangci.yml`).
 - The `✓` / `⚠` markers in `setup-ide` and `doctor` output are intentional —
   keep them. (Local exception to the org no-emoji rule.)
 - No new dependencies without a brief note in the PR explaining why.
+- **`dbg` never talks to a Kubernetes cluster.** The Helm path is a handover:
+  it renders values, writes the config, and prints the commands an operator
+  runs. It holds no Kubernetes client and shells out to no `kubectl`.
+
+  This looks like a gap and is a deliberate choice. A check that runs here
+  tests the machine `dbg` happens to be running on — so it reds on a stale
+  kubeconfig while the cluster is fine, and passes for an operator whose
+  access is wider than the collector's will be. The collector runs in the
+  cluster under exactly the permissions that were granted, so a check that
+  belongs to the install belongs there. Warnings this CLI can derive from
+  its own flags, with no cluster contact, are fair game and are how the
+  degraded modes are surfaced.
 
 ## Public-repo discipline
 
