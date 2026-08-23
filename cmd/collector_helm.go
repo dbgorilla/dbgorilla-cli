@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
@@ -27,6 +28,8 @@ func init() {
 	f.String("release-namespace", collector.DefaultReleaseNamespace, "Namespace to install the collector into")
 	f.String("secret-name", "dbg-collector-secrets", "Name of the Kubernetes Secret carrying the collector's credentials")
 	f.String("chart-ref", collector.DefaultChartRef, "Chart to install (a registry reference or a local path)")
+	f.String("agent-id", "", "Render for a collector identity you already have, instead of provisioning one (needs --tenant-id)")
+	f.String("tenant-id", "", "Tenant the existing collector identity belongs to (needs --agent-id)")
 	f.StringArray("set", nil, "Extra chart value as key=value; repeatable (e.g. --set image.tag=v1.2.3)")
 	f.Bool("enable-commands", false, "Allow the control plane to run query-analysis commands (execute_query, explain)")
 	f.Bool("yes", false, "Skip confirmation prompts")
@@ -111,7 +114,28 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 	agentID, tenantID := "<minted-on-run>", "<minted-on-run>"
 	eps := endpointsFromFlags(cmd)
 
-	if !dryRun {
+	// An identity the caller already holds. Rendering a config for one is not a
+	// special case: a collector outlives any single install, so re-creating a
+	// deleted release, or managing one through GitOps where the identity was
+	// provisioned separately, both need the config without minting anything.
+	// Without this the only way to reuse an identity is to write the TOML by
+	// hand, which is how a supported install path stops being the one people use.
+	existing, err := existingIdentityFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		agentID, tenantID = existing.agentID, existing.tenantID
+		fmt.Println(style.Info(fmt.Sprintf("Using the collector identity you supplied (agent %s, tenant %s). Nothing is being provisioned.", agentID, tenantID)))
+		// Said plainly because the omission is otherwise read as a failure. On the
+		// provisioning path the server secret is printed once, and that is the only
+		// time anyone sees it. Here the CLI never had it, which is the point -- it
+		// stays wherever it was put when the identity was created.
+		fmt.Println("Its server secret is not shown: this command never received one. Supply the")
+		fmt.Println("value you already hold when you create the Secret below.")
+	}
+
+	if !dryRun && existing == nil {
 		if _, err := requireAPIURL(cmd); err != nil {
 			return err
 		}
@@ -335,6 +359,39 @@ func printPodMetricsPrerequisite(namespace string) {
 	fmt.Println("Disk use does not depend on metrics-server: the volume's size is read from the")
 	fmt.Println("main Kubernetes API, which every cluster has. (It does depend on the cluster")
 	fmt.Println("setting below.)")
+}
+
+// existingIdentity is a collector identity provisioned elsewhere.
+//
+// The server secret is deliberately not among these fields. The CLI does not
+// need it: the config references it as an ${ENV} placeholder, and the operator
+// puts the real value into the Kubernetes Secret themselves. Accepting it on a
+// command line would put a credential into shell history to no purpose.
+type existingIdentity struct {
+	agentID  string
+	tenantID string
+}
+
+// existingIdentityFromFlags returns nil when neither flag is set, which is the
+// ordinary provisioning path.
+//
+// One flag without the other is refused rather than half-honoured. A config
+// carrying a real agent id and an empty tenant renders, installs, and fails at
+// the gateway with an authentication error that names neither -- and the first
+// guess is always the secret, which is the one part that was correct.
+func existingIdentityFromFlags(cmd *cobra.Command) (*existingIdentity, error) {
+	agentID, _ := cmd.Flags().GetString("agent-id")
+	tenantID, _ := cmd.Flags().GetString("tenant-id")
+	agentID, tenantID = strings.TrimSpace(agentID), strings.TrimSpace(tenantID)
+	switch {
+	case agentID == "" && tenantID == "":
+		return nil, nil
+	case agentID == "":
+		return nil, errors.New("--tenant-id needs --agent-id: both identify the collector, and one alone renders a config that authenticates as nobody")
+	case tenantID == "":
+		return nil, errors.New("--agent-id needs --tenant-id: both identify the collector, and one alone renders a config that authenticates as nobody")
+	}
+	return &existingIdentity{agentID: agentID, tenantID: tenantID}, nil
 }
 
 // cnpgTargetFromFlags assembles the target from flags without validating it --

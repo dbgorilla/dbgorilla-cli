@@ -32,6 +32,8 @@ func helmTestCmd() *cobra.Command {
 	f.String("release-namespace", collector.DefaultReleaseNamespace, "")
 	f.String("secret-name", "dbg-collector-secrets", "")
 	f.String("chart-ref", collector.DefaultChartRef, "")
+	f.String("agent-id", "", "")
+	f.String("tenant-id", "", "")
 	f.StringArray("set", nil, "")
 	f.Bool("enable-commands", false, "")
 	f.Bool("dry-run", false, "")
@@ -416,7 +418,7 @@ func TestHelmValuesCmd_RegistersEveryFlagTheCodeReads(t *testing.T) {
 		"name", "namespace", "cluster", "db-name", "db-user", "ssl-mode",
 		"k8s-mode", "metrics-port", "metrics-tls", "metrics-ca",
 		"release-name", "release-namespace", "secret-name",
-		"chart-ref", "set",
+		"chart-ref", "set", "agent-id", "tenant-id",
 		"enable-commands", "yes", "dry-run",
 		"auth-url", "otlp-url", "opamp-url",
 	} {
@@ -607,5 +609,76 @@ func TestPrintHelmHandover_DefaultQueriesWarningSurvivesMetricsOnly(t *testing.T
 	// And the other one must still be absent, so the two stay distinguishable.
 	if strings.Contains(strings.ToLower(out), "metrics-server") {
 		t.Errorf("the pod-metrics prerequisite should still be suppressed here\n---\n%s", out)
+	}
+}
+
+// --- rendering for an identity that already exists --------------------------
+
+// A collector outlives any single install. Re-creating a deleted release, or
+// managing one through GitOps where the identity was provisioned separately,
+// both need the config without minting anything. Without this the only way to
+// reuse an identity is to write the TOML by hand -- which is how a supported
+// install path stops being the one people use.
+func TestRunHelmValues_RendersForASuppliedIdentity(t *testing.T) {
+	isolate(t)
+	c := helmTestCmd()
+	mustSet(t, c, "namespace", "prod-db")
+	mustSet(t, c, "cluster", "app-db")
+	mustSet(t, c, "db-user", "dbg_readonly")
+	mustSet(t, c, "agent-id", "agent-abc")
+	mustSet(t, c, "tenant-id", "tenant-xyz")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	// No --dry-run and no login: supplying an identity is what removes the need
+	// for one, because there is nothing left to provision.
+	if err != nil {
+		t.Fatalf("supplying an identity should need no login: %v", err)
+	}
+	for _, want := range []string{`agent_id = "agent-abc"`, `tenant_id = "tenant-xyz"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered config missing %q\n---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "<minted-on-run>") {
+		t.Errorf("placeholder identity leaked into a supplied-identity render\n---\n%s", out)
+	}
+	if strings.Contains(out, "Provisioning collector identity") {
+		t.Errorf("nothing should be provisioned when an identity is supplied\n---\n%s", out)
+	}
+	// The secret was never received, and saying so stops the omission reading as
+	// a failure -- on the provisioning path it is printed once and never again.
+	if !strings.Contains(out, "server secret is not shown") {
+		t.Errorf("should say why no secret was printed\n---\n%s", out)
+	}
+	// It is a real install, so it must be recorded like one.
+	st, _ := collector.LoadState()
+	if st == nil || st.AgentID != "agent-abc" || !st.IsHelm() {
+		t.Errorf("supplied-identity render should save helm state, got %+v", st)
+	}
+}
+
+// One flag without the other renders a config that authenticates as nobody. It
+// installs cleanly and fails at the gateway with an error naming neither field,
+// and the first guess is always the secret -- the one part that was correct.
+func TestRunHelmValues_RejectsHalfAnIdentity(t *testing.T) {
+	for name, flag := range map[string]string{"agent only": "agent-id", "tenant only": "tenant-id"} {
+		isolate(t)
+		c := helmTestCmd()
+		mustSet(t, c, "namespace", "prod-db")
+		mustSet(t, c, "cluster", "app-db")
+		mustSet(t, c, "db-user", "dbg_readonly")
+		mustSet(t, c, flag, "only-one")
+
+		err := runHelmValues(c, nil)
+		if err == nil {
+			t.Fatalf("%s: expected a rejection", name)
+		}
+		if !strings.Contains(err.Error(), "--agent-id") || !strings.Contains(err.Error(), "--tenant-id") {
+			t.Errorf("%s: the error should name both flags, got %q", name, err)
+		}
+		if st, _ := collector.LoadState(); st != nil {
+			t.Errorf("%s: nothing should be written when the flags are rejected", name)
+		}
 	}
 }
