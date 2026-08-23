@@ -31,6 +31,8 @@ func helmTestCmd() *cobra.Command {
 	f.String("release-name", collector.DefaultReleaseName, "")
 	f.String("release-namespace", collector.DefaultReleaseNamespace, "")
 	f.String("secret-name", "dbg-collector-secrets", "")
+	f.String("chart-ref", collector.DefaultChartRef, "")
+	f.StringArray("set", nil, "")
 	f.Bool("enable-commands", false, "")
 	f.Bool("dry-run", false, "")
 	f.Bool("yes", false, "")
@@ -414,6 +416,7 @@ func TestHelmValuesCmd_RegistersEveryFlagTheCodeReads(t *testing.T) {
 		"name", "namespace", "cluster", "db-name", "db-user", "ssl-mode",
 		"k8s-mode", "metrics-port", "metrics-tls", "metrics-ca",
 		"release-name", "release-namespace", "secret-name",
+		"chart-ref", "set",
 		"enable-commands", "yes", "dry-run",
 		"auth-url", "otlp-url", "opamp-url",
 	} {

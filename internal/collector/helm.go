@@ -23,6 +23,58 @@ type HelmInstall struct {
 	// metrics-only as designed, and the install looks successful while backup
 	// state reads as absent rather than unavailable.
 	RBAC RBACValues
+
+	// Extra are operator-supplied chart values, passed through to both output
+	// forms. They exist for the case the defaults cannot express: installing a
+	// collector build that is not the published one, which is exactly what
+	// validating an unreleased change requires.
+	Extra []ExtraValue
+}
+
+// ExtraValue is one operator-supplied chart value, as a dotted key and a value.
+type ExtraValue struct {
+	Key   string
+	Value string
+}
+
+// reservedValueKeys are the top-level chart keys this command derives itself.
+// Accepting an override for one of them would put a single logical setting in
+// two places in the same output, and the two would eventually disagree -- the
+// reader has no way to tell which one the chart used.
+var reservedValueKeys = map[string]string{
+	"config":  "--set-file config.inline carries the collector.toml this command renders",
+	"secrets": "--secret-name names the Secret this command emits",
+	"rbac":    "the read-only grant is derived from --k8s-mode",
+}
+
+// ParseExtraValues validates `key=value` pairs before anything is minted, so a
+// typo costs a re-run rather than an orphaned identity.
+func ParseExtraValues(raw []string) ([]ExtraValue, error) {
+	out := make([]ExtraValue, 0, len(raw))
+	for _, s := range raw {
+		key, value, found := strings.Cut(s, "=")
+		key = strings.TrimSpace(key)
+		if !found || key == "" || strings.HasPrefix(key, ".") || strings.HasSuffix(key, ".") || strings.Contains(key, "..") {
+			return nil, fmt.Errorf("--set %q is not key=value. Example: --set image.tag=v1.2.3", s)
+		}
+		top := key
+		if i := strings.Index(key, "."); i >= 0 {
+			top = key[:i]
+		}
+		if why, reserved := reservedValueKeys[top]; reserved {
+			return nil, fmt.Errorf("--set %s is not allowed: %s. Setting it in two places is how the two come to disagree", key, why)
+		}
+		out = append(out, ExtraValue{Key: key, Value: value})
+	}
+	// Render the YAML and throw it away. The tree is the only thing that can see
+	// a key used as both a value and a section, and that check has to run HERE:
+	// the values fragment is printed after the identity is minted, so failing at
+	// render time would leave a collector provisioned server-side that the
+	// operator never learns about and cannot clean up.
+	if _, err := extraValuesYAML(out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // RBACValues mirrors the chart's rbac.* keys.
@@ -80,6 +132,9 @@ func (h HelmInstall) Command() string {
 			fmt.Fprintf(&b, " \\\n  --set rbac.namespaces[%d]=%s", i, ns)
 		}
 	}
+	for _, e := range h.Extra {
+		fmt.Fprintf(&b, " \\\n  --set %s=%s", e.Key, e.Value)
+	}
 	return b.String()
 }
 
@@ -109,10 +164,20 @@ func (h HelmInstall) SecretCommand(withDBPassword bool) string {
 //
 // config.inline is emitted as a YAML block scalar so the TOML passes through
 // byte-for-byte; the chart is a passthrough and renders no structure of its own.
-func HelmValuesFragment(renderedTOML, secretRef string, rbac RBACValues) string {
+func HelmValuesFragment(renderedTOML, secretRef string, rbac RBACValues, extra []ExtraValue) (string, error) {
 	var b strings.Builder
 	b.WriteString("# values.yaml for the dbg-collector chart.\n")
 	b.WriteString("# The chart renders no structure of its own: config.inline is passed through verbatim.\n")
+	// Emitted first, and from the same input as the `helm install` above: the two
+	// forms are alternatives, so a value present in one and missing from the
+	// other would install two different collectors from one command's output.
+	if len(extra) > 0 {
+		y, err := extraValuesYAML(extra)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(y)
+	}
 	if secretRef != "" {
 		// secrets.existingSecret, not a top-level key: when it is set the chart
 		// creates no Secret of its own, so the pre-created one must carry the
@@ -136,5 +201,115 @@ func HelmValuesFragment(renderedTOML, secretRef string, rbac RBACValues) string 
 		}
 		fmt.Fprintf(&b, "    %s\n", line)
 	}
-	return b.String()
+	return b.String(), nil
+}
+
+// valueNode is one level of the tree the dotted --set keys describe. Insertion
+// order is kept so the emitted YAML matches the order the operator typed, which
+// is the order they will proofread it in.
+type valueNode struct {
+	order    []string
+	children map[string]*valueNode
+	leaf     string
+	isLeaf   bool
+}
+
+func (n *valueNode) child(name string) *valueNode {
+	if n.children == nil {
+		n.children = map[string]*valueNode{}
+	}
+	if c, ok := n.children[name]; ok {
+		return c
+	}
+	c := &valueNode{}
+	n.children[name] = c
+	n.order = append(n.order, name)
+	return c
+}
+
+// extraValuesYAML turns dotted keys into nested YAML.
+//
+// It rejects a key that is used as both a value and a parent (image=x plus
+// image.tag=y). Helm resolves that by silently discarding one; emitting YAML
+// with the same ambiguity would hand the operator a file whose meaning depends
+// on which tool reads it.
+func extraValuesYAML(extra []ExtraValue) (string, error) {
+	root := &valueNode{}
+	for _, e := range extra {
+		parts := strings.Split(e.Key, ".")
+		n := root
+		for i, p := range parts {
+			n = n.child(p)
+			last := i == len(parts)-1
+			if n.isLeaf && !last {
+				return "", fmt.Errorf("--set %s conflicts with an earlier --set of %s: one cannot be both a value and a section",
+					e.Key, strings.Join(parts[:i+1], "."))
+			}
+			if last {
+				if len(n.order) > 0 {
+					return "", fmt.Errorf("--set %s conflicts with an earlier --set of %s.*: one cannot be both a value and a section",
+						e.Key, e.Key)
+				}
+				n.isLeaf, n.leaf = true, e.Value
+			}
+		}
+	}
+	var b strings.Builder
+	writeValueNode(&b, root, 0)
+	return b.String(), nil
+}
+
+func writeValueNode(b *strings.Builder, n *valueNode, depth int) {
+	indent := strings.Repeat("  ", depth)
+	for _, name := range n.order {
+		c := n.children[name]
+		if c.isLeaf {
+			fmt.Fprintf(b, "%s%s: %s\n", indent, name, yamlScalar(c.leaf))
+			continue
+		}
+		fmt.Fprintf(b, "%s%s:\n", indent, name)
+		writeValueNode(b, c, depth+1)
+	}
+}
+
+// yamlScalar quotes anything that is not unambiguously a number or a boolean.
+//
+// Deliberately the same inference `helm --set` performs, including its known
+// trap that a version-like `1.0` is read as a number. Matching it means the two
+// forms this command prints install the same thing; diverging to be helpful
+// would mean the values.yaml and the helm command disagree, which is a worse
+// failure than a documented shared quirk.
+func yamlScalar(v string) string {
+	switch v {
+	case "true", "false", "null", "":
+		if v == "" {
+			return `""`
+		}
+		return v
+	}
+	if isNumeric(v) {
+		return v
+	}
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+func isNumeric(v string) bool {
+	s := strings.TrimPrefix(v, "-")
+	if s == "" {
+		return false
+	}
+	dots := 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r == '.':
+			dots++
+			if dots > 1 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return s != "." && !strings.HasSuffix(s, ".")
 }

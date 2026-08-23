@@ -67,7 +67,7 @@ func TestHelmInstall_SecretCommandOmitsDBPasswordWhenNotNeeded(t *testing.T) {
 // the YAML block scalar byte-for-byte -- indentation added, nothing else.
 func TestHelmValuesFragment_IndentsTOMLVerbatim(t *testing.T) {
 	toml := "[dbgorilla]\nagent_id = \"a\"\n\n[topology]\ninterval = \"60s\"\n"
-	got := HelmValuesFragment(toml, "dbg-secrets", RBACFor(K8sModeAuto, "prod-db"))
+	got := mustFragment(t, toml, "dbg-secrets", RBACFor(K8sModeAuto, "prod-db"))
 	if !strings.Contains(got, "secrets:\n  existingSecret: dbg-secrets") {
 		t.Errorf("secret ref missing:\n%s", got)
 	}
@@ -87,7 +87,7 @@ func TestHelmValuesFragment_IndentsTOMLVerbatim(t *testing.T) {
 }
 
 func TestHelmValuesFragment_OmitsSecretKeyWhenUnset(t *testing.T) {
-	got := HelmValuesFragment("[dbgorilla]\n", "", RBACFor(K8sModeAuto, "prod-db"))
+	got := mustFragment(t, "[dbgorilla]\n", "", RBACFor(K8sModeAuto, "prod-db"))
 	if strings.Contains(got, "existingSecret") {
 		t.Errorf("no secret name means no key:\n%s", got)
 	}
@@ -100,7 +100,7 @@ func TestHelmValuesFragment_RoundTripsARealConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	frag := HelmValuesFragment(rendered, "s", RBACFor(K8sModeAuto, "prod-db"))
+	frag := mustFragment(t, rendered, "s", RBACFor(K8sModeAuto, "prod-db"))
 
 	// Take ONLY the config.inline block scalar. Extracting every four-space line
 	// would also swallow the rbac.namespaces entries, which is how this test
@@ -169,7 +169,7 @@ func TestHelmInstall_CommandCarriesTheGrant(t *testing.T) {
 }
 
 func TestHelmValuesFragment_CarriesTheGrant(t *testing.T) {
-	got := HelmValuesFragment("[dbgorilla]\n", "s", RBACFor(K8sModeAuto, "prod-db"))
+	got := mustFragment(t, "[dbgorilla]\n", "s", RBACFor(K8sModeAuto, "prod-db"))
 	for _, want := range []string{"rbac:", "  create: true", "  scope: namespaced", "    - prod-db"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("values fragment missing %q:\n%s", want, got)
@@ -193,7 +193,7 @@ func TestHelmInstall_SecretKeyIsNestedUnderSecrets(t *testing.T) {
 }
 
 func TestHelmValuesFragment_SecretKeyIsNestedUnderSecrets(t *testing.T) {
-	got := HelmValuesFragment("[dbgorilla]\n", "dbg-secrets", RBACFor(K8sModeAuto, "prod-db"))
+	got := mustFragment(t, "[dbgorilla]\n", "dbg-secrets", RBACFor(K8sModeAuto, "prod-db"))
 	if !strings.Contains(got, "secrets:\n  existingSecret: dbg-secrets") {
 		t.Errorf("expected secrets.existingSecret, got:\n%s", got)
 	}
@@ -215,5 +215,136 @@ func TestSecretCommand_KeysMatchTheConfigPlaceholders(t *testing.T) {
 		if !strings.Contains(got, "--from-literal="+env+"=") {
 			t.Errorf("secret command does not create key %s:\n%s", env, got)
 		}
+	}
+}
+
+// mustFragment renders the values.yaml for tests that are not about the extra
+// chart values, and fails rather than returning an error the caller would have
+// to thread through every assertion.
+func mustFragment(t *testing.T, toml, secretRef string, rbac RBACValues, extra ...ExtraValue) string {
+	t.Helper()
+	got, err := HelmValuesFragment(toml, secretRef, rbac, extra)
+	if err != nil {
+		t.Fatalf("HelmValuesFragment: %v", err)
+	}
+	return got
+}
+
+// --- operator-supplied chart values ----------------------------------------
+
+// The published chart and image are the defaults, and validating an unreleased
+// collector means installing one that is not published yet. Without a way to
+// say so, the documented install path cannot install the thing under test.
+func TestHelmInstall_ExtraValuesReachTheCommand(t *testing.T) {
+	h := DefaultHelmInstall("/tmp/c.toml", "sec", RBACFor(K8sModeAuto, "prod-db"))
+	h.ChartRef = "./dbg-collector"
+	h.Extra = []ExtraValue{{Key: "image.tag", Value: "pr-102"}}
+	cmd := h.Command()
+	if !strings.Contains(cmd, "helm install dbg-collector ./dbg-collector") {
+		t.Errorf("chart reference not used:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "--set image.tag=pr-102") {
+		t.Errorf("extra value missing from the command:\n%s", cmd)
+	}
+}
+
+// The command prints two forms of the same install. A value that reaches one
+// and not the other means following the second installs a different collector
+// than following the first -- from a single command's output.
+func TestHelmValuesFragment_CarriesTheSameExtrasAsTheCommand(t *testing.T) {
+	extra := []ExtraValue{
+		{Key: "image.repository", Value: "reg.example/dbg-collector"},
+		{Key: "image.tag", Value: "pr-102"},
+		{Key: "replicaCount", Value: "2"},
+	}
+	got := mustFragment(t, "[dbgorilla]\n", "s", RBACFor(K8sModeAuto, "prod-db"), extra...)
+	for _, want := range []string{
+		"image:\n",
+		"  repository: \"reg.example/dbg-collector\"\n",
+		"  tag: \"pr-102\"\n",
+		"replicaCount: 2\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("values.yaml missing %q\n---\n%s", want, got)
+		}
+	}
+	// Shared keys nest once, rather than repeating the parent -- a duplicate
+	// mapping key makes the file ambiguous, and YAML parsers disagree on which
+	// one wins.
+	if strings.Count(got, "image:") != 1 {
+		t.Errorf("image key emitted more than once\n---\n%s", got)
+	}
+}
+
+// The command derives these three itself. Accepting an override would put one
+// setting in two places in the same output, and nothing tells the reader which
+// one the chart used.
+func TestParseExtraValues_RejectsTheKeysThisCommandOwns(t *testing.T) {
+	for _, key := range []string{"config.inline", "config", "secrets.existingSecret", "rbac.create", "rbac"} {
+		if _, err := ParseExtraValues([]string{key + "=x"}); err == nil {
+			t.Errorf("--set %s should be rejected: this command derives it", key)
+		}
+	}
+	// Anything else is the operator's business.
+	if _, err := ParseExtraValues([]string{"image.tag=v1", "resources.limits.cpu=500m"}); err != nil {
+		t.Errorf("ordinary chart values should be accepted: %v", err)
+	}
+}
+
+func TestParseExtraValues_RejectsMalformedInput(t *testing.T) {
+	for _, bad := range []string{"noequals", "=novalue", ".leading=x", "trailing.=x", "a..b=x"} {
+		if _, err := ParseExtraValues([]string{bad}); err == nil {
+			t.Errorf("--set %q should be rejected", bad)
+		}
+	}
+	// An empty value is a real thing to want -- it clears a chart default.
+	if _, err := ParseExtraValues([]string{"nodeSelector="}); err != nil {
+		t.Errorf("an empty value should be allowed: %v", err)
+	}
+}
+
+// Helm resolves this by silently dropping one of the two. Emitting YAML with
+// the same ambiguity hands over a file whose meaning depends on which parser
+// reads it, which is worse than refusing.
+func TestHelmValuesFragment_RejectsAKeyUsedAsBothValueAndSection(t *testing.T) {
+	for _, pair := range [][]ExtraValue{
+		{{Key: "image", Value: "x"}, {Key: "image.tag", Value: "y"}},
+		{{Key: "image.tag", Value: "y"}, {Key: "image.tag.sub", Value: "z"}},
+	} {
+		if _, err := HelmValuesFragment("[dbgorilla]\n", "s", RBACFor(K8sModeAuto, "prod-db"), pair); err == nil {
+			t.Errorf("conflicting keys %v should be rejected", pair)
+		}
+	}
+}
+
+// Quoting follows `helm --set`, including its trap of reading a version-like
+// value as a number. Matching it keeps the two printed forms equivalent;
+// diverging to be more helpful would make them install different things.
+func TestYamlScalar_MatchesHelmSetInference(t *testing.T) {
+	for in, want := range map[string]string{
+		"v1.2.3":  `"v1.2.3"`,
+		"pr-102":  `"pr-102"`,
+		"2":       "2",
+		"1.0":     "1.0",
+		"-1":      "-1",
+		"true":    "true",
+		"false":   "false",
+		"":        `""`,
+		"500m":    `"500m"`,
+		`say"hi"`: `"say\"hi\""`,
+	} {
+		if got := yamlScalar(in); got != want {
+			t.Errorf("yamlScalar(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+// The conflict check has to run at parse time, not at render time. The values
+// fragment is printed after the identity is minted, so a late failure would
+// leave a collector provisioned server-side that the operator never sees and
+// cannot remove.
+func TestParseExtraValues_RejectsConflictsBeforeAnythingIsMinted(t *testing.T) {
+	if _, err := ParseExtraValues([]string{"image=x", "image.tag=y"}); err == nil {
+		t.Fatal("a value-and-section conflict must be caught while parsing flags")
 	}
 }

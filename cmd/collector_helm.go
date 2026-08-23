@@ -26,6 +26,8 @@ func init() {
 	f.String("release-name", collector.DefaultReleaseName, "Helm release name for the collector")
 	f.String("release-namespace", collector.DefaultReleaseNamespace, "Namespace to install the collector into")
 	f.String("secret-name", "dbg-collector-secrets", "Name of the Kubernetes Secret carrying the collector's credentials")
+	f.String("chart-ref", collector.DefaultChartRef, "Chart to install (a registry reference or a local path)")
+	f.StringArray("set", nil, "Extra chart value as key=value; repeatable (e.g. --set image.tag=v1.2.3)")
 	f.Bool("enable-commands", false, "Allow the control plane to run query-analysis commands (execute_query, explain)")
 	f.Bool("yes", false, "Skip confirmation prompts")
 	f.Bool("dry-run", false, "Render everything without minting an identity or writing any file")
@@ -64,6 +66,15 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := target.Validate(); err != nil {
+		return err
+	}
+
+	// Parsed here rather than at the point of use: everything that can reject the
+	// operator's input has to run before an identity is minted, or a typo in a
+	// chart value costs an orphaned collector server-side that they never see.
+	rawSet, _ := cmd.Flags().GetStringArray("set")
+	extra, err := collector.ParseExtraValues(rawSet)
+	if err != nil {
 		return err
 	}
 
@@ -147,10 +158,16 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 	release, _ := cmd.Flags().GetString("release-name")
 	relNS, _ := cmd.Flags().GetString("release-namespace")
 	secretName, _ := cmd.Flags().GetString("secret-name")
+	chartRef, _ := cmd.Flags().GetString("chart-ref")
 	install := collector.DefaultHelmInstall(configPath, secretName, collector.RBACFor(target.K8sMode, target.Namespace))
-	install.Release, install.Namespace = release, relNS
+	install.Release, install.Namespace, install.Extra = release, relNS, extra
+	if chartRef != "" {
+		install.ChartRef = chartRef
+	}
 
-	printHelmHandover(install, rendered, target)
+	if err := printHelmHandover(install, rendered, target); err != nil {
+		return err
+	}
 
 	if dryRun {
 		fmt.Println()
@@ -191,7 +208,7 @@ func printServerSecret(secret string) {
 
 // printHelmHandover prints the three artifacts the operator needs, in the order
 // they have to be applied: the config, the Secret, then the release.
-func printHelmHandover(install collector.HelmInstall, rendered string, t collector.CNPGTarget) {
+func printHelmHandover(install collector.HelmInstall, rendered string, t collector.CNPGTarget) error {
 	fmt.Println()
 	fmt.Println(style.Info("--- collector.toml ---"))
 	fmt.Print(rendered)
@@ -213,7 +230,11 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	fmt.Println("below, which carries the config inside it and needs nothing from here.")
 	fmt.Println()
 	fmt.Println(style.Info("--- or, for Argo CD / Flux: values.yaml ---"))
-	fmt.Print(collector.HelmValuesFragment(rendered, install.SecretRef, install.RBAC))
+	values, err := collector.HelmValuesFragment(rendered, install.SecretRef, install.RBAC, install.Extra)
+	if err != nil {
+		return err
+	}
+	fmt.Print(values)
 
 	fmt.Println()
 	fmt.Printf("Component identity: %s  (stable across failover -- no instance in the key)\n", t.StableKey())
@@ -222,6 +243,7 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	if !t.MetricsOnly() {
 		printPodMetricsPrerequisite(t.Namespace)
 	}
+	return nil
 }
 
 // printPodMetricsPrerequisite names the one cluster component the collector
