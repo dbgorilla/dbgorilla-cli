@@ -145,8 +145,21 @@ func TestPrintHelmHandover_NamesThePodMetricsPrerequisite(t *testing.T) {
 	if !strings.Contains(low, "metrics-server") {
 		t.Errorf("handover should name metrics-server as a prerequisite\n---\n%s", out)
 	}
-	if !strings.Contains(low, "v1beta1.metrics.k8s.io") {
-		t.Errorf("handover should give the one command that checks for it\n---\n%s", out)
+	// The check must exercise the path, in the namespace the collector will use,
+	// not read the API's registration. The registration is an aggregated one:
+	// it can report the API present while the server behind it is down, so
+	// "installed" and "working" are separate facts and only the second is the
+	// one the operator needs.
+	if !strings.Contains(low, "kubectl top pods -n") {
+		t.Errorf("handover should suggest the namespaced check that exercises the path\n---\n%s", out)
+	}
+	if strings.Contains(low, "apiservice") {
+		t.Errorf("do not send the operator to the APIService registration: it reports installed, not working\n---\n%s", out)
+	}
+	// Named namespace, not a placeholder -- a command the reader has to edit
+	// before running is a command they will get wrong or skip.
+	if !strings.Contains(out, "kubectl top pods -n prod-db") {
+		t.Errorf("the check command should name the target namespace\n---\n%s", out)
 	}
 	// The scoping half, and the reason this assertion exists: an earlier draft
 	// of this text said CPU, memory AND disk were lost without metrics-server.

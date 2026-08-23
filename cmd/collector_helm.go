@@ -210,7 +210,7 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	fmt.Printf("SQL target:         %s:5432  (role service; CNPG's certificate does not cover pod names)\n", t.RoleServiceHost())
 
 	if !t.MetricsOnly() {
-		printPodMetricsPrerequisite()
+		printPodMetricsPrerequisite(t.Namespace)
 	}
 }
 
@@ -235,18 +235,28 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 // prerequisite exists before they hand the commands to someone else -- it is
 // one command to check and a long detour to diagnose later from a missing
 // panel.
-func printPodMetricsPrerequisite() {
+//
+// The command suggested is `kubectl top pods`, not a read of the APIService
+// registration, for two reasons. The registration can say the API is present
+// while the server behind it is down -- it is an aggregated API, so "installed"
+// and "working" are separate facts, and only one of them is what the operator
+// needs. And `top` asks the same namespaced question the collector will ask, so
+// it exercises the path rather than its paperwork.
+func printPodMetricsPrerequisite(namespace string) {
 	fmt.Println()
 	fmt.Println(style.Info("--- before you install: one cluster prerequisite ---"))
 	fmt.Println("CPU and memory readings come from the pod-metrics API, which metrics-server")
 	fmt.Println("provides. Most managed clusters have it already; self-managed ones often do not.")
-	fmt.Println("Check with:")
+	fmt.Println("Check it is there AND working:")
 	fmt.Println()
-	fmt.Println("  kubectl get apiservices v1beta1.metrics.k8s.io")
+	fmt.Printf("  kubectl top pods -n %s\n", namespace)
 	fmt.Println()
-	fmt.Println("If that reports nothing, install metrics-server first. Without it the collector")
-	fmt.Println("still runs and still reports on the database itself -- only the CPU and memory")
-	fmt.Println("figures are missing, and nothing will announce their absence.")
+	fmt.Println("Columns of CPU and memory means you are set. An error instead means either")
+	fmt.Println("metrics-server is not installed, or it is installed and not running -- the")
+	fmt.Println("message says which, and they need different fixes.")
+	fmt.Println()
+	fmt.Println("Without it the collector still runs and still reports on the database itself.")
+	fmt.Println("Only the CPU and memory figures are missing, and nothing will announce it.")
 	fmt.Println()
 	fmt.Println("Disk use is not affected: it is read from the volume records in the main")
 	fmt.Println("Kubernetes API, which every cluster has.")
