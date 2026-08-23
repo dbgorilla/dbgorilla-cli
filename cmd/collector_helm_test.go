@@ -750,7 +750,7 @@ func TestPrintHelmHandover_CreatesTheNamespaceBeforeUsingIt(t *testing.T) {
 	if nsCreate < 0 {
 		t.Fatalf("handover should create the namespace\n---\n%s", out)
 	}
-	if !(nsCreate < secret && secret < install) {
+	if nsCreate >= secret || secret >= install {
 		t.Errorf("order must be namespace, then Secrets, then install (got %d, %d, %d)\n---\n%s",
 			nsCreate, secret, install, out)
 	}
