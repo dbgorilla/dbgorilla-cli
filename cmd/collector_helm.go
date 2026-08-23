@@ -82,8 +82,15 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 		// The mode's own name invites the wrong conclusion. CPU and memory come
 		// from the cluster's pod-metrics API, not from the database's own metrics
 		// endpoint, so "metrics-only" collects database metrics and no pod ones.
-		fmt.Println("   \"Metrics-only\" here means the database's own metrics endpoint. CPU, memory and")
-		fmt.Println("   disk figures come from the cluster API instead, so they are not included.")
+		//
+		// Disk is the one to state carefully. How full a volume is, is a ratio,
+		// and only its top half comes from the database. The volume's size is a
+		// cluster fact, so without the API there is a number and nothing to
+		// divide it by -- which is why disk is lost here despite its main input
+		// being on the very endpoint this mode does scrape.
+		fmt.Println("   \"Metrics-only\" here means the database's own metrics endpoint. CPU and memory")
+		fmt.Println("   come from the cluster API instead, so they are not included. Disk use needs the")
+		fmt.Println("   volume's size, which is also a cluster fact, so it cannot be worked out either.")
 		fmt.Println("   Granting the read-only Role later and re-running enables it -- no reinstall needed.")
 		if !confirm(cmd, "Continue with metrics-only?") {
 			return errors.New("aborted")
