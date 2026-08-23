@@ -628,6 +628,7 @@ func TestRunHelmValues_RendersForASuppliedIdentity(t *testing.T) {
 	mustSet(t, c, "db-user", "dbg_readonly")
 	mustSet(t, c, "agent-id", "agent-abc")
 	mustSet(t, c, "tenant-id", "tenant-xyz")
+	supplyEndpoints(t, c)
 
 	var err error
 	out := capture(t, func() { err = runHelmValues(c, nil) })
@@ -696,6 +697,7 @@ func TestRunHelmValues_SuppliedIdentityGetsTheSamePortDefaulting(t *testing.T) {
 	mustSet(t, c, "db-user", "dbg_readonly")
 	mustSet(t, c, "agent-id", "agent-abc")
 	mustSet(t, c, "tenant-id", "tenant-xyz")
+	supplyEndpoints(t, c)
 	mustSet(t, c, "otlp-url", "https://otlp.example")
 
 	var err error
@@ -717,6 +719,7 @@ func TestRunHelmValues_SuppliedIdentityKeepsAnExplicitPort(t *testing.T) {
 	mustSet(t, c, "db-user", "dbg_readonly")
 	mustSet(t, c, "agent-id", "agent-abc")
 	mustSet(t, c, "tenant-id", "tenant-xyz")
+	supplyEndpoints(t, c)
 	mustSet(t, c, "otlp-url", "http://gateway.internal:4317")
 
 	var err error
@@ -852,4 +855,92 @@ func TestRunHelmValues_RejectsAnUnknownDBCA(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unknown --db-ca") {
 		t.Fatalf("want an unknown --db-ca error, got %v", err)
 	}
+}
+
+// On the provisioning path the endpoints come back from the mint response. With
+// a supplied identity there is no response, and an endpoint left empty is not a
+// default -- it is a silent redirect. The collector reads empty as "use the
+// built-in production addresses", which are valid and resolvable and belong to
+// a different deployment than the identity does. The install then fails with a
+// rejected credential and an error naming neither the host nor the setting.
+//
+// This cost four seats an hour: three of them proved the credential was good by
+// testing it against the right host, while the collector was asking a different
+// one.
+func TestRunHelmValues_SuppliedIdentityRequiresItsEndpoints(t *testing.T) {
+	for name, set := range map[string]map[string]string{
+		"none":      {},
+		"otlp only": {"otlp-url": "http://otlp:4317"},
+		"missing auth": {
+			"otlp-url":  "http://otlp:4317",
+			"opamp-url": "wss://opamp/v1",
+		},
+	} {
+		isolate(t)
+		c := helmTestCmd()
+		mustSet(t, c, "namespace", "prod-db")
+		mustSet(t, c, "cluster", "app-db")
+		mustSet(t, c, "db-user", "dbg_readonly")
+		mustSet(t, c, "agent-id", "agent-abc")
+		mustSet(t, c, "tenant-id", "tenant-xyz")
+		for k, v := range set {
+			mustSet(t, c, k, v)
+		}
+
+		var err error
+		_ = capture(t, func() { err = runHelmValues(c, nil) })
+		if err == nil {
+			t.Errorf("%s: expected a refusal, got none", name)
+			continue
+		}
+		// The error has to name the flags AND the consequence. "--auth-url not
+		// set" alone reads as pedantry; the reason it matters is that the default
+		// is another deployment's production.
+		if !strings.Contains(err.Error(), "production") {
+			t.Errorf("%s: the error must say what empty falls back to, got %q", name, err)
+		}
+		if st, _ := collector.LoadState(); st != nil {
+			t.Errorf("%s: nothing should be written when the endpoints are refused", name)
+		}
+	}
+}
+
+// With all three supplied it renders, and every one reaches the config -- the
+// point of the refusal is to get them set, not to add a hurdle.
+func TestRunHelmValues_SuppliedIdentityRendersWithAllEndpoints(t *testing.T) {
+	isolate(t)
+	c := helmTestCmd()
+	mustSet(t, c, "namespace", "prod-db")
+	mustSet(t, c, "cluster", "app-db")
+	mustSet(t, c, "db-user", "dbg_readonly")
+	mustSet(t, c, "agent-id", "agent-abc")
+	mustSet(t, c, "tenant-id", "tenant-xyz")
+	mustSet(t, c, "auth-url", "https://env.example/auth")
+	mustSet(t, c, "otlp-url", "http://otlp.internal:4317")
+	mustSet(t, c, "opamp-url", "wss://env.example/ingest/v1/opamp")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("all three supplied should render: %v", err)
+	}
+	for _, want := range []string{
+		`auth_base_url = "https://env.example/auth"`,
+		`otlp_base_url = "http://otlp.internal:4317"`,
+		`opamp_base_url = "wss://env.example/ingest/v1/opamp"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("config missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+// supplyEndpoints sets the three endpoints a supplied identity requires, for
+// tests whose subject is something else. They are mandatory on that path
+// because empty means another deployment's production, not "unset".
+func supplyEndpoints(t *testing.T, c *cobra.Command) {
+	t.Helper()
+	mustSet(t, c, "auth-url", "https://env.example/auth")
+	mustSet(t, c, "otlp-url", "http://otlp.internal:4317")
+	mustSet(t, c, "opamp-url", "wss://env.example/ingest/v1/opamp")
 }

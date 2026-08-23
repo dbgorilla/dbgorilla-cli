@@ -134,6 +134,22 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 		// stays wherever it was put when the identity was created.
 		fmt.Println("Its server secret is not shown: this command never received one. Supply the")
 		fmt.Println("value you already hold when you create the Secret below.")
+		// On the provisioning path these three come back from the mint response.
+		// Here there is no response, so an endpoint left empty is not a default --
+		// it is a silent redirect. The collector treats empty as "use the built-in
+		// production addresses", which are valid, resolvable, and belong to a
+		// different deployment than the identity does. The result is a rejected
+		// credential and an error that says nothing about the host it was sent to.
+		if missing := missingEndpoints(eps); len(missing) > 0 {
+			return fmt.Errorf(
+				"an existing identity needs its endpoints too: %s not set. "+
+					"They come from the provisioning response, and this command has no response to read. "+
+					"Left empty the collector falls back to its built-in production addresses, so an "+
+					"identity minted anywhere else is offered to the wrong deployment -- and the rejection "+
+					"names neither the host nor the setting. Pass the URLs for the deployment you minted "+
+					"against; if that is production, pass the production URLs explicitly",
+				strings.Join(missing, ", "))
+		}
 	}
 
 	if !dryRun && existing == nil {
@@ -427,6 +443,25 @@ func printPodMetricsPrerequisite(namespace string) {
 	fmt.Println("Disk use does not depend on metrics-server: the volume's size is read from the")
 	fmt.Println("main Kubernetes API, which every cluster has. (It does depend on the cluster")
 	fmt.Println("setting below.)")
+}
+
+// missingEndpoints names the endpoint flags left unset, in the order the flags
+// appear in help, so the error reads like the command the operator will type.
+func missingEndpoints(eps collector.Endpoints) []string {
+	var missing []string
+	for _, e := range []struct {
+		flag  string
+		value string
+	}{
+		{"--auth-url", eps.AuthBaseURL},
+		{"--otlp-url", eps.OtlpBaseURL},
+		{"--opamp-url", eps.OpampBaseURL},
+	} {
+		if strings.TrimSpace(e.value) == "" {
+			missing = append(missing, e.flag)
+		}
+	}
+	return missing
 }
 
 // existingIdentity is a collector identity provisioned elsewhere.
