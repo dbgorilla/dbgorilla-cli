@@ -32,6 +32,7 @@ func helmTestCmd() *cobra.Command {
 	f.String("release-namespace", collector.DefaultReleaseNamespace, "")
 	f.String("secret-name", "dbg-collector-secrets", "")
 	f.String("chart-ref", collector.DefaultChartRef, "")
+	f.String("db-ca", collector.DBCACNPG, "")
 	f.String("agent-id", "", "")
 	f.String("tenant-id", "", "")
 	f.StringArray("set", nil, "")
@@ -418,7 +419,7 @@ func TestHelmValuesCmd_RegistersEveryFlagTheCodeReads(t *testing.T) {
 		"name", "namespace", "cluster", "db-name", "db-user", "ssl-mode",
 		"k8s-mode", "metrics-port", "metrics-tls", "metrics-ca",
 		"release-name", "release-namespace", "secret-name",
-		"chart-ref", "set", "agent-id", "tenant-id",
+		"chart-ref", "set", "agent-id", "tenant-id", "db-ca",
 		"enable-commands", "yes", "dry-run",
 		"auth-url", "otlp-url", "opamp-url",
 	} {
@@ -794,5 +795,61 @@ func TestPrintHelmHandover_SkipsTheCAStepWhenNotVerifying(t *testing.T) {
 	}
 	if strings.Contains(out, collector.ClusterCASecretName) || strings.Contains(out, "extraVolume") {
 		t.Errorf("no CA step or mount when the connection does not verify\n---\n%s", out)
+	}
+}
+
+// A cluster using a certificate the customer supplied needs nothing from us:
+// it already chains to a CA the image trusts. Emitting a copy step and a mount
+// there sends someone to move a certificate that changes nothing, and a mount
+// referencing a Secret they never created stops the pod outright.
+func TestPrintHelmHandover_NoCAStepWhenTheCertIsAlreadyTrusted(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+	mustSet(t, c, "db-ca", collector.DBCASystem)
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	for _, banned := range []string{collector.ClusterCASecretName, "extraVolume", "PRIVATE KEY"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("nothing CA-related should appear with a trusted cert, found %q\n---\n%s", banned, out)
+		}
+	}
+}
+
+// The copy is a snapshot and CloudNativePG rotates its CA on its own schedule.
+// A collector that has run for months then stops connecting on a date nobody
+// recorded, with the same UnknownIssuer error that means five other things.
+func TestPrintHelmHandover_SaysTheCACopyGoesStale(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	if !strings.Contains(out, "The copy is a snapshot") {
+		t.Errorf("must say the copy does not follow rotation\n---\n%s", out)
+	}
+	if !strings.Contains(out, "status.certificates.expirations") {
+		t.Errorf("must say where the expiry can be read\n---\n%s", out)
+	}
+	// And must point at the other shape, since this is where someone decides
+	// whether the step applies to them at all.
+	if !strings.Contains(out, "--db-ca system") {
+		t.Errorf("must name the alternative shape\n---\n%s", out)
+	}
+}
+
+func TestRunHelmValues_RejectsAnUnknownDBCA(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+	mustSet(t, c, "db-ca", "letsencrypt")
+	err := runHelmValues(c, nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown --db-ca") {
+		t.Fatalf("want an unknown --db-ca error, got %v", err)
 	}
 }

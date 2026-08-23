@@ -70,19 +70,44 @@ const (
 // collector runs. Only ca.crt is ever copied.
 func ClusterCASourceSecret(cluster string) string { return cluster + "-ca" }
 
-// NeedsClusterCA reports whether the chosen ssl_mode actually verifies the
-// server's certificate. Only those modes need the bundle; asking an operator to
-// copy a certificate their connection will not look at is how a required step
-// starts being skipped.
-func (t CNPGTarget) NeedsClusterCA() bool {
+// Where the CA that signed the database's certificate comes from. There are
+// exactly two supported shapes and they need opposite handling, so the wrong
+// default is worse than a question.
+const (
+	// DBCACNPG is CloudNativePG's own per-cluster CA, which it generates and
+	// which is in no trust store anywhere. This is the default because it is
+	// CNPG's default.
+	DBCACNPG = "cnpg"
+	// DBCASystem is a certificate the customer supplied to the cluster
+	// (spec.certificates.serverTLSSecret) that already chains to a CA the image
+	// trusts. Nothing needs copying and nothing needs mounting.
+	DBCASystem = "system"
+)
+
+// DBCASources lists the accepted --db-ca values, in help order.
+func DBCASources() []string { return []string{DBCACNPG, DBCASystem} }
+
+// VerifiesServerCert reports whether the chosen ssl_mode actually checks the
+// server's certificate.
+func (t CNPGTarget) VerifiesServerCert() bool {
 	switch t.SSLMode {
-	case "verify-full", "verify-ca":
-		return true
-	case "":
-		return true // the default is verify-full
+	case "verify-full", "verify-ca", "":
+		return true // the empty default is verify-full
 	default:
 		return false
 	}
+}
+
+// NeedsClusterCA reports whether the operator has to place CNPG's own CA where
+// the collector can read it.
+//
+// Both conditions have to hold. A non-verifying ssl_mode never looks at a CA,
+// and a cluster using a certificate the image already trusts does not need
+// CNPG's. Emitting the copy step in either case sends someone to move a
+// certificate that changes nothing -- which is how a step that IS required in
+// the common case starts being treated as boilerplate and skipped.
+func (t CNPGTarget) NeedsClusterCA() bool {
+	return t.VerifiesServerCert() && t.DBCA != DBCASystem
 }
 
 // K8sModes lists the accepted --k8s-mode values, in help order.
@@ -102,6 +127,10 @@ type CNPGTarget struct {
 	Databases []string
 	User      string
 	SSLMode   string
+
+	// DBCA names which of the two supported certificate shapes this cluster
+	// uses. Empty means DBCACNPG, matching CloudNativePG's own default.
+	DBCA string
 
 	K8sMode     string
 	MetricsPort int
@@ -152,6 +181,11 @@ func (t CNPGTarget) Validate() error {
 	case K8sModeAuto, K8sModeEnabled, K8sModeDisabled:
 	default:
 		return fmt.Errorf("unknown --k8s-mode %q (expected %s)", t.K8sMode, strings.Join(K8sModes(), ", "))
+	}
+	switch t.DBCA {
+	case "", DBCACNPG, DBCASystem:
+	default:
+		return fmt.Errorf("unknown --db-ca %q (expected %s)", t.DBCA, strings.Join(DBCASources(), ", "))
 	}
 	if t.MetricsPort <= 0 || t.MetricsPort > 65535 {
 		return fmt.Errorf("--metrics-port %d is not a valid port", t.MetricsPort)

@@ -28,6 +28,7 @@ func init() {
 	f.String("release-namespace", collector.DefaultReleaseNamespace, "Namespace to install the collector into")
 	f.String("secret-name", "dbg-collector-secrets", "Name of the Kubernetes Secret carrying the collector's credentials")
 	f.String("chart-ref", collector.DefaultChartRef, "Chart to install (a registry reference or a local path)")
+	f.String("db-ca", collector.DBCACNPG, "Who signed the database's certificate: cnpg (its own CA) or system (a certificate your image already trusts)")
 	f.String("agent-id", "", "Render for a collector identity you already have, instead of provisioning one (needs --tenant-id)")
 	f.String("tenant-id", "", "Tenant the existing collector identity belongs to (needs --agent-id)")
 	f.StringArray("set", nil, "Extra chart value as key=value; repeatable (e.g. --set image.tag=v1.2.3)")
@@ -310,6 +311,23 @@ func printClusterCAStep(install collector.HelmInstall, t collector.CNPGTarget) {
 	fmt.Println("copying the whole Secret would put it wherever the collector runs -- enough to")
 	fmt.Println("issue a certificate anything in that cluster would trust. Copy the one key.")
 	fmt.Println()
+	// A copy is a snapshot, and the original expires. CNPG rotates its CA on its
+	// own schedule, and the copy does not follow -- so a collector that has run
+	// for months stops connecting on a date nobody wrote down, with the same
+	// UnknownIssuer error that means five other things.
+	fmt.Println("The copy is a snapshot. CloudNativePG rotates this CA on its own schedule and")
+	fmt.Println("the copy will not follow, so re-run the command above when it does. The expiry")
+	fmt.Println("is on the cluster:")
+	fmt.Println()
+	fmt.Printf("  kubectl get cluster %s -n %s \\\n", t.Cluster, t.Namespace)
+	fmt.Println("    -o jsonpath='{.status.certificates.expirations}'")
+	fmt.Println()
+	// The alternative shape, named here rather than in a manual, because this is
+	// where someone is deciding whether the step applies to them.
+	fmt.Println("If your cluster uses a certificate you supplied rather than CloudNativePG's own")
+	fmt.Println("CA (spec.certificates.serverTLSSecret), none of this applies -- re-run with")
+	fmt.Println("--db-ca system and no copy or mount is emitted.")
+	fmt.Println()
 }
 
 // sslModeOf reports the effective ssl_mode, resolving the empty default so the
@@ -458,6 +476,7 @@ func cnpgTargetFromFlags(cmd *cobra.Command) (collector.CNPGTarget, error) {
 		Databases:   splitCSV(get("db-name")),
 		User:        get("db-user"),
 		SSLMode:     get("ssl-mode"),
+		DBCA:        get("db-ca"),
 		K8sMode:     get("k8s-mode"),
 		MetricsPort: port,
 		MetricsTLS:  tls,
