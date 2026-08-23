@@ -208,6 +208,48 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	fmt.Println()
 	fmt.Printf("Component identity: %s  (stable across failover -- no instance in the key)\n", t.StableKey())
 	fmt.Printf("SQL target:         %s:5432  (role service; CNPG's certificate does not cover pod names)\n", t.RoleServiceHost())
+
+	if !t.MetricsOnly() {
+		printPodMetricsPrerequisite()
+	}
+}
+
+// printPodMetricsPrerequisite names the one cluster component the collector
+// needs and does not install.
+//
+// CPU and memory come from the pod-metrics API, which is served by
+// metrics-server. Managed clusters usually ship it as an addon, so it is easy
+// to assume it is simply part of Kubernetes -- it is not, and on a self-managed
+// or bare-metal cluster it may be absent altogether. Absent is not the same as
+// empty: the API group does not exist, so a permission grant for it is valid,
+// applies cleanly, and grants access to nothing.
+//
+// Deliberately says CPU and memory only. Disk is read from the volume records
+// in the core API, which is present on every cluster, so metrics-server has no
+// bearing on it. Sweeping all three into one sentence would send someone
+// installing a component that was never the reason their disk panel is empty.
+//
+// That is why this is printed and not probed. This CLI does not contact the
+// cluster (see CLAUDE.md), and the check that matters belongs to the collector,
+// which runs there. What is useful here is telling the operator the
+// prerequisite exists before they hand the commands to someone else -- it is
+// one command to check and a long detour to diagnose later from a missing
+// panel.
+func printPodMetricsPrerequisite() {
+	fmt.Println()
+	fmt.Println(style.Info("--- before you install: one cluster prerequisite ---"))
+	fmt.Println("CPU and memory readings come from the pod-metrics API, which metrics-server")
+	fmt.Println("provides. Most managed clusters have it already; self-managed ones often do not.")
+	fmt.Println("Check with:")
+	fmt.Println()
+	fmt.Println("  kubectl get apiservices v1beta1.metrics.k8s.io")
+	fmt.Println()
+	fmt.Println("If that reports nothing, install metrics-server first. Without it the collector")
+	fmt.Println("still runs and still reports on the database itself -- only the CPU and memory")
+	fmt.Println("figures are missing, and nothing will announce their absence.")
+	fmt.Println()
+	fmt.Println("Disk use is not affected: it is read from the volume records in the main")
+	fmt.Println("Kubernetes API, which every cluster has.")
 }
 
 // cnpgTargetFromFlags assembles the target from flags without validating it --

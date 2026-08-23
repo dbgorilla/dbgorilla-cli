@@ -127,6 +127,56 @@ func TestRunHelmValues_RejectsBadK8sMode(t *testing.T) {
 	}
 }
 
+// metrics-server is a cluster component the collector needs and does not
+// install. Managed clusters ship it, self-managed ones often do not, and when
+// it is missing the API group does not exist at all -- so the permission grant
+// for it applies cleanly and grants access to nothing. The handover names it
+// while the operator is still at a terminal.
+func TestPrintHelmHandover_NamesThePodMetricsPrerequisite(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	low := strings.ToLower(out)
+	if !strings.Contains(low, "metrics-server") {
+		t.Errorf("handover should name metrics-server as a prerequisite\n---\n%s", out)
+	}
+	if !strings.Contains(low, "v1beta1.metrics.k8s.io") {
+		t.Errorf("handover should give the one command that checks for it\n---\n%s", out)
+	}
+	// The scoping half, and the reason this assertion exists: an earlier draft
+	// of this text said CPU, memory AND disk were lost without metrics-server.
+	// Disk comes from the volume records in the core API and is unaffected.
+	// Saying otherwise sends someone installing a component that was never the
+	// reason their disk panel is empty.
+	if !strings.Contains(low, "disk use is not affected") {
+		t.Errorf("the prerequisite must exclude disk explicitly, not sweep all three together\n---\n%s", out)
+	}
+}
+
+// The prerequisite is about the pod-metrics API, which metrics-only mode never
+// consults. Printing it there would tell an operator to go install something
+// their chosen mode has no use for.
+func TestPrintHelmHandover_SkipsPrerequisiteWhenMetricsOnly(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+	mustSet(t, c, "k8s-mode", collector.K8sModeDisabled)
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("metrics-only dry run should proceed: %v", err)
+	}
+	if strings.Contains(strings.ToLower(out), "metrics-server") {
+		t.Errorf("metrics-only mode should not ask for a component it never uses\n---\n%s", out)
+	}
+}
+
 // Choosing metrics-only silently drops backup and recoverability collection.
 // Nothing downstream ever says so, so the command must -- and must name the
 // capabilities lost, not the setting that was changed.
