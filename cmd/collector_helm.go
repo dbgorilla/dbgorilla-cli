@@ -202,6 +202,16 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	fmt.Println(style.Info("--- 2. install the collector ---"))
 	fmt.Println(install.Command())
 	fmt.Println()
+	// --set-file reads the config from THIS machine. The step above tells the
+	// reader to run these where they have cluster access, which is often a
+	// different machine or a different person -- and there the path simply does
+	// not exist. Helm's error names the missing file and not the reason, so the
+	// reader concludes the config was never written. Point at the self-contained
+	// form instead of leaving them to discover it below.
+	fmt.Println("The command above reads the config from this machine. Installing from somewhere")
+	fmt.Println("else means copying that file across, or using the self-contained values.yaml")
+	fmt.Println("below, which carries the config inside it and needs nothing from here.")
+	fmt.Println()
 	fmt.Println(style.Info("--- or, for Argo CD / Flux: values.yaml ---"))
 	fmt.Print(collector.HelmValuesFragment(rendered, install.SecretRef, install.RBAC))
 

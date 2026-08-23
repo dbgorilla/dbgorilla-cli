@@ -127,6 +127,30 @@ func TestRunHelmValues_RejectsBadK8sMode(t *testing.T) {
 	}
 }
 
+// The install command reads the config from the machine that generated it, but
+// the handover tells the reader to run it where they have cluster access --
+// frequently a different machine. Helm's failure there names the missing file
+// and not the cause, so the reader concludes the config was never written.
+func TestPrintHelmHandover_SaysTheConfigPathIsLocal(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	low := strings.ToLower(out)
+	if !strings.Contains(low, "reads the config from this machine") {
+		t.Errorf("handover should say the install command depends on a local file\n---\n%s", out)
+	}
+	// And must point at the fix, not just the hazard. The values.yaml form
+	// embeds the config, so it needs nothing from the generating machine.
+	if !strings.Contains(low, "values.yaml") {
+		t.Errorf("handover should name the self-contained alternative\n---\n%s", out)
+	}
+}
+
 // metrics-server is a cluster component the collector needs and does not
 // install. Managed clusters ship it, self-managed ones often do not, and when
 // it is missing the API group does not exist at all -- so the permission grant
