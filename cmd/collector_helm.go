@@ -273,6 +273,19 @@ func printDefaultQueriesPrerequisite(t collector.CNPGTarget) {
 	fmt.Println("Empty or false is what you want. If it prints true, the collector installs and")
 	fmt.Println("runs, and most of what it reports on will simply be absent -- replication lag,")
 	fmt.Println("database sizes and connection counts among them.")
+	fmt.Println()
+	// Disk gets its own sentence because its absence is the one with a
+	// consequence rather than a gap. Disk use is worked out from the database
+	// sizes this setting removes, so the collector deliberately reports no
+	// figure at all rather than one computed from what is left -- a partial
+	// number would read far too low, and an alarm watching for a full volume
+	// would stay confidently quiet while it filled. Nothing downstream can warn
+	// about a measurement it never receives, so this is the only place the
+	// person who set the field will ever be told.
+	fmt.Println("Disk use depends on these queries too, and that one matters most: it is worked")
+	fmt.Println("out from those database sizes, so no figure is reported at all rather than a")
+	fmt.Println("wrong one. Nothing will warn you a volume is filling, and nothing will announce")
+	fmt.Println("that it stopped watching.")
 }
 
 // printPodMetricsPrerequisite names the one cluster component the collector
@@ -319,8 +332,9 @@ func printPodMetricsPrerequisite(namespace string) {
 	fmt.Println("Without it the collector still runs and still reports on the database itself.")
 	fmt.Println("Only the CPU and memory figures are missing, and nothing will announce it.")
 	fmt.Println()
-	fmt.Println("Disk use is not affected: it is read from the volume records in the main")
-	fmt.Println("Kubernetes API, which every cluster has.")
+	fmt.Println("Disk use does not depend on metrics-server: the volume's size is read from the")
+	fmt.Println("main Kubernetes API, which every cluster has. (It does depend on the cluster")
+	fmt.Println("setting below.)")
 }
 
 // cnpgTargetFromFlags assembles the target from flags without validating it --

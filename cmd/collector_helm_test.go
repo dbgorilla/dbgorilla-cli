@@ -192,7 +192,7 @@ func TestPrintHelmHandover_NamesThePodMetricsPrerequisite(t *testing.T) {
 	// Disk comes from the volume records in the core API and is unaffected.
 	// Saying otherwise sends someone installing a component that was never the
 	// reason their disk panel is empty.
-	if !strings.Contains(low, "disk use is not affected") {
+	if !strings.Contains(low, "disk use does not depend on metrics-server") {
 		t.Errorf("the prerequisite must exclude disk explicitly, not sweep all three together\n---\n%s", out)
 	}
 }
@@ -570,6 +570,19 @@ func TestPrintHelmHandover_NamesTheDefaultQueriesSetting(t *testing.T) {
 	// Addressed at the actual cluster, not left as a template to edit.
 	if !strings.Contains(out, "kubectl get cluster app-db -n prod-db") {
 		t.Errorf("the check should name the target cluster and namespace\n---\n%s", out)
+	}
+	// Disk needs its own sentence, not membership in a list. The collector
+	// declines to report a figure at all rather than one computed from what is
+	// left, because a partial number reads far too low and an alarm watching for
+	// a full volume would stay quiet while it filled. Nothing downstream can warn
+	// about a measurement it never receives, so this text is the only place the
+	// person who set the field is ever told.
+	low := strings.ToLower(out)
+	if !strings.Contains(low, "disk use depends on these queries too") {
+		t.Errorf("the warning must call out disk separately from the list\n---\n%s", out)
+	}
+	if !strings.Contains(low, "will warn you a volume is filling") {
+		t.Errorf("the warning must name the consequence, not just the missing data\n---\n%s", out)
 	}
 }
 
