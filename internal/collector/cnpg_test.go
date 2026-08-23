@@ -193,9 +193,9 @@ func TestMetricsOnly(t *testing.T) {
 
 // The warning names capabilities, not settings -- "you will not get backup
 // state" is actionable where "kubernetes.mode is disabled" is not.
-func TestDegradedCapabilities_NamesBackupAndWAL(t *testing.T) {
+func TestDegradedCapabilities_NamesEverythingMetricsOnlyLoses(t *testing.T) {
 	joined := strings.ToLower(strings.Join(DegradedCapabilities(), " "))
-	for _, want := range []string{"backup", "wal", "failover"} {
+	for _, want := range []string{"backup", "wal", "failover", "cpu", "memory", "disk"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("degraded capabilities should mention %q, got %q", want, joined)
 		}

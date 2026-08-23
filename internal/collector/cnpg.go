@@ -193,5 +193,9 @@ func DegradedCapabilities() []string {
 		"backup state -- whether backups are running at all, and when the last one succeeded",
 		"WAL archiving state -- so a stalled archiver, which silently degrades recoverability, is invisible",
 		"failover and switchover history, and operator-detected primary faults",
+		// Named "pod" rather than "container" because the alarm that consumes this
+		// compares usage against the pod-scoped limit, not a per-container one.
+		"CPU, memory and disk use of the database pods -- and with them the high-CPU, " +
+			"low-memory and disk-nearly-full alarms, which cannot fire on data that never arrives",
 	}
 }

@@ -142,13 +142,20 @@ func TestRunHelmValues_MetricsOnlyWarnsAboutBackups(t *testing.T) {
 		t.Fatalf("metrics-only dry run should proceed: %v", err)
 	}
 	low := strings.ToLower(out)
-	for _, want := range []string{"metrics-only", "backup", "wal"} {
+	for _, want := range []string{"metrics-only", "backup", "wal", "cpu", "memory", "disk"} {
 		if !strings.Contains(low, want) {
 			t.Errorf("metrics-only warning should mention %q\n---\n%s", want, out)
 		}
 	}
 	if !strings.Contains(out, "no reinstall needed") {
 		t.Error("the warning should say the mode is reversible with a permission grant")
+	}
+	// The mode's name is the trap: an operator reads "metrics-only" as "metrics
+	// still work". CPU and memory come from the cluster's pod-metrics API, not
+	// from the database's own endpoint, so the warning has to say which metrics
+	// it means. Deleting that sentence as redundant is the regression.
+	if !strings.Contains(low, "cluster api") {
+		t.Errorf("the warning must say the resource figures come from the cluster API, not the database's own metrics endpoint\n---\n%s", out)
 	}
 }
 

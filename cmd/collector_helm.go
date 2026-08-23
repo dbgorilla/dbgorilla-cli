@@ -70,15 +70,20 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	// Warn BEFORE minting. Metrics-only is a supported mode and this is not a
-	// blocker -- but it silently drops backup and recoverability collection, and
-	// nothing downstream ever says so: no error, no failed check, and a dashboard
-	// that simply omits the sections it has no data for. The person choosing the
-	// mode is the only one in a position to be told.
+	// blocker -- but it silently drops backup, recoverability and pod resource
+	// collection, and nothing downstream ever says so: no error, no failed check,
+	// and a dashboard that simply omits the sections it has no data for. The
+	// person choosing the mode is the only one in a position to be told.
 	if target.MetricsOnly() {
 		fmt.Println(style.Warn("⚠  Metrics-only mode (--k8s-mode disabled): no Kubernetes API access, so this collector cannot collect:"))
 		for _, c := range collector.DegradedCapabilities() {
 			fmt.Printf("     - %s\n", c)
 		}
+		// The mode's own name invites the wrong conclusion. CPU and memory come
+		// from the cluster's pod-metrics API, not from the database's own metrics
+		// endpoint, so "metrics-only" collects database metrics and no pod ones.
+		fmt.Println("   \"Metrics-only\" here means the database's own metrics endpoint. CPU, memory and")
+		fmt.Println("   disk figures come from the cluster API instead, so they are not included.")
 		fmt.Println("   Granting the read-only Role later and re-running enables it -- no reinstall needed.")
 		if !confirm(cmd, "Continue with metrics-only?") {
 			return errors.New("aborted")
