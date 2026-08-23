@@ -36,7 +36,54 @@ const (
 	K8sModeEnabled = "enabled"
 	// K8sModeDisabled never calls the API. Metrics-only, zero permissions.
 	K8sModeDisabled = "disabled"
+
+	// ClusterCAMountPath is where the collector expects the CNPG cluster's CA
+	// bundle. The provider hardcodes this path, so it is a constant of the
+	// contract rather than something an operator chooses.
+	//
+	// CNPG signs each cluster's server certificate with a per-cluster CA that is
+	// in no OS trust store. Without this bundle mounted, a verifying ssl_mode
+	// fails the handshake with "UnknownIssuer" -- an error that names a
+	// certificate and not a missing setting, so it reads as a broken cluster.
+	ClusterCAMountPath = "/etc/cnpg/cluster-ca"
+
+	// ClusterCAFileName is the key inside the copied Secret and the filename the
+	// provider reads.
+	ClusterCAFileName = "ca.crt"
+
+	// ClusterCAVolumeName names the volume and its mount, which must match.
+	ClusterCAVolumeName = "cnpg-cluster-ca"
+
+	// ClusterCASecretName is the Secret the operator creates in the collector's
+	// namespace. Deliberately not the CNPG Secret's own name: this one holds the
+	// certificate alone, and a different name is what stops the two being
+	// confused for each other.
+	ClusterCASecretName = "dbg-cnpg-cluster-ca"
 )
+
+// ClusterCASourceSecret is the Secret CNPG publishes for a cluster, in the
+// database's namespace.
+//
+// It holds the CA certificate AND the CA private key. Copying it wholesale --
+// which is the obvious form of the instruction, and the one anyone writes first
+// -- puts the key that signs every certificate in that cluster wherever the
+// collector runs. Only ca.crt is ever copied.
+func ClusterCASourceSecret(cluster string) string { return cluster + "-ca" }
+
+// NeedsClusterCA reports whether the chosen ssl_mode actually verifies the
+// server's certificate. Only those modes need the bundle; asking an operator to
+// copy a certificate their connection will not look at is how a required step
+// starts being skipped.
+func (t CNPGTarget) NeedsClusterCA() bool {
+	switch t.SSLMode {
+	case "verify-full", "verify-ca":
+		return true
+	case "":
+		return true // the default is verify-full
+	default:
+		return false
+	}
+}
 
 // K8sModes lists the accepted --k8s-mode values, in help order.
 func K8sModes() []string { return []string{K8sModeAuto, K8sModeEnabled, K8sModeDisabled} }

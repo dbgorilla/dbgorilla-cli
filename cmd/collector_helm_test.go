@@ -727,3 +727,72 @@ func TestRunHelmValues_SuppliedIdentityKeepsAnExplicitPort(t *testing.T) {
 		t.Errorf("an explicit port must survive untouched\n---\n%s", out)
 	}
 }
+
+// The handover's steps run in the order printed. Both Secrets are created in
+// the collector's namespace, and `helm install --create-namespace` is the last
+// step -- so following them in order failed on the very first command with
+// "namespaces not found", which reads as a broken cluster rather than a step
+// out of sequence.
+func TestPrintHelmHandover_CreatesTheNamespaceBeforeUsingIt(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+	mustSet(t, c, "release-namespace", "dbg-col-e2e")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	nsCreate := strings.Index(out, "kubectl create namespace dbg-col-e2e")
+	secret := strings.Index(out, "kubectl create secret generic dbg-collector-secrets")
+	install := strings.Index(out, "helm install")
+	if nsCreate < 0 {
+		t.Fatalf("handover should create the namespace\n---\n%s", out)
+	}
+	if !(nsCreate < secret && secret < install) {
+		t.Errorf("order must be namespace, then Secrets, then install (got %d, %d, %d)\n---\n%s",
+			nsCreate, secret, install, out)
+	}
+}
+
+// The CA copy is a step, not a note: without it the collector fails its TLS
+// handshake, and the error names a certificate rather than a missing file.
+func TestPrintHelmHandover_PrintsTheClusterCAStep(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	if !strings.Contains(out, "kubectl create secret generic "+collector.ClusterCASecretName) {
+		t.Errorf("handover should print the CA copy\n---\n%s", out)
+	}
+	// Names the source Secret for the actual cluster, in the database namespace.
+	if !strings.Contains(out, "app-db-ca -n prod-db") {
+		t.Errorf("the copy should read the cluster's own CA Secret\n---\n%s", out)
+	}
+	// And warns about the private key, which is the part that makes the naive
+	// instruction dangerous rather than merely wrong.
+	if !strings.Contains(out, "PRIVATE KEY") {
+		t.Errorf("must warn that the source Secret holds the CA private key\n---\n%s", out)
+	}
+}
+
+// A non-verifying ssl_mode has no use for the CA, and asking for it anyway is
+// how a step that IS required elsewhere starts being skipped.
+func TestPrintHelmHandover_SkipsTheCAStepWhenNotVerifying(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+	mustSet(t, c, "ssl-mode", "require")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	if strings.Contains(out, collector.ClusterCASecretName) || strings.Contains(out, "extraVolume") {
+		t.Errorf("no CA step or mount when the connection does not verify\n---\n%s", out)
+	}
+}

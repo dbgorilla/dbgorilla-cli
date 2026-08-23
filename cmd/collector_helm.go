@@ -185,6 +185,10 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 	chartRef, _ := cmd.Flags().GetString("chart-ref")
 	install := collector.DefaultHelmInstall(configPath, secretName, collector.RBACFor(target.K8sMode, target.Namespace))
 	install.Release, install.Namespace, install.Extra = release, relNS, extra
+	// The SQL connection verifies the server unless the operator says otherwise,
+	// and CNPG signs with a per-cluster CA that no OS trust store carries. The
+	// mount is therefore part of the install, not an advanced option.
+	install.MountClusterCA = target.NeedsClusterCA()
 	if chartRef != "" {
 		install.ChartRef = chartRef
 	}
@@ -237,10 +241,20 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	fmt.Println(style.Info("--- collector.toml ---"))
 	fmt.Print(rendered)
 
-	fmt.Println(style.Info("--- 1. create the Secret (run where you have cluster access) ---"))
+	// The namespace has to exist first. Both Secrets are created in it, and
+	// `helm install --create-namespace` does not run until step 3 -- so following
+	// these in order used to fail on the very first command with "namespaces
+	// not found", which reads as a broken cluster rather than a step out of
+	// sequence. Creating it here is harmless: --create-namespace tolerates a
+	// namespace that already exists.
+	fmt.Println(style.Info("--- 1. create the namespace and the Secret (run where you have cluster access) ---"))
+	fmt.Printf("kubectl create namespace %s\n\n", install.Namespace)
 	fmt.Println(install.SecretCommand(true))
 	fmt.Println()
-	fmt.Println(style.Info("--- 2. install the collector ---"))
+	if install.MountClusterCA {
+		printClusterCAStep(install, t)
+	}
+	fmt.Println(style.Info("--- 3. install the collector ---"))
 	fmt.Println(install.Command())
 	fmt.Println()
 	// --set-file reads the config from THIS machine. The step above tells the
@@ -254,7 +268,7 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	fmt.Println("below, which carries the config inside it and needs nothing from here.")
 	fmt.Println()
 	fmt.Println(style.Info("--- or, for Argo CD / Flux: values.yaml ---"))
-	values, err := collector.HelmValuesFragment(rendered, install.SecretRef, install.RBAC, install.Extra)
+	values, err := collector.HelmValuesFragment(rendered, install.SecretRef, install.RBAC, install.Extra, install.ClusterCAYAML())
 	if err != nil {
 		return err
 	}
@@ -269,6 +283,42 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	}
 	printDefaultQueriesPrerequisite(t)
 	return nil
+}
+
+// printClusterCAStep prints the copy of the CNPG cluster CA into the collector's
+// namespace.
+//
+// A step rather than a note: without it the collector fails its TLS handshake
+// with "UnknownIssuer", which names a certificate and not a missing file, and
+// so reads as a broken cluster rather than an incomplete install.
+//
+// The command extracts ca.crt on its own. The Secret CNPG publishes holds the
+// CA private key beside it, and the obvious way to copy a Secret between
+// namespaces takes both -- handing whoever runs the collector the ability to
+// mint a certificate every client in that cluster will trust. That is a far
+// larger grant than the read-only Role the rest of this design is careful
+// about, and it would be an accident rather than a decision.
+func printClusterCAStep(install collector.HelmInstall, t collector.CNPGTarget) {
+	fmt.Println(style.Info("--- 2. copy the cluster's CA certificate to the collector's namespace ---"))
+	fmt.Printf("Your connection uses ssl_mode %s, so the collector verifies the database's\n", sslModeOf(t))
+	fmt.Println("certificate. CloudNativePG signs it with a CA that belongs to this cluster and")
+	fmt.Println("is in no system trust store, so the collector needs a copy of it.")
+	fmt.Println()
+	fmt.Println(collector.ClusterCACopyCommand(t.Cluster, t.Namespace, install.Namespace))
+	fmt.Println()
+	fmt.Printf("This copies the certificate only. %s also holds the CA's PRIVATE KEY, and\n", collector.ClusterCASourceSecret(t.Cluster))
+	fmt.Println("copying the whole Secret would put it wherever the collector runs -- enough to")
+	fmt.Println("issue a certificate anything in that cluster would trust. Copy the one key.")
+	fmt.Println()
+}
+
+// sslModeOf reports the effective ssl_mode, resolving the empty default so the
+// printed reason matches the config the operator is holding.
+func sslModeOf(t collector.CNPGTarget) string {
+	if t.SSLMode == "" {
+		return "verify-full"
+	}
+	return t.SSLMode
 }
 
 // printDefaultQueriesPrerequisite names the Cluster setting that turns off most

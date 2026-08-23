@@ -29,6 +29,66 @@ type HelmInstall struct {
 	// collector build that is not the published one, which is exactly what
 	// validating an unreleased change requires.
 	Extra []ExtraValue
+
+	// MountClusterCA wires the CNPG cluster CA into the pod. Set whenever the
+	// SQL connection verifies the server, which is the default.
+	MountClusterCA bool
+}
+
+// clusterCAValues renders the volume and mount as `--set` arguments.
+//
+// Emitted from here rather than left to the operator because the volume name
+// and the mount name have to match, and the mount path has to equal the one the
+// provider reads. Three values that must agree, in two places, is not something
+// to hand over as prose.
+func (h HelmInstall) clusterCAValues() []string {
+	if !h.MountClusterCA {
+		return nil
+	}
+	return []string{
+		"extraVolumes[0].name=" + ClusterCAVolumeName,
+		"extraVolumes[0].secret.secretName=" + ClusterCASecretName,
+		// Projecting the single key, rather than the whole Secret, keeps the
+		// mount correct even if someone later copies more into that Secret.
+		"extraVolumes[0].secret.items[0].key=" + ClusterCAFileName,
+		"extraVolumes[0].secret.items[0].path=" + ClusterCAFileName,
+		"extraVolumeMounts[0].name=" + ClusterCAVolumeName,
+		"extraVolumeMounts[0].mountPath=" + ClusterCAMountPath,
+		"extraVolumeMounts[0].readOnly=true",
+	}
+}
+
+// ClusterCAYAML is the same wiring in values.yaml form. The two are generated
+// from the same constants so they cannot drift apart.
+func (h HelmInstall) ClusterCAYAML() string {
+	if !h.MountClusterCA {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "extraVolumes:\n  - name: %s\n    secret:\n      secretName: %s\n      items:\n        - key: %s\n          path: %s\n",
+		ClusterCAVolumeName, ClusterCASecretName, ClusterCAFileName, ClusterCAFileName)
+	fmt.Fprintf(&b, "extraVolumeMounts:\n  - name: %s\n    mountPath: %s\n    readOnly: true\n",
+		ClusterCAVolumeName, ClusterCAMountPath)
+	return b.String()
+}
+
+// ClusterCACopyCommand renders the one command that copies the CA certificate
+// into the collector's namespace.
+//
+// It extracts ca.crt specifically. The Secret CNPG publishes also contains the
+// CA private key, and `kubectl get secret -o yaml | kubectl apply` -- the
+// obvious way to copy a Secret between namespaces -- takes both. Anyone holding
+// that key can mint a certificate every client in the cluster will trust, which
+// is a materially larger grant than the read-only Role this whole design is
+// careful about.
+func ClusterCACopyCommand(cluster, dbNamespace, releaseNamespace string) string {
+	return fmt.Sprintf(
+		"kubectl create secret generic %s \\\n"+
+			"  --namespace %s \\\n"+
+			"  --from-literal=%s=\"$(kubectl get secret %s -n %s \\\n"+
+			"      -o jsonpath='{.data.ca\\.crt}' | base64 -d)\"",
+		ClusterCASecretName, releaseNamespace, ClusterCAFileName,
+		ClusterCASourceSecret(cluster), dbNamespace)
 }
 
 // ExtraValue is one operator-supplied chart value, as a dotted key and a value.
@@ -132,6 +192,9 @@ func (h HelmInstall) Command() string {
 			fmt.Fprintf(&b, " \\\n  --set rbac.namespaces[%d]=%s", i, ns)
 		}
 	}
+	for _, v := range h.clusterCAValues() {
+		fmt.Fprintf(&b, " \\\n  --set %s", v)
+	}
 	for _, e := range h.Extra {
 		fmt.Fprintf(&b, " \\\n  --set %s=%s", e.Key, e.Value)
 	}
@@ -164,13 +227,14 @@ func (h HelmInstall) SecretCommand(withDBPassword bool) string {
 //
 // config.inline is emitted as a YAML block scalar so the TOML passes through
 // byte-for-byte; the chart is a passthrough and renders no structure of its own.
-func HelmValuesFragment(renderedTOML, secretRef string, rbac RBACValues, extra []ExtraValue) (string, error) {
+func HelmValuesFragment(renderedTOML, secretRef string, rbac RBACValues, extra []ExtraValue, caYAML string) (string, error) {
 	var b strings.Builder
 	b.WriteString("# values.yaml for the dbg-collector chart.\n")
 	b.WriteString("# The chart renders no structure of its own: config.inline is passed through verbatim.\n")
 	// Emitted first, and from the same input as the `helm install` above: the two
 	// forms are alternatives, so a value present in one and missing from the
 	// other would install two different collectors from one command's output.
+	b.WriteString(caYAML)
 	if len(extra) > 0 {
 		y, err := extraValuesYAML(extra)
 		if err != nil {

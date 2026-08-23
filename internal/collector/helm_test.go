@@ -223,7 +223,7 @@ func TestSecretCommand_KeysMatchTheConfigPlaceholders(t *testing.T) {
 // to thread through every assertion.
 func mustFragment(t *testing.T, toml, secretRef string, rbac RBACValues, extra ...ExtraValue) string {
 	t.Helper()
-	got, err := HelmValuesFragment(toml, secretRef, rbac, extra)
+	got, err := HelmValuesFragment(toml, secretRef, rbac, extra, "")
 	if err != nil {
 		t.Fatalf("HelmValuesFragment: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestHelmValuesFragment_RejectsAKeyUsedAsBothValueAndSection(t *testing.T) {
 		{{Key: "image", Value: "x"}, {Key: "image.tag", Value: "y"}},
 		{{Key: "image.tag", Value: "y"}, {Key: "image.tag.sub", Value: "z"}},
 	} {
-		if _, err := HelmValuesFragment("[dbgorilla]\n", "s", RBACFor(K8sModeAuto, "prod-db"), pair); err == nil {
+		if _, err := HelmValuesFragment("[dbgorilla]\n", "s", RBACFor(K8sModeAuto, "prod-db"), pair, ""); err == nil {
 			t.Errorf("conflicting keys %v should be rejected", pair)
 		}
 	}
@@ -346,5 +346,116 @@ func TestYamlScalar_MatchesHelmSetInference(t *testing.T) {
 func TestParseExtraValues_RejectsConflictsBeforeAnythingIsMinted(t *testing.T) {
 	if _, err := ParseExtraValues([]string{"image=x", "image.tag=y"}); err == nil {
 		t.Fatal("a value-and-section conflict must be caught while parsing flags")
+	}
+}
+
+// --- CNPG cluster CA --------------------------------------------------------
+
+// CNPG signs each cluster's server certificate with a CA that no OS trust store
+// carries, so a verifying ssl_mode cannot succeed without it mounted. The
+// failure names a certificate rather than a missing file, so it reads as a
+// broken cluster instead of an incomplete install.
+func TestClusterCA_WiredIntoBothOutputForms(t *testing.T) {
+	h := DefaultHelmInstall("/tmp/c.toml", "sec", RBACFor(K8sModeAuto, "prod-db"))
+	h.MountClusterCA = true
+
+	cmd := h.Command()
+	for _, want := range []string{
+		"--set extraVolumes[0].name=" + ClusterCAVolumeName,
+		"--set extraVolumes[0].secret.secretName=" + ClusterCASecretName,
+		"--set extraVolumes[0].secret.items[0].key=" + ClusterCAFileName,
+		"--set extraVolumeMounts[0].mountPath=" + ClusterCAMountPath,
+		"--set extraVolumeMounts[0].readOnly=true",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("install command missing %q:\n%s", want, cmd)
+		}
+	}
+
+	// The values.yaml must carry the same wiring: the two forms are alternatives,
+	// and one that mounts the CA beside one that does not means half the readers
+	// get a collector that cannot connect.
+	frag, err := HelmValuesFragment("[dbgorilla]\n", "sec", RBACFor(K8sModeAuto, "prod-db"), nil, h.ClusterCAYAML())
+	if err != nil {
+		t.Fatalf("fragment: %v", err)
+	}
+	for _, want := range []string{
+		"extraVolumes:",
+		"secretName: " + ClusterCASecretName,
+		"mountPath: " + ClusterCAMountPath,
+		"readOnly: true",
+	} {
+		if !strings.Contains(frag, want) {
+			t.Errorf("values.yaml missing %q:\n%s", want, frag)
+		}
+	}
+}
+
+// The volume name and the mount name are two halves of one reference. A mount
+// naming a volume that does not exist fails at pod admission, which is a long
+// way from the command that got it wrong.
+func TestClusterCA_VolumeAndMountNamesMatch(t *testing.T) {
+	h := DefaultHelmInstall("/tmp/c.toml", "sec", RBACFor(K8sModeAuto, "prod-db"))
+	h.MountClusterCA = true
+	cmd := h.Command()
+	if !strings.Contains(cmd, "extraVolumes[0].name="+ClusterCAVolumeName) ||
+		!strings.Contains(cmd, "extraVolumeMounts[0].name="+ClusterCAVolumeName) {
+		t.Errorf("volume and mount must name the same volume:\n%s", cmd)
+	}
+}
+
+// An ssl_mode that does not verify the server has no use for the CA. Asking an
+// operator to copy a certificate their connection will not look at is how a
+// required step starts being skipped.
+func TestNeedsClusterCA_OnlyForVerifyingModes(t *testing.T) {
+	for mode, want := range map[string]bool{
+		"verify-full": true,
+		"verify-ca":   true,
+		"":            true, // the default is verify-full
+		"require":     false,
+		"prefer":      false,
+		"disable":     false,
+	} {
+		tgt := validCNPGTarget()
+		tgt.SSLMode = mode
+		if got := tgt.NeedsClusterCA(); got != want {
+			t.Errorf("NeedsClusterCA(%q) = %v, want %v", mode, got, want)
+		}
+	}
+}
+
+// Nothing CA-related may appear when the mode does not verify.
+func TestClusterCA_AbsentWhenNotNeeded(t *testing.T) {
+	h := DefaultHelmInstall("/tmp/c.toml", "sec", RBACFor(K8sModeAuto, "prod-db"))
+	h.MountClusterCA = false
+	if strings.Contains(h.Command(), "extraVolume") || h.ClusterCAYAML() != "" {
+		t.Errorf("no CA wiring should be emitted:\n%s\n%s", h.Command(), h.ClusterCAYAML())
+	}
+}
+
+// The Secret CNPG publishes holds the CA private key beside the certificate.
+// The obvious way to copy a Secret between namespaces takes both, which hands
+// whoever runs the collector the ability to issue a certificate anything in
+// that cluster will trust -- a far larger grant than the read-only Role the
+// rest of this design is careful about, and an accident rather than a decision.
+func TestClusterCACopyCommand_TakesTheCertificateOnly(t *testing.T) {
+	got := ClusterCACopyCommand("app-db", "prod-db", "dbg-collector")
+	if !strings.Contains(got, "jsonpath='{.data.ca\\.crt}'") {
+		t.Errorf("the copy must select ca.crt specifically:\n%s", got)
+	}
+	if strings.Contains(got, "ca.key") {
+		t.Errorf("the CA private key must never be copied:\n%s", got)
+	}
+	// Whole-Secret copies take the key with it.
+	for _, banned := range []string{"-o yaml", "kubectl apply"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("%q copies the whole Secret, private key included:\n%s", banned, got)
+		}
+	}
+	if !strings.Contains(got, "--namespace dbg-collector") {
+		t.Errorf("the copy lands in the collector's namespace:\n%s", got)
+	}
+	if !strings.Contains(got, "app-db-ca") || !strings.Contains(got, "-n prod-db") {
+		t.Errorf("the source is the cluster's own CA Secret, in the database namespace:\n%s", got)
 	}
 }
