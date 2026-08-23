@@ -1808,8 +1808,13 @@ func endpointsFromFlags(cmd *cobra.Command) collector.Endpoints {
 	otlp, _ := cmd.Flags().GetString("otlp-url")
 	opamp, _ := cmd.Flags().GetString("opamp-url")
 	return collector.Endpoints{
-		AuthBaseURL:  authURLFlag(cmd),
-		OtlpBaseURL:  otlp,
+		AuthBaseURL: authURLFlag(cmd),
+		// Same port defaulting as endpointsFor. The exporter needs an explicit
+		// host:port and fails on a bare host, so a flag value has to be treated
+		// identically whichever path rendered it -- otherwise the config a
+		// provisioning run produces and the config a flags-only run produces
+		// differ from the same input, and only one of them starts.
+		OtlpBaseURL:  withDefaultPort(otlp),
 		OpampBaseURL: opamp,
 	}
 }

@@ -682,3 +682,48 @@ func TestRunHelmValues_RejectsHalfAnIdentity(t *testing.T) {
 		}
 	}
 }
+
+// The OTLP exporter needs an explicit host:port and fails on a bare host. That
+// defaulting lived only on the provisioning path, so the same --otlp-url
+// produced a working config when an identity was minted and a config that
+// would not start when one was supplied. Same input, two renders, one broken.
+func TestRunHelmValues_SuppliedIdentityGetsTheSamePortDefaulting(t *testing.T) {
+	isolate(t)
+	c := helmTestCmd()
+	mustSet(t, c, "namespace", "prod-db")
+	mustSet(t, c, "cluster", "app-db")
+	mustSet(t, c, "db-user", "dbg_readonly")
+	mustSet(t, c, "agent-id", "agent-abc")
+	mustSet(t, c, "tenant-id", "tenant-xyz")
+	mustSet(t, c, "otlp-url", "https://otlp.example")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("render should succeed: %v", err)
+	}
+	if !strings.Contains(out, `otlp_base_url = "https://otlp.example:443"`) {
+		t.Errorf("a bare host should gain the scheme's port\n---\n%s", out)
+	}
+}
+
+// An endpoint that already names a port is left alone.
+func TestRunHelmValues_SuppliedIdentityKeepsAnExplicitPort(t *testing.T) {
+	isolate(t)
+	c := helmTestCmd()
+	mustSet(t, c, "namespace", "prod-db")
+	mustSet(t, c, "cluster", "app-db")
+	mustSet(t, c, "db-user", "dbg_readonly")
+	mustSet(t, c, "agent-id", "agent-abc")
+	mustSet(t, c, "tenant-id", "tenant-xyz")
+	mustSet(t, c, "otlp-url", "http://gateway.internal:4317")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("render should succeed: %v", err)
+	}
+	if !strings.Contains(out, `otlp_base_url = "http://gateway.internal:4317"`) {
+		t.Errorf("an explicit port must survive untouched\n---\n%s", out)
+	}
+}
