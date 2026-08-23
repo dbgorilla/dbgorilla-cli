@@ -550,3 +550,49 @@ func TestRunHelmValues_MetricsOnlyDeclineAborts(t *testing.T) {
 		t.Fatalf("declining metrics-only should abort, got %v", err)
 	}
 }
+
+// A cluster can switch off CloudNativePG's default monitoring queries. The
+// collector then installs, runs, reports healthy, and most of what it watches
+// is simply absent. The check costs one command at a terminal the reader is
+// already standing at.
+func TestPrintHelmHandover_NamesTheDefaultQueriesSetting(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("dry run should proceed: %v", err)
+	}
+	if !strings.Contains(out, "disableDefaultQueries") {
+		t.Errorf("handover should name the setting that disables the default queries\n---\n%s", out)
+	}
+	// Addressed at the actual cluster, not left as a template to edit.
+	if !strings.Contains(out, "kubectl get cluster app-db -n prod-db") {
+		t.Errorf("the check should name the target cluster and namespace\n---\n%s", out)
+	}
+}
+
+// Unlike the pod-metrics prerequisite, this one applies in metrics-only mode
+// too -- more so, since that mode depends on the database's own endpoint
+// entirely. Suppressing it there would repeat the earlier mistake of assuming
+// things lost together under one cause are lost together under another.
+func TestPrintHelmHandover_DefaultQueriesWarningSurvivesMetricsOnly(t *testing.T) {
+	isolate(t)
+	c := helmDryRunCmd(t)
+	mustSet(t, c, "k8s-mode", collector.K8sModeDisabled)
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	out := capture(t, func() { err = runHelmValues(c, nil) })
+	if err != nil {
+		t.Fatalf("metrics-only dry run should proceed: %v", err)
+	}
+	if !strings.Contains(out, "disableDefaultQueries") {
+		t.Errorf("metrics-only depends on that endpoint entirely; the check must still print\n---\n%s", out)
+	}
+	// And the other one must still be absent, so the two stay distinguishable.
+	if strings.Contains(strings.ToLower(out), "metrics-server") {
+		t.Errorf("the pod-metrics prerequisite should still be suppressed here\n---\n%s", out)
+	}
+}

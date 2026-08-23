@@ -243,7 +243,36 @@ func printHelmHandover(install collector.HelmInstall, rendered string, t collect
 	if !t.MetricsOnly() {
 		printPodMetricsPrerequisite(t.Namespace)
 	}
+	printDefaultQueriesPrerequisite(t)
 	return nil
+}
+
+// printDefaultQueriesPrerequisite names the Cluster setting that turns off most
+// of what the collector reads.
+//
+// CloudNativePG ships a default set of monitoring queries and enables it by
+// default, which is why a stock cluster exports a useful set with no
+// configuration. A cluster can switch that off, and then the metrics endpoint
+// serves only the operator's own handful -- no replication lag, no database
+// sizes, no connection counts.
+//
+// Printed in every mode, unlike the pod-metrics prerequisite. That one is about
+// the cluster API, which metrics-only never consults; this one is about the
+// database's own endpoint, which metrics-only depends on entirely. Grouping the
+// two would repeat the mistake of assuming things lost together under one cause
+// are lost together under another.
+func printDefaultQueriesPrerequisite(t collector.CNPGTarget) {
+	fmt.Println()
+	fmt.Println(style.Info("--- and one setting on the cluster itself ---"))
+	fmt.Println("CloudNativePG exports a standard set of database metrics unless the cluster")
+	fmt.Println("turns them off. Confirm it has not:")
+	fmt.Println()
+	fmt.Printf("  kubectl get cluster %s -n %s \\\n", t.Cluster, t.Namespace)
+	fmt.Println("    -o jsonpath='{.spec.monitoring.disableDefaultQueries}'")
+	fmt.Println()
+	fmt.Println("Empty or false is what you want. If it prints true, the collector installs and")
+	fmt.Println("runs, and most of what it reports on will simply be absent -- replication lag,")
+	fmt.Println("database sizes and connection counts among them.")
 }
 
 // printPodMetricsPrerequisite names the one cluster component the collector
