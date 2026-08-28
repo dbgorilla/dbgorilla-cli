@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- `login`, `whoami` and `doctor` name your organization instead of printing its
+  UUID. The CLI read the organization name, the user id and an admin flag under
+  key names the API does not send, so all three arrived empty and the output
+  fell back to the raw identifier. Nothing reported an error — the id was simply
+  what you saw where the name belonged.
+
 - Auto-detecting the sign-in mode no longer reads a broken deployment as one
   without SSO. Every non-200 from the device-config endpoint was treated as
   "this deployment has no SSO" and dropped to a password prompt, so a 502 from
@@ -13,6 +19,19 @@
   have explained it. Only a 404, the deployment answering that it genuinely has
   no SSO, still falls back to password sign-in. Everything else now names the
   status.
+
+### Added
+
+- `login --verbose` and `whoami --verbose` print the role, the user id and the
+  organization id under the identity line. These are the values a support
+  conversation asks for; the default output stays to the name.
+
+### Changed
+
+- `whoami --json` matches the API's own field names: `tenant` is now
+  `organization`, `user_id` is now `id`, and `role` is included. `is_admin` is
+  gone — it was never populated by any deployment. A script reading the old
+  names was reading fields that were always empty, and needs the new ones.
 
 ## v0.5.2
 

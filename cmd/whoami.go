@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
@@ -12,6 +13,7 @@ import (
 
 func init() {
 	whoamiCmd.Flags().Bool("json", false, "Emit identity as JSON")
+	whoamiCmd.Flags().BoolP("verbose", "v", false, "Also show the role and the internal user/organization ids")
 	rootCmd.AddCommand(whoamiCmd)
 }
 
@@ -51,15 +53,44 @@ func runWhoami(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// On release-202603.007 the /auth/user response leaves `tenant` and
-	// `user_id` empty and populates only `tenant_id`. Fall back to the
-	// non-empty fields; omit user-id when nothing meaningful is available.
-	identity := firstNonEmpty(u.Email, u.Username)
-	org := firstNonEmpty(u.Tenant, u.TenantID)
-	if u.UserID != "" {
-		fmt.Println(style.Success(fmt.Sprintf("%s  (org: %s, user-id: %s)", identity, org, u.UserID)))
-	} else {
-		fmt.Println(style.Success(fmt.Sprintf("%s  (org: %s)", identity, org)))
+	fmt.Println(style.Success(describeIdentity(u)))
+	if verbose, _ := cmd.Flags().GetBool("verbose"); verbose {
+		printIdentityDetail(cmd.OutOrStdout(), u)
 	}
 	return nil
+}
+
+// describeIdentity renders the one-line answer to "who am I": the account,
+// and the organization by the name its members call it.
+//
+// The organization's UUID is deliberately not here. It is an internal
+// identifier, it is the same on every line of every command, and it crowds
+// out the one word the reader is actually looking for. It stays available
+// under --verbose and in `whoami --json`.
+//
+// Deployments old enough not to send an organization name fall back to the
+// UUID, because showing the raw id beats showing "(org: )".
+func describeIdentity(u api.UserInfo) string {
+	who := firstNonEmpty(u.Email, u.Username)
+	org := firstNonEmpty(u.Organization, u.TenantID)
+	if org == "" {
+		return who
+	}
+	return fmt.Sprintf("%s  (org: %s)", who, org)
+}
+
+// printIdentityDetail writes the identifiers a human does not need but a
+// support conversation does. Each line is omitted when the deployment does
+// not supply it, so an older backend prints a shorter block rather than a
+// block full of blanks.
+func printIdentityDetail(w io.Writer, u api.UserInfo) {
+	for _, row := range []struct{ label, value string }{
+		{"role", u.Role},
+		{"user-id", u.UserID},
+		{"org-id", u.TenantID},
+	} {
+		if row.value != "" {
+			fmt.Fprintf(w, "  %-9s %s\n", row.label+":", row.value)
+		}
+	}
 }

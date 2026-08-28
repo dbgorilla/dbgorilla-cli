@@ -33,9 +33,7 @@ func checkAuthAndAPI(cmd *cobra.Command, apiURL string) (bool, string) {
 	}
 	var u api.UserInfo
 	_ = json.Unmarshal(body, &u)
-	return true, fmt.Sprintf("%s  (org: %s)",
-		firstNonEmpty(u.Email, u.Username),
-		firstNonEmpty(u.Tenant, u.TenantID))
+	return true, describeIdentity(u)
 }
 
 // checkMCPKey runs the MCP-key probe and returns (ok, message).

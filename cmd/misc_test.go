@@ -17,6 +17,7 @@ func whoamiTestCmd() *cobra.Command {
 	c.Flags().String("api-url", "", "")
 	c.Flags().Bool("insecure", false, "")
 	c.Flags().Bool("json", false, "")
+	c.Flags().Bool("verbose", false, "")
 	return c
 }
 
@@ -37,10 +38,14 @@ func TestRunWhoami(t *testing.T) {
 		}
 	})
 
-	t.Run("identity with user-id", func(t *testing.T) {
+	// The default line names the organization and nothing else. The ids the
+	// response also carries are what --verbose is for, and keeping them out of
+	// this line is the point of the command.
+	t.Run("identity shows the org name, not its id", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
-		srv := statusServer(t, 200, `{"email":"dev@acme.com","tenant":"Acme","user_id":"u-1"}`)
+		srv := statusServer(t, 200,
+			`{"email":"dev@acme.com","organization":"Acme","id":"u-1","tenant_id":"t-9","role":"admin"}`)
 		defer srv.Close()
 		c := whoamiTestCmd()
 		mustSet(t, c, "api-url", srv.URL)
@@ -49,15 +54,42 @@ func TestRunWhoami(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 		})
-		if !strings.Contains(out, "dev@acme.com") || !strings.Contains(out, "user-id: u-1") {
+		if !strings.Contains(out, "dev@acme.com  (org: Acme)") {
 			t.Errorf("out=%q", out)
+		}
+		for _, hidden := range []string{"u-1", "t-9", "admin"} {
+			if strings.Contains(out, hidden) {
+				t.Errorf("default output leaked %q: %q", hidden, out)
+			}
 		}
 	})
 
-	t.Run("identity without user-id falls back", func(t *testing.T) {
+	t.Run("verbose adds the role and the ids", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
-		// tenant empty, tenant_id populated -> falls back to tenant_id
+		srv := statusServer(t, 200,
+			`{"email":"dev@acme.com","organization":"Acme","id":"u-1","tenant_id":"t-9","role":"admin"}`)
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		mustSet(t, c, "verbose", "true")
+		out := capture(t, func() {
+			if err := runWhoami(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		for _, want := range []string{"role:", "admin", "user-id:", "u-1", "org-id:", "t-9"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in %q", want, out)
+			}
+		}
+	})
+
+	t.Run("identity without an org name falls back to the id", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		// organization empty, tenant_id populated -> falls back to tenant_id,
+		// because the raw id still beats printing "(org: )".
 		srv := statusServer(t, 200, `{"username":"dev","tenant_id":"t-9"}`)
 		defer srv.Close()
 		c := whoamiTestCmd()
@@ -75,7 +107,7 @@ func TestRunWhoami(t *testing.T) {
 	t.Run("json output", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
-		srv := statusServer(t, 200, `{"email":"dev@acme.com","tenant":"Acme"}`)
+		srv := statusServer(t, 200, `{"email":"dev@acme.com","organization":"Acme"}`)
 		defer srv.Close()
 		c := whoamiTestCmd()
 		mustSet(t, c, "api-url", srv.URL)

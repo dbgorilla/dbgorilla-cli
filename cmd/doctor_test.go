@@ -73,7 +73,7 @@ func TestCheckAuthAndAPI(t *testing.T) {
 
 	t.Run("200 -> identity", func(t *testing.T) {
 		isolate(t)
-		srv := statusServer(t, 200, `{"email":"a@b.com","tenant":"Acme"}`)
+		srv := statusServer(t, 200, `{"email":"a@b.com","organization":"Acme"}`)
 		defer srv.Close()
 		c := baseCmd()
 		mustSet(t, c, "api-url", srv.URL)
@@ -234,7 +234,7 @@ func TestRunDoctor(t *testing.T) {
 			t.Fatal(err)
 		}
 		srv := routingServer(t, map[string]resp{
-			authPath: {200, `{"email":"dev@acme.com","tenant":"Acme"}`},
+			authPath: {200, `{"email":"dev@acme.com","organization":"Acme"}`},
 			mcpPath:  {200, `"a-key"`},
 		})
 		defer srv.Close()
@@ -280,7 +280,7 @@ func TestRunDoctor(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
 		srv := routingServer(t, map[string]resp{
-			authPath: {200, `{"email":"dev@acme.com","tenant":"Acme"}`},
+			authPath: {200, `{"email":"dev@acme.com","organization":"Acme"}`},
 			mcpPath:  {200, `"a-key"`},
 		})
 		defer srv.Close()
