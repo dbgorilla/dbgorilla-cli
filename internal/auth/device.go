@@ -219,7 +219,7 @@ func warnOffDomainEndpoints(w io.Writer, apiURL string, endpointHosts ...string)
 			continue
 		}
 		warned[host] = true
-		fmt.Fprintf(w, "warning: sign-in is handled by %s, which is outside %s -- press Ctrl-C now if that is not your identity provider.\n",
+		_, _ = fmt.Fprintf(w, "warning: sign-in is handled by %s, which is outside %s -- press Ctrl-C now if that is not your identity provider.\n",
 			host, describeDomain(apiHost))
 	}
 }
