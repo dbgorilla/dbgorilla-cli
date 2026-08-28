@@ -90,7 +90,7 @@ func printIdentityDetail(w io.Writer, u api.UserInfo) {
 		{"org-id", u.TenantID},
 	} {
 		if row.value != "" {
-			fmt.Fprintf(w, "  %-9s %s\n", row.label+":", row.value)
+			_, _ = fmt.Fprintf(w, "  %-9s %s\n", row.label+":", row.value)
 		}
 	}
 }
