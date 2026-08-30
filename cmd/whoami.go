@@ -13,7 +13,6 @@ import (
 
 func init() {
 	whoamiCmd.Flags().Bool("json", false, "Emit identity as JSON")
-	whoamiCmd.Flags().BoolP("verbose", "v", false, "Also show the role and the internal user/organization ids")
 	rootCmd.AddCommand(whoamiCmd)
 }
 
@@ -53,20 +52,25 @@ func runWhoami(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	// Nobody runs `whoami` in passing. It is run to answer an identity
+	// question, and the answer usually gets pasted into a support thread or an
+	// issue -- where the ids are the part that identifies anything. Putting
+	// them behind a flag would mean the one command whose whole job is
+	// answering "who am I" gives back the least useful half unless you already
+	// know a flag exists. So this command prints all of it, and `login` --
+	// which people run to get past it, not to read it -- prints one line.
 	fmt.Println(style.Success(describeIdentity(u)))
-	if verbose, _ := cmd.Flags().GetBool("verbose"); verbose {
-		printIdentityDetail(cmd.OutOrStdout(), u)
-	}
+	printIdentityDetail(cmd.OutOrStdout(), u)
 	return nil
 }
 
 // describeIdentity renders the one-line answer to "who am I": the account,
 // and the organization by the name its members call it.
 //
-// The organization's UUID is deliberately not here. It is an internal
+// The organization's UUID is deliberately not on this line. It is an internal
 // identifier, it is the same on every line of every command, and it crowds
-// out the one word the reader is actually looking for. It stays available
-// under --verbose and in `whoami --json`.
+// out the one word the reader is actually looking for. `whoami` prints it
+// underneath on its own line; `login` keeps it under --verbose.
 //
 // Deployments old enough not to send an organization name fall back to the
 // UUID, because showing the raw id beats showing "(org: )".

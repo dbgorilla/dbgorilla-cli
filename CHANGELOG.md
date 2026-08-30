@@ -22,9 +22,14 @@
 
 ### Added
 
-- `login --verbose` and `whoami --verbose` print the role, the user id and the
-  organization id under the identity line. These are the values a support
-  conversation asks for; the default output stays to the name.
+- `whoami` now prints the role, the user id and the organization id underneath
+  the identity line, without being asked. `whoami` is run to answer an identity
+  question, and the answer is usually pasted into a support thread or an issue,
+  where the ids are the part that identifies anything. Scripts parsing the
+  single line this command used to print should move to `whoami --json`.
+
+- `login --verbose` prints the same block on success. `login` is run to get past
+  it rather than to read it, so its default stays one line.
 
 ### Changed
 
