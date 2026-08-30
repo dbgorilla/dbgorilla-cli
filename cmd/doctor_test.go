@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
+	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 )
 
 type resp struct {
@@ -41,7 +44,7 @@ func TestCheckAuthAndAPI(t *testing.T) {
 		isolate(t)
 		c := baseCmd()
 		mustSet(t, c, "api-url", "http://127.0.0.1:1") // nothing listening
-		ok, msg := checkAuthAndAPI(c, "http://127.0.0.1:1")
+		ok, msg, _ := checkAuthAndAPI(c, "http://127.0.0.1:1")
 		if ok || !strings.Contains(msg, "cannot reach") {
 			t.Fatalf("ok=%v msg=%q", ok, msg)
 		}
@@ -53,7 +56,7 @@ func TestCheckAuthAndAPI(t *testing.T) {
 		defer srv.Close()
 		c := baseCmd()
 		mustSet(t, c, "api-url", srv.URL)
-		ok, msg := checkAuthAndAPI(c, srv.URL)
+		ok, msg, _ := checkAuthAndAPI(c, srv.URL)
 		if ok || !strings.Contains(msg, "token expired") {
 			t.Fatalf("ok=%v msg=%q", ok, msg)
 		}
@@ -65,7 +68,7 @@ func TestCheckAuthAndAPI(t *testing.T) {
 		defer srv.Close()
 		c := baseCmd()
 		mustSet(t, c, "api-url", srv.URL)
-		ok, msg := checkAuthAndAPI(c, srv.URL)
+		ok, msg, _ := checkAuthAndAPI(c, srv.URL)
 		if ok || !strings.Contains(msg, "HTTP 500") {
 			t.Fatalf("ok=%v msg=%q", ok, msg)
 		}
@@ -77,11 +80,76 @@ func TestCheckAuthAndAPI(t *testing.T) {
 		defer srv.Close()
 		c := baseCmd()
 		mustSet(t, c, "api-url", srv.URL)
-		ok, msg := checkAuthAndAPI(c, srv.URL)
+		ok, msg, _ := checkAuthAndAPI(c, srv.URL)
 		if !ok || !strings.Contains(msg, "a@b.com") || !strings.Contains(msg, "Acme") {
 			t.Fatalf("ok=%v msg=%q", ok, msg)
 		}
 	})
+
+	// doctor prints the role and the ids under the check line, and gets them
+	// from this return value rather than by parsing the message back apart.
+	t.Run("200 -> the identity itself, not just the rendered line", func(t *testing.T) {
+		isolate(t)
+		srv := statusServer(t, 200,
+			`{"email":"a@b.com","organization":"Acme","id":"u-1","tenant_id":"t-9","role":"admin"}`)
+		defer srv.Close()
+		c := baseCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		ok, _, u := checkAuthAndAPI(c, srv.URL)
+		if !ok {
+			t.Fatal("want ok")
+		}
+		if u.Role != "admin" || u.UserID != "u-1" || u.TenantID != "t-9" {
+			t.Errorf("identity not returned: %+v", u)
+		}
+	})
+
+	// Nothing here should read the identity on a failure path, but a zero value
+	// is a safer thing to hand back than a half-populated struct from a body
+	// that was never a UserInfo.
+	t.Run("failure returns a zero identity", func(t *testing.T) {
+		isolate(t)
+		srv := statusServer(t, 500, `{"email":"a@b.com","role":"admin"}`)
+		defer srv.Close()
+		c := baseCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		ok, _, u := checkAuthAndAPI(c, srv.URL)
+		if ok {
+			t.Fatal("want failure")
+		}
+		if u != (api.UserInfo{}) {
+			t.Errorf("want zero identity, got %+v", u)
+		}
+	})
+}
+
+// The identity block has to indent to where printCheck's detail text starts,
+// or it reads as three more checks rather than as detail about the last one.
+func TestIdentityDetailLinesUpWithTheCheckDetail(t *testing.T) {
+	u := api.UserInfo{Role: "admin", UserID: "u-1", TenantID: "t-9"}
+	var buf bytes.Buffer
+	printIdentityDetail(&buf, u, strings.Repeat(" ", checkDetailColumn))
+
+	// Measure where printCheck actually starts its detail, by running it rather
+	// than by restating its format string here. A test that restated the format
+	// would keep passing after someone widened the name column.
+	// Colour codes take no columns on screen but do count in len(), so measure
+	// with them off. Restored afterwards: this is process-global.
+	defer style.SetEnabled(style.Enabled())
+	style.SetEnabled(false)
+	line := strings.TrimRight(capture(t, func() {
+		printCheck("Auth + API", true, "MARKER")
+	}), "\n")
+	if got := strings.Index(line, "MARKER"); got != checkDetailColumn {
+		t.Fatalf("checkDetailColumn is %d but printCheck starts detail at %d (%q)",
+			checkDetailColumn, got, line)
+	}
+
+	for _, l := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if got := len(l) - len(strings.TrimLeft(l, " ")); got != checkDetailColumn {
+			t.Errorf("line %q indents %d, want %d", l, got, checkDetailColumn)
+		}
+	}
 }
 
 func TestCheckMCPKey(t *testing.T) {
