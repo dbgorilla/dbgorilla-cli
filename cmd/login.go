@@ -130,7 +130,7 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Printf("%s\n", style.Success("✓ Signed in as "+describeIdentity(u)))
 	if verbose, _ := cmd.Flags().GetBool("verbose"); verbose {
-		printIdentityDetail(cmd.OutOrStdout(), u)
+		printIdentityDetail(cmd.OutOrStdout(), u, "  ")
 	}
 
 	// Persist URL + insecure so subsequent commands don't need the flags.

@@ -31,6 +31,11 @@
 - `login --verbose` prints the same block on success. `login` is run to get past
   it rather than to read it, so its default stays one line.
 
+- `doctor` prints the role and the ids under its `Auth + API` line, indented to
+  line up with it. `doctor` output exists to be pasted into a support thread,
+  and it was the one place that showed who you are without showing anything
+  that identifies the account.
+
 ### Changed
 
 - `whoami --json` matches the API's own field names: `tenant` is now

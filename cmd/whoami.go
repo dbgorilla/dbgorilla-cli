@@ -60,7 +60,7 @@ func runWhoami(cmd *cobra.Command, _ []string) error {
 	// know a flag exists. So this command prints all of it, and `login` --
 	// which people run to get past it, not to read it -- prints one line.
 	fmt.Println(style.Success(describeIdentity(u)))
-	printIdentityDetail(cmd.OutOrStdout(), u)
+	printIdentityDetail(cmd.OutOrStdout(), u, "  ")
 	return nil
 }
 
@@ -87,14 +87,19 @@ func describeIdentity(u api.UserInfo) string {
 // support conversation does. Each line is omitted when the deployment does
 // not supply it, so an older backend prints a shorter block rather than a
 // block full of blanks.
-func printIdentityDetail(w io.Writer, u api.UserInfo) {
+//
+// indent is the prefix for each line. Callers pass whatever lines the block up
+// under the identity above it: a plain two spaces for `whoami`, and the width
+// of doctor's check gutter for `doctor`, where anything at the left margin
+// would read as another check rather than as detail about the last one.
+func printIdentityDetail(w io.Writer, u api.UserInfo, indent string) {
 	for _, row := range []struct{ label, value string }{
 		{"role", u.Role},
 		{"user-id", u.UserID},
 		{"org-id", u.TenantID},
 	} {
 		if row.value != "" {
-			_, _ = fmt.Fprintf(w, "  %-9s %s\n", row.label+":", row.value)
+			_, _ = fmt.Fprintf(w, "%s%-9s %s\n", indent, row.label+":", row.value)
 		}
 	}
 }
