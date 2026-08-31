@@ -108,7 +108,7 @@ func TestFetchMCPKey_ResponseShapes(t *testing.T) {
 			}))
 			defer srv.Close()
 			client := api.NewClient(srv.URL)
-			got, err := fetchMCPKey(client)
+			got, err := fetchMCPKey(client, true)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
 			}
@@ -117,6 +117,93 @@ func TestFetchMCPKey_ResponseShapes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// keyServer answers the MCP-key resource per method and records which methods
+// it was asked for, so a test can assert that a mint did or did not happen.
+// Minting is destructive, so "did we POST" is the behaviour under test, not an
+// implementation detail.
+func keyServer(t *testing.T, perMethod map[string]resp) (*httptest.Server, *[]string) {
+	t.Helper()
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method)
+		got, ok := perMethod[r.Method]
+		if !ok {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(got.code)
+		_, _ = w.Write([]byte(got.body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
+func TestFetchMCPKey_KeepsTheKeyOtherClientsAreAlreadyUsing(t *testing.T) {
+	t.Run("an existing key is reused, never re-minted", func(t *testing.T) {
+		srv, seen := keyServer(t, map[string]resp{
+			http.MethodGet: {200, `"already-issued"`},
+		})
+		got, err := fetchMCPKey(api.NewClient(srv.URL), false)
+		if err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		if got != "already-issued" {
+			t.Errorf("key=%q, want the key that was already issued", got)
+		}
+		// The assertion that matters: a POST here would have silently broken
+		// every other client holding this key.
+		for _, m := range *seen {
+			if m == http.MethodPost {
+				t.Fatalf("minted a new key when one already existed; methods=%v", *seen)
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		get  resp
+	}{
+		{"no key issued yet", resp{404, ""}},
+		{"the read is not available", resp{405, ""}},
+		{"the read answers with nothing", resp{200, `""`}},
+	} {
+		t.Run(tc.name+" -> mint one", func(t *testing.T) {
+			srv, seen := keyServer(t, map[string]resp{
+				http.MethodGet:  tc.get,
+				http.MethodPost: {200, `"freshly-minted"`},
+			})
+			got, err := fetchMCPKey(api.NewClient(srv.URL), false)
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if got != "freshly-minted" {
+				t.Errorf("key=%q, want the newly minted key", got)
+			}
+			if len(*seen) != 2 || (*seen)[1] != http.MethodPost {
+				t.Errorf("want a read then a mint, got methods=%v", *seen)
+			}
+		})
+	}
+
+	t.Run("--rotate-key mints even though a key exists", func(t *testing.T) {
+		srv, seen := keyServer(t, map[string]resp{
+			http.MethodPost: {200, `"rotated"`},
+		})
+		got, err := fetchMCPKey(api.NewClient(srv.URL), true)
+		if err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		if got != "rotated" {
+			t.Errorf("key=%q, want the rotated key", got)
+		}
+		// Reading first would be pointless work when the answer is discarded.
+		if len(*seen) != 1 {
+			t.Errorf("want the mint alone, got methods=%v", *seen)
+		}
+	})
 }
 
 func TestBuildAdminAllowlistOutput(t *testing.T) {

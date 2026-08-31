@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -48,6 +49,8 @@ func init() {
 		"Print the IT-facing snippet for the Claude admin console allowlist.")
 	setupIDECmd.Flags().Bool("no-claude-cli", false,
 		"For Claude Code: skip `claude mcp add`, write the config file directly.")
+	setupIDECmd.Flags().Bool("rotate-key", false,
+		"Issue a new MCP API key, invalidating the current one everywhere it is configured.")
 	rootCmd.AddCommand(setupIDECmd)
 }
 
@@ -123,9 +126,14 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 	client := newAPIClient(cmd)
 
 	// --print-key still needs the API key but no per-client work.
-	mcpKey, err := fetchMCPKey(client)
+	rotate, _ := cmd.Flags().GetBool("rotate-key")
+	mcpKey, err := fetchMCPKey(client, rotate)
 	if err != nil {
 		return err
+	}
+	if rotate {
+		fmt.Println(style.Warn("Issued a new MCP API key. Any client still holding the previous"))
+		fmt.Println(style.Warn("one will be rejected until you re-run setup-ide there."))
 	}
 	if printKey, _ := cmd.Flags().GetBool("print-key"); printKey {
 		fmt.Println(mcpKey)
@@ -460,29 +468,66 @@ func printAdminAllowlist(apiURL string) {
 	fmt.Println("Once approved, each developer runs `dbgorilla setup-ide` to wire it in.")
 }
 
-// fetchMCPKey calls the backend to get or create an MCP API key. Response
-// is a JSON-encoded string (e.g. `"abc123"`); falls back to a bare string
-// for resilience against minor backend variations.
-func fetchMCPKey(client *api.Client) (string, error) {
-	body, status, err := client.Post("/api/v0_1/client_api_keys/mcp-api-access", nil)
+// mcpKeyPath is the backend resource holding this user's MCP API key.
+const mcpKeyPath = "/api/v0_1/client_api_keys/mcp-api-access"
+
+// fetchMCPKey returns the MCP API key to configure clients with, reusing the
+// existing one unless the caller explicitly asked for a new one.
+//
+// The order of those two operations is the whole point. Minting is
+// destructive: the backend issues a fresh secret and overwrites the stored
+// one, and there is exactly one key per user, so a mint does not "get or
+// create" -- it rotates, and every copy of the previous key stops working the
+// instant it returns. Anyone who had the key in a second editor, or in
+// anything outside their editor, would find it rejected later, at use, with
+// nothing at setup time having said so. Reading first means the ordinary case
+// -- configuring one more client, or re-running this command -- leaves every
+// client already configured still working.
+func fetchMCPKey(client *api.Client, rotate bool) (string, error) {
+	if !rotate {
+		if key := lookupMCPKey(client); key != "" {
+			return key, nil
+		}
+	}
+	body, status, err := client.Post(mcpKeyPath, nil)
 	if err != nil {
 		return "", fmt.Errorf("cannot mint MCP key: %w", err)
 	}
 	if status != 200 {
 		return "", fmt.Errorf("backend returned HTTP %d when minting MCP key:\n%s", status, string(body))
 	}
+	if key := decodeMCPKey(body); key != "" {
+		return key, nil
+	}
+	return "", fmt.Errorf("backend returned empty MCP key body")
+}
+
+// lookupMCPKey returns the key already issued to this user, or "" when there
+// is nothing to reuse.
+//
+// Failures are deliberately swallowed rather than returned. Every reason this
+// can fail -- unreachable deployment, expired token, a backend too old to
+// serve the read -- is a reason the mint that follows will fail too, and the
+// mint produces the message the user can act on. Returning an error here
+// would replace that with a worse one for the same underlying problem.
+func lookupMCPKey(client *api.Client) string {
+	body, status, err := client.Get(mcpKeyPath)
+	if err != nil || status != http.StatusOK {
+		return ""
+	}
+	return decodeMCPKey(body)
+}
+
+// decodeMCPKey reads the key out of a response body. It is a JSON-encoded
+// string (e.g. `"abc123"`); the bare-string fallback is resilience against
+// minor backend variations. Returns "" when there is no key in the body.
+func decodeMCPKey(body []byte) string {
 	if len(body) == 0 {
-		return "", fmt.Errorf("backend returned empty MCP key body")
+		return ""
 	}
 	var raw string
-	if err := json.Unmarshal(body, &raw); err == nil && raw != "" {
-		return raw, nil
+	if err := json.Unmarshal(body, &raw); err == nil {
+		return raw
 	}
-	// Fallback: trim quotes from a bare string with no JSON envelope.
-	s := strings.TrimSpace(string(body))
-	s = strings.Trim(s, `"`)
-	if s == "" {
-		return "", fmt.Errorf("backend returned empty MCP key body")
-	}
-	return s, nil
+	return strings.Trim(strings.TrimSpace(string(body)), `"`)
 }
