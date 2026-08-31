@@ -97,6 +97,35 @@ func TestRunLogin_AutoDetectFallsBackToPassword(t *testing.T) {
 	}
 }
 
+// The counterpart to the assertion above: the ids are not gone, just not in
+// the way. Someone who wants them on sign-in asks for them.
+func TestRunLogin_VerboseAddsTheIdentifiers(t *testing.T) {
+	isolate(t)
+	srv := routingServer(t, map[string]resp{
+		deviceConfigPath: {404, ""},
+		tokenPath:        {200, `{"access_token":"tok","refresh_token":"r","expires_in":3600}`},
+		authPath: {200,
+			`{"email":"dev@acme.com","organization":"Acme","id":"u-1","tenant_id":"t-9","role":"admin"}`},
+	})
+	defer srv.Close()
+	setStdin(t, "s3cret\n")
+	c := loginTestCmd()
+	mustSet(t, c, "api-url", srv.URL)
+	_ = c.Flags().Set("tenant", "acme")
+	_ = c.Flags().Set("account", "dev")
+	mustSet(t, c, "verbose", "true")
+	var err error
+	out := capture(t, func() { err = runLogin(c, nil) })
+	if err != nil {
+		t.Fatalf("err=%v\n%s", err, out)
+	}
+	for _, want := range []string{"role:", "admin", "user-id:", "u-1", "org-id:", "t-9"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+}
+
 func TestRunLogin_PasswordAuthFailure(t *testing.T) {
 	isolate(t)
 	srv := routingServer(t, map[string]resp{

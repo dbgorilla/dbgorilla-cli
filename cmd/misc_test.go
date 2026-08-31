@@ -89,6 +89,28 @@ func TestRunWhoami(t *testing.T) {
 		}
 	})
 
+	// Neither name nor id. The line says who you are and stops, rather than
+	// printing an empty "(org: )" that reads like something failed.
+	t.Run("identity with no organization at all omits the org entirely", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 200, `{"username":"dev"}`)
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		out := capture(t, func() {
+			if err := runWhoami(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if strings.Contains(out, "org") {
+			t.Errorf("want no org fragment at all, got %q", out)
+		}
+		if !strings.Contains(out, "dev") {
+			t.Errorf("want the account named, got %q", out)
+		}
+	})
+
 	t.Run("json output", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
