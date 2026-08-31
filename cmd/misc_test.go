@@ -37,10 +37,16 @@ func TestRunWhoami(t *testing.T) {
 		}
 	})
 
-	t.Run("identity with user-id", func(t *testing.T) {
+	// `whoami` answers an identity question, and the answer usually gets
+	// pasted somewhere. The organization gets named on the top line, because
+	// the name is what a person recognises; the ids follow underneath,
+	// because the ids are what actually identifies the account to support.
+	// Both, unprompted -- no flag to discover.
+	t.Run("identity leads with the org name and then gives the ids", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
-		srv := statusServer(t, 200, `{"email":"dev@acme.com","tenant":"Acme","user_id":"u-1"}`)
+		srv := statusServer(t, 200,
+			`{"email":"dev@acme.com","organization":"Acme","id":"u-1","tenant_id":"t-9","role":"admin"}`)
 		defer srv.Close()
 		c := whoamiTestCmd()
 		mustSet(t, c, "api-url", srv.URL)
@@ -49,15 +55,26 @@ func TestRunWhoami(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 		})
-		if !strings.Contains(out, "dev@acme.com") || !strings.Contains(out, "user-id: u-1") {
+		if !strings.Contains(out, "dev@acme.com  (org: Acme)") {
 			t.Errorf("out=%q", out)
+		}
+		for _, want := range []string{"role:", "admin", "user-id:", "u-1", "org-id:", "t-9"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in %q", want, out)
+			}
+		}
+		// The name has to come before the ids, or the line a person reads is
+		// buried under the lines they do not.
+		if strings.Index(out, "(org: Acme)") > strings.Index(out, "org-id:") {
+			t.Errorf("ids printed before the name: %q", out)
 		}
 	})
 
-	t.Run("identity without user-id falls back", func(t *testing.T) {
+	t.Run("identity without an org name falls back to the id", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
-		// tenant empty, tenant_id populated -> falls back to tenant_id
+		// organization empty, tenant_id populated -> falls back to tenant_id,
+		// because the raw id still beats printing "(org: )".
 		srv := statusServer(t, 200, `{"username":"dev","tenant_id":"t-9"}`)
 		defer srv.Close()
 		c := whoamiTestCmd()
@@ -72,10 +89,32 @@ func TestRunWhoami(t *testing.T) {
 		}
 	})
 
+	// Neither name nor id. The line says who you are and stops, rather than
+	// printing an empty "(org: )" that reads like something failed.
+	t.Run("identity with no organization at all omits the org entirely", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 200, `{"username":"dev"}`)
+		defer srv.Close()
+		c := whoamiTestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		out := capture(t, func() {
+			if err := runWhoami(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if strings.Contains(out, "org") {
+			t.Errorf("want no org fragment at all, got %q", out)
+		}
+		if !strings.Contains(out, "dev") {
+			t.Errorf("want the account named, got %q", out)
+		}
+	})
+
 	t.Run("json output", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
-		srv := statusServer(t, 200, `{"email":"dev@acme.com","tenant":"Acme"}`)
+		srv := statusServer(t, 200, `{"email":"dev@acme.com","organization":"Acme"}`)
 		defer srv.Close()
 		c := whoamiTestCmd()
 		mustSet(t, c, "api-url", srv.URL)
