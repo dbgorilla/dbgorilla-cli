@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"net/http"
 	"os"
 	"os/exec"
 	"slices"
@@ -406,17 +407,70 @@ func TestRunUpgrade(t *testing.T) {
 }
 
 func TestLogout(t *testing.T) {
-	isolate(t)
-	writeTokens(t)
-	out := capture(t, func() {
-		if err := logoutCmd.RunE(logoutCmd, nil); err != nil {
-			t.Fatalf("err=%v", err)
+	// runLogout drives logoutCmd against a stub deployment. The api-url flag
+	// has to come from a command we build, because logoutCmd only inherits the
+	// real root's persistent flags when it is executed through it -- and
+	// without it, logout would resolve the built-in production URL and try to
+	// revoke a key there.
+	runLogout := func(t *testing.T, apiURL string) string {
+		t.Helper()
+		c := baseCmd()
+		mustSet(t, c, "api-url", apiURL)
+		return capture(t, func() {
+			if err := logoutCmd.RunE(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+
+	t.Run("clears the tokens and revokes the MCP key", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv, seen := keyServer(t, map[string]resp{http.MethodDelete: {200, ""}})
+
+		out := runLogout(t, srv.URL)
+		if !strings.Contains(out, "Signed out.") {
+			t.Errorf("out=%q", out)
+		}
+		if tok, _ := auth.LoadTokens(); tok != nil {
+			t.Error("tokens should be cleared after logout")
+		}
+		// Clearing the tokens alone used to leave the MCP key live, so an
+		// editor configured with it kept working after sign-out.
+		if len(*seen) != 1 || (*seen)[0] != http.MethodDelete {
+			t.Errorf("want the key revoked, got methods=%v", *seen)
 		}
 	})
-	if !strings.Contains(out, "Signed out.") {
-		t.Errorf("out=%q", out)
-	}
-	if tok, _ := auth.LoadTokens(); tok != nil {
-		t.Error("tokens should be cleared after logout")
-	}
+
+	t.Run("a deployment that cannot revoke does not block signing out", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv, _ := keyServer(t, map[string]resp{http.MethodDelete: {503, ""}})
+
+		out := runLogout(t, srv.URL)
+		if !strings.Contains(out, "Signed out.") {
+			t.Errorf("sign-out must still complete:\n%s", out)
+		}
+		if tok, _ := auth.LoadTokens(); tok != nil {
+			t.Error("tokens should be cleared even when the revoke fails")
+		}
+		// And it has to say so -- a key the user believes is dead is worse
+		// than one they know is live.
+		if !strings.Contains(out, "still valid") {
+			t.Errorf("failure to revoke must be reported:\n%s", out)
+		}
+	})
+
+	t.Run("no session means nothing to revoke", func(t *testing.T) {
+		isolate(t)
+		srv, seen := keyServer(t, map[string]resp{})
+
+		out := runLogout(t, srv.URL)
+		if !strings.Contains(out, "Signed out.") {
+			t.Errorf("out=%q", out)
+		}
+		if len(*seen) != 0 {
+			t.Errorf("logged-out logout should call nothing, got methods=%v", *seen)
+		}
+	})
 }

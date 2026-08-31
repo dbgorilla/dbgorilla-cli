@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dbgorilla/dbgorilla-cli/internal/auth"
 	"github.com/dbgorilla/dbgorilla-cli/internal/ide"
 	"github.com/spf13/cobra"
 )
@@ -509,6 +510,131 @@ func TestRunSetupIDE_InstallsTheSkillForClaudeCode(t *testing.T) {
 		}
 		if _, err := os.Stat(skillPath(home)); !os.IsNotExist(err) {
 			t.Errorf("dry-run wrote the skill (err=%v)", err)
+		}
+	})
+}
+
+// --- setup-ide --remove ---------------------------------------------------
+
+func TestRunSetupIDE_Remove(t *testing.T) {
+	// configure runs a real setup-ide first, so removal is tested against
+	// what the command actually writes rather than against a fixture.
+	configure := func(t *testing.T, client string) {
+		t.Helper()
+		srv := statusServer(t, 200, `"mcp-key-xyz"`)
+		defer srv.Close()
+		c := setupIDETestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		_ = c.Flags().Set("client", client)
+		capture(t, func() {
+			if err := runSetupIDE(c, nil); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+		})
+	}
+	remove := func(t *testing.T, client string, extra ...string) string {
+		t.Helper()
+		c := setupIDETestCmd()
+		_ = c.Flags().Set("client", client)
+		_ = c.Flags().Set("remove", "true")
+		for _, f := range extra {
+			_ = c.Flags().Set(f, "true")
+		}
+		return capture(t, func() {
+			if err := runSetupIDE(c, nil); err != nil {
+				t.Fatalf("remove: %v", err)
+			}
+		})
+	}
+
+	t.Run("takes the entry back out", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		configure(t, "cursor")
+		path, err := (&ide.Cursor{}).ConfigPath(ide.ScopeUser)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.ReadFile(path)
+		if err != nil || !strings.Contains(string(before), "dbgorilla") {
+			t.Fatalf("setup did not write the entry: %v", err)
+		}
+		out := remove(t, "cursor")
+		if !strings.Contains(out, "Removed the dbgorilla entry") {
+			t.Errorf("out=%q", out)
+		}
+		after, _ := os.ReadFile(path)
+		if strings.Contains(string(after), "dbgorilla") {
+			t.Errorf("entry survived:\n%s", after)
+		}
+	})
+
+	t.Run("takes the skill with it for Claude Code", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		stubLookPath(t, false) // no `claude` binary; exercise the file path
+		configure(t, "claude-code")
+		skill := filepath.Join(home, ".claude", "skills", "dbgorilla", "SKILL.md")
+		if _, err := os.Stat(skill); err != nil {
+			t.Fatalf("setup did not install the skill: %v", err)
+		}
+		out := remove(t, "claude-code")
+		if !strings.Contains(out, "Removed the DBGorilla skill") {
+			t.Errorf("out=%q", out)
+		}
+		if _, err := os.Stat(skill); !os.IsNotExist(err) {
+			t.Errorf("skill survived (err=%v)", err)
+		}
+	})
+
+	t.Run("works without a session or a reachable deployment", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		configure(t, "cursor")
+		if err := auth.ClearTokens(); err != nil {
+			t.Fatal(err)
+		}
+		// No api-url set and no token: removal is local work and must not ask
+		// for either. Anything that reached out would fail here.
+		out := remove(t, "cursor")
+		if !strings.Contains(out, "Removed the dbgorilla entry") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("removing twice says so rather than failing", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		configure(t, "cursor")
+		remove(t, "cursor")
+		if out := remove(t, "cursor"); !strings.Contains(out, "Nothing to remove") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("dry-run changes nothing", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		configure(t, "cursor")
+		path, _ := (&ide.Cursor{}).ConfigPath(ide.ScopeUser)
+		before, _ := os.ReadFile(path)
+		out := remove(t, "cursor", "dry-run")
+		if !strings.Contains(out, "Would remove the dbgorilla entry") {
+			t.Errorf("out=%q", out)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Error("dry-run modified the config")
+		}
+	})
+
+	t.Run("says the key is still live", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		configure(t, "cursor")
+		// Removing an editor entry must not imply the credential is gone --
+		// it is shared with every other editor and outlives this command.
+		if out := remove(t, "cursor"); !strings.Contains(out, "logout") {
+			t.Errorf("removal should point at logout for the key:\n%s", out)
 		}
 	})
 }

@@ -51,6 +51,8 @@ func init() {
 		"For Claude Code: skip `claude mcp add`, write the config file directly.")
 	setupIDECmd.Flags().Bool("rotate-key", false,
 		"Issue a new MCP API key, invalidating the current one everywhere it is configured.")
+	setupIDECmd.Flags().Bool("remove", false,
+		"Undo setup: strip the dbgorilla MCP entry (and skill) from the selected clients.")
 	rootCmd.AddCommand(setupIDECmd)
 }
 
@@ -69,6 +71,13 @@ Supported writable clients:
 Detect-only clients (printed manual instructions):
   claude-desktop  (HTTP MCP requires Settings -> Connectors UI flow)
 
+For Claude Code, this also installs a short DBGorilla skill, so the agent
+knows to check the live database through these tools before reasoning about
+it from the source alone.
+
+Use --remove to undo all of that for the selected clients. It touches only
+local files and leaves the API key alone; dbgorilla logout revokes the key.
+
 Use --print-admin-allowlist to get the IT-facing snippet to send to
 whoever manages your Claude admin console (app.claude.com / Team or
 Enterprise tiers).`,
@@ -81,6 +90,13 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 	if listClients, _ := cmd.Flags().GetBool("list-clients"); listClients {
 		printClientList()
 		return nil
+	}
+
+	// --remove is pure local file work: it needs no deployment URL, no token
+	// and no API key, and it has to keep working after `logout` or after the
+	// deployment has gone away. Short-circuit before anything asks for those.
+	if remove, _ := cmd.Flags().GetBool("remove"); remove {
+		return runRemoveIDE(cmd)
 	}
 
 	apiURL, err := requireAPIURL(cmd)
@@ -271,6 +287,103 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 	if failed > 0 {
 		return fmt.Errorf("%d client(s) failed to configure", failed)
 	}
+	return nil
+}
+
+// runRemoveIDE undoes what setup-ide wrote: the MCP entry for each selected
+// client, and the skill where one was installed.
+//
+// It stops short of revoking the API key. The key is one per user and shared
+// by every client, so revoking it here would break the editors the user did
+// not name -- the same failure this command exists to make reversible. The key
+// is `logout`'s to destroy, because that is the point at which the user is
+// saying they are done with the deployment entirely.
+func runRemoveIDE(cmd *cobra.Command) error {
+	clientFlag, _ := cmd.Flags().GetStringSlice("client")
+	selected, err := resolveSelectedAdapters(clientFlag)
+	if err != nil {
+		return err
+	}
+	scopeFlag, _ := cmd.Flags().GetString("scope")
+	scopeOverride, err := parseScope(scopeFlag)
+	if err != nil {
+		return err
+	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+	removed, failed := 0, 0
+	for _, adapter := range selected {
+		writer, ok := adapter.(ide.Writer)
+		if !ok {
+			continue // detect-only clients were configured by hand; leave them alone
+		}
+		fmt.Println()
+		fmt.Println(style.Info(fmt.Sprintf("--- %s ---", writer.Name())))
+		scope := pickScope(writer, scopeOverride)
+
+		if dryRun {
+			if path, err := writer.ConfigPath(scope); err == nil {
+				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
+			}
+			if writer.Slug() == "claude-code" {
+				if dir, err := ide.SkillDir(scope); err == nil {
+					fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
+				}
+			}
+			removed++
+			continue
+		}
+
+		// Claude Code's own CLI owns the registration when it is present, so
+		// ask it to undo it. A "not found" is the outcome we want anyway, so
+		// the result is ignored; the file sweep below catches whatever the CLI
+		// did not, including entries written when it was not installed.
+		if writer.Slug() == "claude-code" {
+			if _, lookErr := lookPath("claude"); lookErr == nil {
+				_ = execCommand("claude", "mcp", "remove", ide.MCPServerName).Run()
+			}
+		}
+
+		res, err := ide.RemoveMCPConfig(writer, scope)
+		switch {
+		case err != nil:
+			failed++
+			fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
+			continue
+		case res.Absent:
+			fmt.Printf("Nothing to remove: %s\n", res.Path)
+		default:
+			fmt.Println(style.Success("✓ Removed the dbgorilla entry from " + res.Path))
+			fmt.Printf("  Backup: %s\n", res.BackupPath)
+		}
+
+		if writer.Slug() == "claude-code" {
+			skill, err := ide.RemoveSkill(scope)
+			switch {
+			case err != nil:
+				fmt.Println(style.Warn(fmt.Sprintf("Could not remove the DBGorilla skill: %v", err)))
+			case skill.Absent:
+				// Nothing installed; say nothing.
+			default:
+				fmt.Println(style.Success("✓ Removed the DBGorilla skill"))
+			}
+		}
+		removed++
+	}
+
+	fmt.Println()
+	if removed == 0 && failed == 0 {
+		fmt.Println("No supported clients selected; nothing to remove.")
+		return nil
+	}
+	summary := fmt.Sprintf("Done. Cleaned: %d, Failed: %d.", removed, failed)
+	if failed > 0 {
+		fmt.Println(style.Error(summary))
+		return fmt.Errorf("%d client(s) could not be cleaned up", failed)
+	}
+	fmt.Println(style.Success(summary))
+	fmt.Println()
+	fmt.Println("The MCP API key is untouched and still valid. `dbgorilla logout` revokes it.")
 	return nil
 }
 
