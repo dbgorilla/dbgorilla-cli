@@ -189,6 +189,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			if _, lookErr := lookPath("claude"); lookErr == nil {
 				if dryRun {
 					fmt.Println(style.Info(fmt.Sprintf("Would run: claude mcp add (scope=%s, name=dbgorilla)", scope)))
+					installSkill(scope, dryRun)
 					configured++
 					continue
 				}
@@ -198,6 +199,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 					continue
 				}
 				fmt.Println(style.Success("✓ Registered via `claude mcp add`"))
+				installSkill(scope, dryRun)
 				configured++
 				continue
 			}
@@ -242,6 +244,9 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			if res.BackupPath != "" {
 				fmt.Printf("  Backup: %s\n", res.BackupPath)
 			}
+		}
+		if writer.Slug() == "claude-code" {
+			installSkill(scope, dryRun)
 		}
 		configured++
 	}
@@ -466,6 +471,35 @@ func printAdminAllowlist(apiURL string) {
 	fmt.Println("  4. Save")
 	fmt.Println()
 	fmt.Println("Once approved, each developer runs `dbgorilla setup-ide` to wire it in.")
+}
+
+// installSkill drops the DBGorilla skill next to the MCP registration, so
+// Claude Code knows to consult the tools it now has rather than waiting to be
+// told. Wiring up the server without it leaves the tools present but unused
+// on exactly the work they exist for.
+//
+// A failure here is reported and stepped over. The MCP registration is the
+// part the user asked for and it has already succeeded; an unwritable skills
+// directory should not turn a working setup into a failed command.
+func installSkill(scope ide.Scope, dryRun bool) {
+	if dryRun {
+		dir, err := ide.SkillDir(scope)
+		if err == nil {
+			fmt.Println(style.Info("Would install the DBGorilla skill to: " + dir))
+		}
+		return
+	}
+	res, err := ide.InstallSkill(scope)
+	switch {
+	case err != nil:
+		fmt.Println(style.Warn(fmt.Sprintf("Could not install the DBGorilla skill: %v", err)))
+	case res.NoOp:
+		fmt.Printf("Skill up to date: %s\n", res.Path)
+	case res.Updated:
+		fmt.Println(style.Success("✓ Updated the DBGorilla skill: " + res.Path))
+	default:
+		fmt.Println(style.Success("✓ Installed the DBGorilla skill: " + res.Path))
+	}
 }
 
 // mcpKeyPath is the backend resource holding this user's MCP API key.

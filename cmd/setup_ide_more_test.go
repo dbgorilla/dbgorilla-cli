@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,6 +22,8 @@ func setupIDETestCmd() *cobra.Command {
 	c.Flags().Bool("print-key", false, "")
 	c.Flags().Bool("print-admin-allowlist", false, "")
 	c.Flags().Bool("no-claude-cli", false, "")
+	c.Flags().Bool("rotate-key", false, "")
+	c.Flags().Bool("remove", false, "")
 	return c
 }
 
@@ -391,6 +395,120 @@ func TestRunSetupIDE_ClaudeCodeViaCLI(t *testing.T) {
 		}
 		if !strings.Contains(out, "Created") {
 			t.Errorf("fallback should write the config file:\n%s", out)
+		}
+	})
+}
+
+// --- the DBGorilla skill --------------------------------------------------
+
+func TestRunSetupIDE_InstallsTheSkillForClaudeCode(t *testing.T) {
+	skillPath := func(home string) string {
+		return filepath.Join(home, ".claude", "skills", "dbgorilla", "SKILL.md")
+	}
+
+	t.Run("via claude mcp add", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		stubLookPath(t, true)
+		stubExec(t, "", 0)
+		srv := statusServer(t, 200, `"mcp-key-xyz"`)
+		defer srv.Close()
+		c := setupIDETestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		_ = c.Flags().Set("client", "claude-code")
+		out := capture(t, func() {
+			if err := runSetupIDE(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Installed the DBGorilla skill") {
+			t.Errorf("out=%q", out)
+		}
+		if _, err := os.Stat(skillPath(home)); err != nil {
+			t.Errorf("skill not on disk: %v", err)
+		}
+	})
+
+	t.Run("also on the config-file fallback", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		stubLookPath(t, false) // no `claude` binary -> direct write
+		srv := statusServer(t, 200, `"mcp-key-xyz"`)
+		defer srv.Close()
+		c := setupIDETestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		_ = c.Flags().Set("client", "claude-code")
+		capture(t, func() {
+			if err := runSetupIDE(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if _, err := os.Stat(skillPath(home)); err != nil {
+			t.Errorf("skill not on disk: %v", err)
+		}
+	})
+
+	t.Run("re-running says so instead of churning the file", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		stubLookPath(t, true)
+		stubExec(t, "", 0)
+		srv := statusServer(t, 200, `"mcp-key-xyz"`)
+		defer srv.Close()
+		run := func() string {
+			c := setupIDETestCmd()
+			mustSet(t, c, "api-url", srv.URL)
+			_ = c.Flags().Set("client", "claude-code")
+			return capture(t, func() {
+				if err := runSetupIDE(c, nil); err != nil {
+					t.Fatalf("err=%v", err)
+				}
+			})
+		}
+		run()
+		if out := run(); !strings.Contains(out, "Skill up to date") {
+			t.Errorf("second run should report a no-op:\n%s", out)
+		}
+	})
+
+	t.Run("no skill for clients that have no such thing", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		srv := statusServer(t, 200, `"mcp-key-xyz"`)
+		defer srv.Close()
+		c := setupIDETestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		_ = c.Flags().Set("client", "cursor")
+		capture(t, func() {
+			if err := runSetupIDE(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if _, err := os.Stat(skillPath(home)); !os.IsNotExist(err) {
+			t.Errorf("configuring another client installed a Claude skill (err=%v)", err)
+		}
+	})
+
+	t.Run("dry-run writes nothing", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		stubLookPath(t, true)
+		srv := statusServer(t, 200, `"mcp-key-xyz"`)
+		defer srv.Close()
+		c := setupIDETestCmd()
+		mustSet(t, c, "api-url", srv.URL)
+		_ = c.Flags().Set("client", "claude-code")
+		_ = c.Flags().Set("dry-run", "true")
+		out := capture(t, func() {
+			if err := runSetupIDE(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Would install the DBGorilla skill") {
+			t.Errorf("out=%q", out)
+		}
+		if _, err := os.Stat(skillPath(home)); !os.IsNotExist(err) {
+			t.Errorf("dry-run wrote the skill (err=%v)", err)
 		}
 	})
 }
