@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -624,6 +626,29 @@ func TestRunSetupIDE_Remove(t *testing.T) {
 		}
 		if after, _ := os.ReadFile(path); string(after) != string(before) {
 			t.Error("dry-run modified the config")
+		}
+	})
+
+	t.Run("hands the Claude CLI the scope it registered under", func(t *testing.T) {
+		// `claude mcp remove` defaults to local scope. Without an explicit
+		// --scope it looks in the wrong place for a user- or project-scoped
+		// entry, reports "not found", and leaves it there -- so the argv is
+		// the behaviour under test, not an implementation detail.
+		isolate(t)
+		writeTokens(t)
+		stubLookPath(t, false)
+		configure(t, "claude-code")
+		stubLookPath(t, true) // now pretend `claude` is installed
+		orig := execCommand
+		var gotArgs []string
+		execCommand = func(_ string, args ...string) *exec.Cmd {
+			gotArgs = args
+			return exec.Command(os.Args[0], "-test.run=TestHelperProcess", "--")
+		}
+		t.Cleanup(func() { execCommand = orig })
+		remove(t, "claude-code")
+		if want := []string{"mcp", "remove", "--scope", "user", "dbgorilla"}; !slices.Equal(gotArgs, want) {
+			t.Errorf("args = %v, want %v", gotArgs, want)
 		}
 	})
 

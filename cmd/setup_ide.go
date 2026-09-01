@@ -338,9 +338,14 @@ func runRemoveIDE(cmd *cobra.Command) error {
 		// ask it to undo it. A "not found" is the outcome we want anyway, so
 		// the result is ignored; the file sweep below catches whatever the CLI
 		// did not, including entries written when it was not installed.
+		//
+		// --scope has to be passed and has to match the one setup used: `claude
+		// mcp remove` defaults to local scope, so a scopeless call looks in the
+		// wrong place for anything registered with `--scope user` or `project`
+		// and reports "not found" while the entry stays.
 		if writer.Slug() == "claude-code" {
 			if _, lookErr := lookPath("claude"); lookErr == nil {
-				_ = execCommand("claude", "mcp", "remove", ide.MCPServerName).Run()
+				_ = execCommand("claude", "mcp", "remove", "--scope", string(scope), ide.MCPServerName).Run()
 			}
 		}
 
