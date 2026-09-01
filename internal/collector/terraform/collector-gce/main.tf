@@ -52,8 +52,14 @@ resource "google_project_iam_member" "collector" {
     "roles/monitoring.viewer",
     "roles/cloudsql.viewer",
     "roles/cloudsql.client",
+    # cloudsql.client alone does NOT permit IAM database login; instanceUser
+    # carries cloudsql.instances.login (verified live: without it the server
+    # rejects with "Cloud SQL IAM service account authentication failed").
+    "roles/cloudsql.instanceUser",
     "roles/alloydb.viewer",
     "roles/alloydb.client",
+    # The AlloyDB analogue of instanceUser, required for IAM auth there.
+    "roles/alloydb.databaseUser",
     "roles/logging.logWriter",
   ])
   project = local.project
@@ -127,7 +133,7 @@ locals {
       -v /var/lib/dbgorilla/collector.toml:/etc/dbgorilla/collector.toml:ro \
       -e DBG_SERVER_SECRET="$DBG_SERVER_SECRET" \
       -e DBG_DB_PASSWORD="$DBG_DB_PASSWORD" \
-      "${var.collector_image}" --config /etc/dbgorilla/collector.toml
+      "${var.collector_image}" --config-file /etc/dbgorilla/collector.toml
   EOT
 }
 
