@@ -66,6 +66,12 @@ type State struct {
 	StackName string `json:"stack_name,omitempty"`
 	Region    string `json:"region,omitempty"`
 
+	// gcp target (Region above is shared: both clouds pin the region the
+	// install captured, so status/uninstall can't be orphaned by a changed
+	// default).
+	Project        string `json:"project,omitempty"`
+	DeploymentName string `json:"deployment_name,omitempty"`
+
 	// helm target -- the collector runs in-cluster as a Helm release this CLI
 	// never started, so there is no container to inspect and no stack to query.
 	// The release coordinates are recorded anyway so `status` can say where it
@@ -81,6 +87,9 @@ type State struct {
 // IsAWS reports whether this collector was deployed to AWS (vs local Docker).
 // An empty Target predates the field and means Docker.
 func (s *State) IsAWS() bool { return s.Target == "aws" }
+
+// IsGCP reports whether this collector was deployed to Google Cloud.
+func (s *State) IsGCP() bool { return s.Target == "gcp" }
 
 // IsHelm reports whether this collector was provisioned for an in-cluster Helm
 // install. Recording it is what stops `dbg collector list` showing the collector
