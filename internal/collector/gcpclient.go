@@ -167,6 +167,39 @@ func gcpGetJSON(ctx context.Context, cfg gcpConfig, rawURL string, out any) erro
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// gcpPostJSON performs an authenticated POST (body may be nil) and decodes the
+// JSON response into out — for API calls that answer inline rather than with a
+// long-running operation.
+func gcpPostJSON(ctx context.Context, cfg gcpConfig, rawURL string, body, out any) error {
+	payload := ""
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		payload = string(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, strings.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := cfg.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return gcpAPIError(rawURL, resp)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 // gcpAPIError shapes a non-2xx API response into an error with Google's own
 // message extracted (it usually names the fix: the missing role, the exact
 // resource, the API to enable).
