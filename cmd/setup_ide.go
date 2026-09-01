@@ -339,13 +339,19 @@ func runRemoveIDE(cmd *cobra.Command) error {
 		// the result is ignored; the file sweep below catches whatever the CLI
 		// did not, including entries written when it was not installed.
 		//
-		// --scope has to be passed and has to match the one setup used: `claude
-		// mcp remove` defaults to local scope, so a scopeless call looks in the
-		// wrong place for anything registered with `--scope user` or `project`
-		// and reports "not found" while the entry stays.
+		// DO NOT ADD --scope HERE. It looks like an oversight next to the
+		// `--scope`-passing add in claudeMCPAdd, and it is not. Scopeless is
+		// the BROAD call: `claude mcp remove --help` says "if not specified,
+		// removes from whichever scope it exists in", and running it confirms
+		// that (measured against claude v2.1.233). Passing --scope narrows it
+		// to one scope, so a project-scoped entry survives a remove that
+		// resolved to user scope -- and the file sweep below reads the same
+		// `scope` variable, so it misses the same way and is no safety net.
+		// This exact "fix" was made and reverted once; the scopeless form is
+		// deliberate.
 		if writer.Slug() == "claude-code" {
 			if _, lookErr := lookPath("claude"); lookErr == nil {
-				_ = execCommand("claude", "mcp", "remove", "--scope", string(scope), ide.MCPServerName).Run()
+				_ = execCommand("claude", "mcp", "remove", ide.MCPServerName).Run()
 			}
 		}
 
