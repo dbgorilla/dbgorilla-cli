@@ -72,8 +72,10 @@ type Component struct {
 
 // Provider is [component.provider]. self_hosted carries no extra fields; the
 // aws_rds / aws_aurora providers add the region and the instance or cluster id
-// (exactly one of the two); cnpg adds the Kubernetes namespace and
-// CloudNativePG Cluster name.
+// (exactly one of the two, per the collector's provider contract); the
+// cloud_sql / alloydb providers add the GCP project + region and the instance
+// (cloud_sql) or cluster + primary instance (alloydb); cnpg adds the
+// Kubernetes namespace and CloudNativePG Cluster name.
 type Provider struct {
 	Type       string `toml:"type"`
 	Region     string `toml:"region,omitempty"`
@@ -81,8 +83,14 @@ type Provider struct {
 	ClusterID  string `toml:"cluster_id,omitempty"`
 	RoleArn    string `toml:"role_arn,omitempty"`
 
-	// cnpg. Namespace + Cluster are the whole of the component's identity: the
-	// collector keys it as cnpg:{namespace}/{cluster}, deliberately excluding the
+	// gcp (cloud_sql / alloydb) — these are the collector's own TOML keys, which
+	// differ from the AWS spellings above (instance, not instance_id). alloydb
+	// pairs Instance with the shared Cluster field below.
+	Project  string `toml:"project,omitempty"`
+	Instance string `toml:"instance,omitempty"`
+
+	// cnpg (Namespace + the shared Cluster below); they are the whole of the
+	// component's identity: the collector keys it as cnpg:{namespace}/{cluster}, deliberately excluding the
 	// instance so a failover -- the event the operator exists to handle -- does
 	// not re-key the component and detach its history.
 	Namespace string `toml:"namespace,omitempty"`
