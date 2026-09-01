@@ -126,6 +126,7 @@ it misses in the same invocation rather than a second one.
 | `dbg config get <key>` | Show the resolved value and where it came from. |
 | `dbg config unset <key>` | Clear a key from the user config. |
 | `dbg version` | Print version info. |
+| `dbg upgrade` | Update the CLI. Runs `brew upgrade` for Homebrew installs; otherwise prints the command for your install method — it does not overwrite itself. |
 | `dbg completion <shell>` | Print a tab-completion script. See [Shell completion](#shell-completion). |
 
 ## Collector on AWS
