@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -677,6 +679,195 @@ func TestRunSetupIDE_Remove(t *testing.T) {
 		// it is shared with every other editor and outlives this command.
 		if out := remove(t, "cursor"); !strings.Contains(out, "logout") {
 			t.Errorf("removal should point at logout for the key:\n%s", out)
+		}
+	})
+}
+
+func TestRunSetupIDE_RotateKeyWarnsWhatItBreaks(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv, seen := keyServer(t, map[string]resp{http.MethodPost: {200, `"rotated-key"`}})
+	c := setupIDETestCmd()
+	mustSet(t, c, "api-url", srv.URL)
+	_ = c.Flags().Set("client", "cursor")
+	_ = c.Flags().Set("rotate-key", "true")
+	out := capture(t, func() {
+		if err := runSetupIDE(c, nil); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	if len(*seen) != 1 || (*seen)[0] != http.MethodPost {
+		t.Errorf("want a mint and nothing else, got methods=%v", *seen)
+	}
+	// Rotating breaks every other client silently unless the command says so.
+	if !strings.Contains(out, "Issued a new MCP API key") ||
+		!strings.Contains(out, "re-run setup-ide") {
+		t.Errorf("rotation must state its consequence:\n%s", out)
+	}
+}
+
+func TestRunSetupIDE_RemoveEdgeCases(t *testing.T) {
+	removeCmd := func(client string) *cobra.Command {
+		c := setupIDETestCmd()
+		if client != "" {
+			_ = c.Flags().Set("client", client)
+		}
+		_ = c.Flags().Set("remove", "true")
+		return c
+	}
+
+	t.Run("an unknown client is named, not ignored", func(t *testing.T) {
+		isolate(t)
+		err := runSetupIDE(removeCmd("nope"), nil)
+		if err == nil || !strings.Contains(err.Error(), "unknown client(s): nope") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("an invalid scope is rejected", func(t *testing.T) {
+		isolate(t)
+		c := removeCmd("cursor")
+		mustSet(t, c, "scope", "global")
+		if err := runSetupIDE(c, nil); err == nil || !strings.Contains(err.Error(), "invalid --scope") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("a client we never configured for them is left alone", func(t *testing.T) {
+		isolate(t)
+		// Claude Desktop is set up by hand through its own UI. We did not
+		// write that entry, so we must not claim to have removed it.
+		out := capture(t, func() {
+			if err := runSetupIDE(removeCmd("claude-desktop"), nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "nothing to remove") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("a config it cannot rewrite is a failure, not a silent pass", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		path, err := (&ide.Cursor{}).ConfigPath(ide.ScopeUser)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		// Comments mean we refuse to rewrite the file at all.
+		if err := os.WriteFile(path, []byte("// mine\n{\"mcpServers\":{\"dbgorilla\":{}}}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		out := capture(t, func() { runErr = runSetupIDE(removeCmd("cursor"), nil) })
+		if runErr == nil || !strings.Contains(runErr.Error(), "could not be cleaned up") {
+			t.Fatalf("err=%v", runErr)
+		}
+		if !strings.Contains(out, "Failed: 1") {
+			t.Errorf("summary should count the failure:\n%s", out)
+		}
+		if data, _ := os.ReadFile(path); !strings.Contains(string(data), "// mine") {
+			t.Error("the refused file was rewritten anyway")
+		}
+	})
+
+	t.Run("Claude Code's own CLI is asked to undo its registration", func(t *testing.T) {
+		// Pinning argv proves only that we send what we meant to send, never
+		// that sending it does the right thing -- the real-binary test in
+		// TestRunSetupIDE_Remove covers that, and skips where `claude` is not
+		// installed. This one runs everywhere, and its job is narrower: it
+		// fails the moment someone adds --scope to the remove, which is the
+		// regression the call site's comment warns about.
+		isolate(t)
+		writeTokens(t)
+		stubLookPath(t, true)
+		var gotArgs []string
+		orig := execCommand
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			gotArgs = append([]string{name}, args...)
+			return exec.Command("true")
+		}
+		t.Cleanup(func() { execCommand = orig })
+
+		capture(t, func() {
+			if err := runSetupIDE(removeCmd("claude-code"), nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		want := []string{"claude", "mcp", "remove", "dbgorilla"}
+		if !slices.Equal(gotArgs, want) {
+			t.Errorf("ran %v, want %v", gotArgs, want)
+		}
+	})
+
+	t.Run("dry-run names the skill it would remove", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		stubLookPath(t, false)
+		c := removeCmd("claude-code")
+		_ = c.Flags().Set("dry-run", "true")
+		out := capture(t, func() {
+			if err := runSetupIDE(c, nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "Would remove the DBGorilla skill") ||
+			!strings.Contains(out, filepath.Join(home, ".claude", "skills", "dbgorilla")) {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("nothing selected says so rather than reporting success", func(t *testing.T) {
+		isolate(t)
+		stubDetect(t) // no clients on this machine
+		out := capture(t, func() {
+			if err := runSetupIDE(removeCmd(""), nil); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
+		if !strings.Contains(out, "nothing to remove") {
+			t.Errorf("out=%q", out)
+		}
+	})
+}
+
+func TestInstallSkill_ReportsWhatItDid(t *testing.T) {
+	t.Run("an older copy is reported as updated", func(t *testing.T) {
+		home := isolate(t)
+		dir := filepath.Join(home, ".claude", "skills", "dbgorilla")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("from an older release\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		out := capture(t, func() { installSkill(ide.ScopeUser, false) })
+		if !strings.Contains(out, "Updated the DBGorilla skill") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("a failure is a warning, not a failed setup", func(t *testing.T) {
+		isolate(t)
+		// No resolvable home: the skill cannot be placed. The MCP registration
+		// has already succeeded, so this must not read as the command failing.
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+		out := capture(t, func() { installSkill(ide.ScopeUser, false) })
+		if !strings.Contains(out, "Could not install the DBGorilla skill") {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("dry-run says nothing when it cannot resolve a path", func(t *testing.T) {
+		isolate(t)
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+		if out := capture(t, func() { installSkill(ide.ScopeUser, true) }); out != "" {
+			t.Errorf("out=%q, want silence", out)
 		}
 	})
 }

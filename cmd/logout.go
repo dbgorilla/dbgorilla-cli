@@ -47,9 +47,6 @@ func revokeMCPKey(cmd *cobra.Command) {
 	if _, err := requireLogin(); err != nil {
 		return // no session to revoke anything with
 	}
-	if _, err := requireAPIURL(cmd); err != nil {
-		return
-	}
 	_, status, err := newAPIClient(cmd).Delete(mcpKeyPath)
 	switch {
 	case err != nil:

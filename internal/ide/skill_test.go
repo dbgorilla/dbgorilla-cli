@@ -130,3 +130,57 @@ func TestRemoveSkill(t *testing.T) {
 		t.Errorf("the skills directory itself was removed: %v", err)
 	}
 }
+
+// TestSkillPathFailures covers the cases where the skill cannot be placed at
+// all. Each is reported rather than silently skipped, because a skill the user
+// believes is installed and is not is worse than a visible failure.
+func TestSkillPathFailures(t *testing.T) {
+	noHome := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+	}
+
+	t.Run("no resolvable home directory", func(t *testing.T) {
+		noHome(t)
+		if _, err := SkillDir(ScopeUser); err == nil {
+			t.Error("want an error when the home directory cannot be resolved")
+		}
+		if _, err := InstallSkill(ScopeUser); err == nil {
+			t.Error("install should surface the same failure")
+		}
+		if _, err := RemoveSkill(ScopeUser); err == nil {
+			t.Error("removal should surface the same failure")
+		}
+	})
+
+	t.Run("the skill path is not a file", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		// Something else already owns the name. Reading it fails with
+		// something that is not "does not exist", so we must not treat it as
+		// a fresh install and write over it.
+		if err := os.MkdirAll(filepath.Join(home, ".claude", "skills", "dbgorilla", "SKILL.md"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InstallSkill(ScopeUser); err == nil {
+			t.Error("want an error when the skill path is not a readable file")
+		}
+	})
+
+	t.Run("the skills directory is not a directory", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		if err := os.MkdirAll(filepath.Join(home, ".claude"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".claude", "skills"), []byte("not a dir"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InstallSkill(ScopeUser); err == nil {
+			t.Error("want an error when the skills path cannot be a directory")
+		}
+	})
+}

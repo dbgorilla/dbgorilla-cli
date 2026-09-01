@@ -461,6 +461,24 @@ func TestLogout(t *testing.T) {
 		}
 	})
 
+	t.Run("an unreachable deployment does not block signing out", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+
+		// Nothing listening: the revoke fails at the transport, before any
+		// status code exists to interpret.
+		out := runLogout(t, "http://127.0.0.1:1")
+		if !strings.Contains(out, "Signed out.") {
+			t.Errorf("sign-out must still complete:\n%s", out)
+		}
+		if tok, _ := auth.LoadTokens(); tok != nil {
+			t.Error("tokens should be cleared even when the deployment is down")
+		}
+		if !strings.Contains(out, "still valid") {
+			t.Errorf("failure to revoke must be reported:\n%s", out)
+		}
+	})
+
 	t.Run("no session means nothing to revoke", func(t *testing.T) {
 		isolate(t)
 		srv, seen := keyServer(t, map[string]resp{})

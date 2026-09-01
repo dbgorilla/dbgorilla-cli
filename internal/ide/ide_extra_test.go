@@ -708,3 +708,52 @@ func TestRemoveMCPConfig(t *testing.T) {
 		}
 	})
 }
+
+// unresolvableWriter cannot say where its config lives. Real adapters hit this
+// when the working directory or home directory cannot be resolved.
+type unresolvableWriter struct{ *stubWriter }
+
+func (unresolvableWriter) ConfigPath(Scope) (string, error) {
+	return "", fmt.Errorf("no such directory")
+}
+
+func TestRemoveMCPConfig_RefusesRatherThanGuessing(t *testing.T) {
+	t.Run("the config path cannot be resolved", func(t *testing.T) {
+		if _, err := RemoveMCPConfig(unresolvableWriter{&stubWriter{}}, ScopeUser); err == nil {
+			t.Error("want the path-resolution failure surfaced")
+		}
+	})
+
+	t.Run("a .jsonc config is refused on its extension alone", func(t *testing.T) {
+		// Refused before it is even read: a .jsonc file is allowed to have
+		// comments, and rewriting it as plain JSON would delete them.
+		path := filepath.Join(t.TempDir(), "settings.jsonc")
+		if err := os.WriteFile(path, []byte(`{"mcpServers":{"dbgorilla":{}}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RemoveMCPConfig(&stubWriter{configPath: path}, ScopeUser)
+		if !errors.Is(err, ErrJSONCRefused) {
+			t.Errorf("err=%v, want ErrJSONCRefused", err)
+		}
+		if data, _ := os.ReadFile(path); !strings.Contains(string(data), "dbgorilla") {
+			t.Error("the file was modified despite being refused")
+		}
+	})
+
+	t.Run("the config cannot be read", func(t *testing.T) {
+		// Something that is not a readable file sits where the config should
+		// be. That is not "nothing to remove" -- we do not know what is there,
+		// so we say so instead of reporting success.
+		dir := filepath.Join(t.TempDir(), "config.json")
+		if err := os.Mkdir(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		res, err := RemoveMCPConfig(&stubWriter{configPath: dir}, ScopeUser)
+		if err == nil {
+			t.Fatal("want a read failure surfaced")
+		}
+		if res.Absent || res.Removed {
+			t.Errorf("res=%+v, want neither Absent nor Removed", res)
+		}
+	})
+}
