@@ -39,7 +39,7 @@ func init() {
 	setupIDECmd.Flags().Bool("list-clients", false,
 		"List supported clients (and which are detected on this system).")
 	setupIDECmd.Flags().Bool("dry-run", false,
-		"Show what would be written without modifying any files.")
+		"Show what would be written. Changes nothing and calls no API: your existing MCP key is left alone.")
 	setupIDECmd.Flags().Bool("print-config", false,
 		"Print the MCP entry for each selected client (no write, but still calls the API for the key).")
 	setupIDECmd.Flags().Bool("print-key", false,
@@ -73,6 +73,21 @@ Enterprise tiers).`,
 }
 
 func runSetupIDE(cmd *cobra.Command, _ []string) error {
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	printKey, _ := cmd.Flags().GetBool("print-key")
+
+	// Minting is a rotation, not a read: the backend replaces the caller's
+	// single MCP key in place with no grace period, so every client already
+	// holding the old one stops authenticating. --print-key exists to hand you
+	// a key, so it accepts that cost; --dry-run exists to promise the
+	// opposite, and the two cannot both be honoured. Validated up front, so
+	// the answer does not depend on which clients happen to be installed.
+	if dryRun && printKey {
+		return errors.New("--print-key cannot be combined with --dry-run: printing a key mints a " +
+			"new one, which revokes the key your editors are using.\n" +
+			"Run `dbgorilla setup-ide --print-key` on its own once you want that.")
+	}
+
 	// --list-clients works without auth or API URL -- it's pure local
 	// detection. Short-circuit before requireAPIURL.
 	if listClients, _ := cmd.Flags().GetBool("list-clients"); listClients {
@@ -120,21 +135,26 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	printConfig, _ := cmd.Flags().GetBool("print-config")
+	noClaudeCLI, _ := cmd.Flags().GetBool("no-claude-cli")
+
 	client := newAPIClient(cmd)
 
-	// --print-key still needs the API key but no per-client work.
-	mcpKey, err := fetchMCPKey(client)
-	if err != nil {
-		return err
+	// Nothing on the dry-run path renders the key -- every branch that would
+	// use it returns first. The placeholder is here so that if a future branch
+	// ever does reach it, a preview prints something obviously fake instead of
+	// silently costing the user their working key.
+	mcpKey := dryRunKeyPlaceholder
+	if !dryRun {
+		mcpKey, err = fetchMCPKey(client)
+		if err != nil {
+			return err
+		}
 	}
-	if printKey, _ := cmd.Flags().GetBool("print-key"); printKey {
+	if printKey {
 		fmt.Println(mcpKey)
 		return nil
 	}
-
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	printConfig, _ := cmd.Flags().GetBool("print-config")
-	noClaudeCLI, _ := cmd.Flags().GetBool("no-claude-cli")
 
 	configured := 0
 	hinted := 0
@@ -460,7 +480,17 @@ func printAdminAllowlist(apiURL string) {
 	fmt.Println("Once approved, each developer runs `dbgorilla setup-ide` to wire it in.")
 }
 
-// fetchMCPKey calls the backend to get or create an MCP API key. Response
+// dryRunKeyPlaceholder stands in for the MCP key on the --dry-run path, where
+// no key is minted. It is deliberately not key-shaped: if it ever reaches the
+// terminal, it should read as a gap in a preview rather than as a credential
+// someone might paste into a config file.
+const dryRunKeyPlaceholder = "<no key minted: dry run>"
+
+// fetchMCPKey calls the backend to mint an MCP API key. This ROTATES: the
+// backend replaces the caller's existing key in place, with no grace period,
+// so any client still holding the previous key stops authenticating. Only call
+// it on paths where the user has asked for a key or for a config containing
+// one -- never to satisfy a preview. Response
 // is a JSON-encoded string (e.g. `"abc123"`); falls back to a bare string
 // for resilience against minor backend variations.
 func fetchMCPKey(client *api.Client) (string, error) {

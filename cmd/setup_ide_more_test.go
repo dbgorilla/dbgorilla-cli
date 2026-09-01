@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -393,4 +396,97 @@ func TestRunSetupIDE_ClaudeCodeViaCLI(t *testing.T) {
 			t.Errorf("fallback should write the config file:\n%s", out)
 		}
 	})
+}
+
+// --- --dry-run must not mint a key -----------------------------------------
+
+// countingKeyServer replies like the MCP-key endpoint and records how many
+// requests it received. The count is the assertion: POSTing this endpoint
+// rotates the caller's key server-side, so a preview that reaches it revokes
+// the key every already-configured client is using.
+func countingKeyServer(t *testing.T, hits *int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		*hits++
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, `"mcp-key-xyz"`)
+	}))
+}
+
+func TestRunSetupIDE_DryRunMintsNoKey(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	hits := 0
+	srv := countingKeyServer(t, &hits)
+	defer srv.Close()
+
+	c := setupIDETestCmd()
+	mustSet(t, c, "api-url", srv.URL)
+	_ = c.Flags().Set("client", "cursor")
+	_ = c.Flags().Set("dry-run", "true")
+
+	out := capture(t, func() {
+		if err := runSetupIDE(c, nil); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	if hits != 0 {
+		t.Errorf("--dry-run made %d API call(s); it must make none, because minting "+
+			"rotates the user's MCP key and breaks every configured client", hits)
+	}
+	if !strings.Contains(out, "Would write MCP entry to") {
+		t.Errorf("dry-run should still preview the write:\n%s", out)
+	}
+	if strings.Contains(out, "mcp-key-xyz") {
+		t.Errorf("dry-run leaked a real key into its output:\n%s", out)
+	}
+}
+
+// The non-dry-run path is the control: it proves the counter is wired up, so a
+// zero above means "did not call" rather than "server never worked".
+func TestRunSetupIDE_RealRunMintsExactlyOneKey(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	hits := 0
+	srv := countingKeyServer(t, &hits)
+	defer srv.Close()
+
+	c := setupIDETestCmd()
+	mustSet(t, c, "api-url", srv.URL)
+	_ = c.Flags().Set("client", "cursor")
+
+	capture(t, func() {
+		if err := runSetupIDE(c, nil); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	if hits != 1 {
+		t.Errorf("a real run should mint exactly once, got %d", hits)
+	}
+}
+
+func TestRunSetupIDE_DryRunWithPrintKeyIsRefused(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	hits := 0
+	srv := countingKeyServer(t, &hits)
+	defer srv.Close()
+
+	c := setupIDETestCmd()
+	mustSet(t, c, "api-url", srv.URL)
+	_ = c.Flags().Set("dry-run", "true")
+	_ = c.Flags().Set("print-key", "true")
+
+	err := runSetupIDE(c, nil)
+	if err == nil {
+		t.Fatal("--print-key with --dry-run must be refused, not silently served a placeholder")
+	}
+	if !strings.Contains(err.Error(), "--print-key") {
+		t.Errorf("error should name the conflicting flag, got: %v", err)
+	}
+	if hits != 0 {
+		t.Errorf("the refusal must happen before any API call, got %d", hits)
+	}
 }
