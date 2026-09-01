@@ -68,11 +68,14 @@ func init() {
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Verify the DBGorilla CLI is configured correctly",
-	Long: `Runs four checks:
+	Long: `Runs three checks, plus one for each MCP client detected on this machine:
   - API URL configured (and where it came from)
   - Auth token valid (and identity)
-  - MCP API key minted
-  - Claude Code MCP entry present
+  - MCP API key present
+  - ...then one per detected client, checking its config entry
+
+The total therefore varies by machine. If the API URL cannot be resolved,
+the remaining checks are skipped -- everything else needs it.
 
 Exits 0 on green, 1 if anything is broken.`,
 	RunE: runDoctor,
