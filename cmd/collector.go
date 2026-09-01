@@ -166,8 +166,10 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return runInstallLocal(cmd)
 	case "aws", "fargate":
 		return runInstallAWS(cmd)
+	case "gcp":
+		return runInstallGCP(cmd)
 	default:
-		return fmt.Errorf("unknown --target %q (expected 'docker' or 'aws')", target)
+		return fmt.Errorf("unknown --target %q (expected 'docker', 'aws', or 'gcp')", target)
 	}
 }
 
@@ -1183,6 +1185,9 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	if st.IsAWS() {
 		return awsStatus(cmd, st)
 	}
+	if st.IsGCP() {
+		return gcpStatus(cmd, st)
+	}
 	if st.IsHelm() {
 		return helmStatus(cmd, st)
 	}
@@ -1433,6 +1438,9 @@ var logsCmd = &cobra.Command{
 		if st.IsAWS() {
 			return collector.TailLogs(collector.LogGroupFor(st.StackName), st.Region, follow)
 		}
+		if st.IsGCP() {
+			return tailGcpLogs(st.Project, st.DeploymentName, follow)
+		}
 		tail, _ := cmd.Flags().GetString("tail")
 		return dockerRunner(st).Logs(follow, tail)
 	},
@@ -1448,6 +1456,10 @@ var startCmd = &cobra.Command{
 		}
 		if st.IsAWS() {
 			if err := collector.ScaleService(st.StackName, st.Region, 1); err != nil {
+				return err
+			}
+		} else if st.IsGCP() {
+			if err := scaleGcpMig(st.Project, st.Region, st.DeploymentName, 1); err != nil {
 				return err
 			}
 		} else if err := dockerRunner(st).Start(); err != nil {
@@ -1470,6 +1482,10 @@ var stopCmd = &cobra.Command{
 			if err := collector.ScaleService(st.StackName, st.Region, 0); err != nil {
 				return err
 			}
+		} else if st.IsGCP() {
+			if err := scaleGcpMig(st.Project, st.Region, st.DeploymentName, 0); err != nil {
+				return err
+			}
 		} else if err := dockerRunner(st).Stop(); err != nil {
 			return err
 		}
@@ -1488,6 +1504,10 @@ var restartCmd = &cobra.Command{
 		}
 		if st.IsAWS() {
 			if err := collector.RestartService(st.StackName, st.Region); err != nil {
+				return err
+			}
+		} else if st.IsGCP() {
+			if err := restartGcpMig(st.Project, st.Region, st.DeploymentName); err != nil {
 				return err
 			}
 		} else if err := dockerRunner(st).Restart(); err != nil {
@@ -1520,6 +1540,11 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// so without this, every run would tear down a healthy container to
 	// install the image it is already running. Costs a pull on a run that then
 	// declines to do anything, which is the cheaper mistake.
+	// The gcp upgrade rides the update slice (the image is a template input
+	// read back off the deployment, like the aws parameter) — not wired yet.
+	if st.IsGCP() {
+		return errors.New("upgrade for the gcp target is not wired yet; run `dbg collector uninstall` and re-install with --image")
+	}
 	var target string
 	if st.IsAWS() {
 		// Over HTTP: the AWS path has no container runtime to pull with, and an
@@ -1631,10 +1656,11 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		return errors.New("aborted")
 	}
 
-	// Remove the runtime — an AWS CloudFormation stack, a local container, or
-	// (for an in-cluster release) nothing, because this CLI has no cluster
-	// credentials. Deprovisioning the identity below still applies: that is ours
-	// to do and leaving it minted is what orphans a collector.
+	// Remove the runtime — an AWS CloudFormation stack, a GCP Infrastructure
+	// Manager deployment, a local container, or (for an in-cluster release)
+	// nothing, because this CLI has no cluster credentials. Deprovisioning the
+	// identity below still applies: that is ours to do and leaving it minted is
+	// what orphans a collector.
 	if st.IsHelm() {
 		fmt.Println(style.Warn("⚠  This collector runs in your cluster and this CLI cannot remove it. Run:"))
 		fmt.Printf("     helm uninstall %s --namespace %s\n",
@@ -1645,6 +1671,12 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v", st.StackName, err)))
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Stack %s deletion started", st.StackName)))
+		}
+	} else if st.IsGCP() {
+		if err := deleteGcpDeployment(st.Project, st.Region, st.DeploymentName); err != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete deployment %s: %v", st.DeploymentName, err)))
+		} else {
+			fmt.Println(style.Success(fmt.Sprintf("✓ Deployment %s deleted", st.DeploymentName)))
 		}
 	} else {
 		runner := collector.Runner{Name: st.ContainerName}
