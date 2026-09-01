@@ -96,9 +96,22 @@ dbg setup-ide --dry-run                   # show what would be written
 dbg setup-ide --print-config --client X   # print the entry to paste manually
 ```
 
-The merge is safe: existing MCP servers and unrelated config keys are
-preserved, every write is preceded by a `<path>.backup.<timestamp>`, and
+Your config files are safe: existing MCP servers and unrelated config keys
+are preserved, every write is preceded by a `<path>.backup.<timestamp>`, and
 JSONC files (with `//` comments) are refused rather than overwritten.
+
+**Your MCP key is not.** Each run mints a new key, and you get one key: the
+new one replaces the old one immediately, with no overlap. Only the clients
+written on *this* run receive it, so running `setup-ide --client cursor`
+gives Cursor a working key and leaves every other editor you have already
+configured holding a revoked one. Those editors stop authenticating, and
+`dbg doctor` still reports them as OK, because it checks that a config entry
+exists and not that the key inside it is current.
+
+Configure every client you use in one run, and re-run that same command
+whenever you add another. With no `--client`, the default covers everything
+auto-detect can see (`--list-clients` shows what that is); name any editor
+it misses in the same invocation rather than a second one.
 
 ## Commands
 
