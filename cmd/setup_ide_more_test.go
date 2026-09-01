@@ -630,44 +630,48 @@ func TestRunSetupIDE_Remove(t *testing.T) {
 		}
 	})
 
-	t.Run("the scopeless CLI remove reaches a project-scoped entry", func(t *testing.T) {
-		// Runs the REAL `claude`, and skips when it is absent.
+	t.Run("--remove reaches a project-scoped entry via the real CLI", func(t *testing.T) {
+		// Drives runRemoveIDE with the REAL `claude`, and skips when it is absent.
 		//
-		// An earlier version of this test stubbed execCommand and asserted the
-		// argv the author expected. It passed while the code was wrong, because
-		// pinning argv proves only that the code sends what the author
-		// BELIEVED -- it cannot test the belief. The belief here was that
-		// `claude mcp remove` defaults to local scope; it does not, it searches
-		// every scope, and only running the binary shows that.
+		// Two earlier versions of this test were both unable to catch the bug
+		// they were written for, and the second one is why this comment is
+		// long. v1 stubbed execCommand and asserted the argv the author
+		// expected, so it proved only that the code sent what the author
+		// believed. v2 ran the real binary but drove `claude` directly rather
+		// than our code, so it tested the vendor: Cli reintroduced the exact
+		// regression and v2 still passed.
 		//
-		// So this asserts the property that actually matters: a project-scoped
-		// entry is gone afterwards. Add --scope back to the call under test and
-		// this fails; the stubbed version passed.
-		//
-		// It skips in CI -- no workflow installs `claude` -- so the guarantee
-		// is local-only, and a green CI run does not mean this ran.
+		// What has to be in the path is runRemoveIDE itself, with lookPath and
+		// execCommand UNSTUBBED. So: stage a project-scoped entry, then run
+		// --remove with no --scope, which resolves to DefaultScope()=user --
+		// the user-reachable case. The scopeless CLI call reaches the project
+		// entry anyway. Pass --scope and it does not, and neither does the file
+		// sweep that follows, because it reads the same `scope` variable.
 		bin, err := exec.LookPath("claude")
 		if err != nil {
 			t.Skip("claude CLI not installed; this asserts real binary behaviour")
 		}
-		home := isolate(t)
-		dir := t.TempDir()
-		run := func(args ...string) {
-			t.Helper()
-			c := exec.Command(bin, args...)
-			c.Dir, c.Env = dir, append(os.Environ(), "HOME="+home)
-			_ = c.Run() // a "not found" is a legitimate outcome for the remove
-		}
-		run("mcp", "add", "--scope", "project", "--transport", "http",
+		home := isolate(t)                  // empties PATH, so put claude back:
+		t.Setenv("PATH", filepath.Dir(bin)) // real lookPath("claude") must succeed
+		t.Chdir(t.TempDir())                // project scope is .mcp.json in cwd
+
+		stage := exec.Command(bin, "mcp", "add", "--scope", "project", "--transport", "http",
 			ide.MCPServerName, "https://example.test/mcp/")
-		cfg := filepath.Join(dir, ".mcp.json")
-		if b, err := os.ReadFile(cfg); err != nil || !strings.Contains(string(b), ide.MCPServerName) {
-			t.Skipf("could not stage a project-scoped entry (claude %s): %v", bin, err)
+		stage.Env = append(os.Environ(), "HOME="+home)
+		if out, err := stage.CombinedOutput(); err != nil {
+			t.Skipf("could not stage a project-scoped entry: %v\n%s", err, out)
 		}
-		run("mcp", "remove", ide.MCPServerName)
-		b, _ := os.ReadFile(cfg)
-		if strings.Contains(string(b), ide.MCPServerName) {
-			t.Errorf("scopeless remove left the project entry behind:\n%s", b)
+		cfg := ".mcp.json"
+		before, err := os.ReadFile(cfg)
+		if err != nil || !strings.Contains(string(before), ide.MCPServerName) {
+			t.Skipf("staging wrote no project entry (%v)", err)
+		}
+
+		// No --scope: pickScope resolves to ClaudeCode.DefaultScope() = user.
+		remove(t, "claude-code")
+
+		if after, _ := os.ReadFile(cfg); strings.Contains(string(after), ide.MCPServerName) {
+			t.Errorf("--remove left the project-scoped entry behind:\n%s", after)
 		}
 	})
 
