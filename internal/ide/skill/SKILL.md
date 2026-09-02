@@ -5,6 +5,9 @@ description: Use whenever the work touches a database - writing or reviewing SQL
 
 # Check DBGorilla before touching a database
 
+If the DBGorilla MCP tools are not connected, run `dbgorilla setup-ide` to
+connect them (or see <https://github.com/dbgorilla/dbgorilla-cli#readme>).
+
 The code in front of you does not tell you what the database is actually
 doing. DBGorilla does. Use its MCP tools first, then decide.
 
