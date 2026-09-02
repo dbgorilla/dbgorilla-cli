@@ -231,6 +231,83 @@ func WriteMCPConfig(w Writer, mcpURL, apiKey string, scope Scope) (WriteResult, 
 	return res, nil
 }
 
+// RemoveResult describes what RemoveMCPConfig did.
+type RemoveResult struct {
+	Path       string
+	BackupPath string // empty if nothing was written
+	Removed    bool   // an entry was present and is now gone
+	Absent     bool   // there was no entry to remove
+}
+
+// RemoveMCPConfig deletes the dbgorilla entry from the tool's config file at
+// the requested scope, and leaves everything else exactly as it was. It is the
+// inverse of WriteMCPConfig and keeps the same safety contract: read first,
+// back up before writing, preserve every other key, refuse JSONC rather than
+// destroy comments.
+//
+// A missing file, or a file with no dbgorilla entry in it, is not an error --
+// the caller asked for the entry to be gone and it is. This makes the command
+// safe to run twice and safe to run against a client that was never
+// configured.
+func RemoveMCPConfig(w Writer, scope Scope) (RemoveResult, error) {
+	res := RemoveResult{}
+	path, err := w.ConfigPath(scope)
+	if err != nil {
+		return res, err
+	}
+	res.Path = path
+
+	if isJSONCPath(path) {
+		return res, ErrJSONCRefused
+	}
+
+	data, readErr := os.ReadFile(path)
+	if os.IsNotExist(readErr) {
+		res.Absent = true
+		return res, nil
+	}
+	if readErr != nil {
+		return res, fmt.Errorf("cannot read existing config %s: %w", path, readErr)
+	}
+	if hasJSONCComments(data) {
+		return res, ErrJSONCRefused
+	}
+
+	existing := make(map[string]any)
+	if err := json.Unmarshal(data, &existing); err != nil {
+		return res, fmt.Errorf(
+			"cannot parse existing config at %s: %w\nRefusing to modify it.", path, err)
+	}
+
+	servers, _ := existing[w.TopLevelKey()].(map[string]any)
+	if _, present := servers[MCPServerName]; !present {
+		res.Absent = true
+		return res, nil
+	}
+	delete(servers, MCPServerName)
+	existing[w.TopLevelKey()] = servers
+
+	backupPath := fmt.Sprintf("%s.backup.%s", path, time.Now().Format("20060102-150405"))
+	if err := os.WriteFile(backupPath, data, 0600); err != nil {
+		return res, fmt.Errorf("cannot write backup to %s: %w", backupPath, err)
+	}
+	_ = os.Chmod(backupPath, 0600)
+	res.BackupPath = backupPath
+
+	merged, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return res, fmt.Errorf("cannot serialize config: %w", err)
+	}
+	// Still 0600: whatever else is in this file, the entry we just removed
+	// means it has held a bearer token.
+	if err := os.WriteFile(path, append(merged, '\n'), 0600); err != nil {
+		return res, fmt.Errorf("cannot write config to %s: %w", path, err)
+	}
+	_ = os.Chmod(path, 0600)
+	res.Removed = true
+	return res, nil
+}
+
 // isJSONCPath returns true if the path ends in .jsonc.
 func isJSONCPath(path string) bool {
 	return strings.HasSuffix(strings.ToLower(path), ".jsonc")

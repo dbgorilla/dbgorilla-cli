@@ -518,3 +518,27 @@ func TestRefreshViaKeycloakKeepsOldRefreshWhenOmitted(t *testing.T) {
 		t.Fatalf("expected prior refresh token retained, got %q", nt.RefreshToken)
 	}
 }
+
+func TestDelete(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	body, status, err := NewClient(srv.URL).Delete("/api/v0_1/thing")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/api/v0_1/thing" {
+		t.Errorf("sent %s %s, want DELETE /api/v0_1/thing", gotMethod, gotPath)
+	}
+	if status != http.StatusNoContent {
+		t.Errorf("status=%d, want 204", status)
+	}
+	// A 204 has no body; the caller must get an empty slice, not a nil-deref.
+	if len(body) != 0 {
+		t.Errorf("body=%q, want empty", body)
+	}
+}

@@ -168,6 +168,11 @@ func (c *Client) Post(path string, body any) ([]byte, int, error) {
 	return c.Do(http.MethodPost, path, body)
 }
 
+// Delete performs an authenticated DELETE request.
+func (c *Client) Delete(path string) ([]byte, int, error) {
+	return c.Do(http.MethodDelete, path, nil)
+}
+
 // --- Response types -------------------------------------------------------
 
 // UserInfo is the subset of GET /api/v0_1/auth/user that the CLI displays.

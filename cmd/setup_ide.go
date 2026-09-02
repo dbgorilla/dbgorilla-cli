@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -48,6 +49,10 @@ func init() {
 		"Print the IT-facing snippet for the Claude admin console allowlist.")
 	setupIDECmd.Flags().Bool("no-claude-cli", false,
 		"For Claude Code: skip `claude mcp add`, write the config file directly.")
+	setupIDECmd.Flags().Bool("rotate-key", false,
+		"Issue a new MCP API key, invalidating the current one everywhere it is configured.")
+	setupIDECmd.Flags().Bool("remove", false,
+		"Undo setup: strip the dbgorilla MCP entry (and skill) from the selected clients.")
 	rootCmd.AddCommand(setupIDECmd)
 }
 
@@ -66,6 +71,13 @@ Supported writable clients:
 Detect-only clients (printed manual instructions):
   claude-desktop  (HTTP MCP requires Settings -> Connectors UI flow)
 
+For Claude Code, this also installs a short DBGorilla skill, so the agent
+knows to check the live database through these tools before reasoning about
+it from the source alone.
+
+Use --remove to undo all of that for the selected clients. It touches only
+local files and leaves the API key alone; dbgorilla logout revokes the key.
+
 Use --print-admin-allowlist to get the IT-facing snippet to send to
 whoever manages your Claude admin console (app.claude.com / Team or
 Enterprise tiers).`,
@@ -78,6 +90,13 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 	if listClients, _ := cmd.Flags().GetBool("list-clients"); listClients {
 		printClientList()
 		return nil
+	}
+
+	// --remove is pure local file work: it needs no deployment URL, no token
+	// and no API key, and it has to keep working after `logout` or after the
+	// deployment has gone away. Short-circuit before anything asks for those.
+	if remove, _ := cmd.Flags().GetBool("remove"); remove {
+		return runRemoveIDE(cmd)
 	}
 
 	apiURL, err := requireAPIURL(cmd)
@@ -123,9 +142,14 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 	client := newAPIClient(cmd)
 
 	// --print-key still needs the API key but no per-client work.
-	mcpKey, err := fetchMCPKey(client)
+	rotate, _ := cmd.Flags().GetBool("rotate-key")
+	mcpKey, err := fetchMCPKey(client, rotate)
 	if err != nil {
 		return err
+	}
+	if rotate {
+		fmt.Println(style.Warn("Issued a new MCP API key. Any client still holding the previous"))
+		fmt.Println(style.Warn("one will be rejected until you re-run setup-ide there."))
 	}
 	if printKey, _ := cmd.Flags().GetBool("print-key"); printKey {
 		fmt.Println(mcpKey)
@@ -181,6 +205,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			if _, lookErr := lookPath("claude"); lookErr == nil {
 				if dryRun {
 					fmt.Println(style.Info(fmt.Sprintf("Would run: claude mcp add (scope=%s, name=dbgorilla)", scope)))
+					installSkill(scope, dryRun)
 					configured++
 					continue
 				}
@@ -190,6 +215,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 					continue
 				}
 				fmt.Println(style.Success("✓ Registered via `claude mcp add`"))
+				installSkill(scope, dryRun)
 				configured++
 				continue
 			}
@@ -235,6 +261,9 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 				fmt.Printf("  Backup: %s\n", res.BackupPath)
 			}
 		}
+		if writer.Slug() == "claude-code" {
+			installSkill(scope, dryRun)
+		}
 		configured++
 	}
 
@@ -258,6 +287,114 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 	if failed > 0 {
 		return fmt.Errorf("%d client(s) failed to configure", failed)
 	}
+	return nil
+}
+
+// runRemoveIDE undoes what setup-ide wrote: the MCP entry for each selected
+// client, and the skill where one was installed.
+//
+// It stops short of revoking the API key. The key is one per user and shared
+// by every client, so revoking it here would break the editors the user did
+// not name -- the same failure this command exists to make reversible. The key
+// is `logout`'s to destroy, because that is the point at which the user is
+// saying they are done with the deployment entirely.
+func runRemoveIDE(cmd *cobra.Command) error {
+	clientFlag, _ := cmd.Flags().GetStringSlice("client")
+	selected, err := resolveSelectedAdapters(clientFlag)
+	if err != nil {
+		return err
+	}
+	scopeFlag, _ := cmd.Flags().GetString("scope")
+	scopeOverride, err := parseScope(scopeFlag)
+	if err != nil {
+		return err
+	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+	removed, failed := 0, 0
+	for _, adapter := range selected {
+		writer, ok := adapter.(ide.Writer)
+		if !ok {
+			continue // detect-only clients were configured by hand; leave them alone
+		}
+		fmt.Println()
+		fmt.Println(style.Info(fmt.Sprintf("--- %s ---", writer.Name())))
+		scope := pickScope(writer, scopeOverride)
+
+		if dryRun {
+			if path, err := writer.ConfigPath(scope); err == nil {
+				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
+			}
+			if writer.Slug() == "claude-code" {
+				if dir, err := ide.SkillDir(scope); err == nil {
+					fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
+				}
+			}
+			removed++
+			continue
+		}
+
+		// Claude Code's own CLI owns the registration when it is present, so
+		// ask it to undo it. A "not found" is the outcome we want anyway, so
+		// the result is ignored; the file sweep below catches whatever the CLI
+		// did not, including entries written when it was not installed.
+		//
+		// DO NOT ADD --scope HERE. It looks like an oversight next to the
+		// `--scope`-passing add in claudeMCPAdd, and it is not. Scopeless is
+		// the BROAD call: `claude mcp remove --help` says "if not specified,
+		// removes from whichever scope it exists in", and running it confirms
+		// that (measured against claude v2.1.233). Passing --scope narrows it
+		// to one scope, so a project-scoped entry survives a remove that
+		// resolved to user scope -- and the file sweep below reads the same
+		// `scope` variable, so it misses the same way and is no safety net.
+		// This exact "fix" was made and reverted once; the scopeless form is
+		// deliberate.
+		if writer.Slug() == "claude-code" {
+			if _, lookErr := lookPath("claude"); lookErr == nil {
+				_ = execCommand("claude", "mcp", "remove", ide.MCPServerName).Run()
+			}
+		}
+
+		res, err := ide.RemoveMCPConfig(writer, scope)
+		switch {
+		case err != nil:
+			failed++
+			fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
+			continue
+		case res.Absent:
+			fmt.Printf("Nothing to remove: %s\n", res.Path)
+		default:
+			fmt.Println(style.Success("✓ Removed the dbgorilla entry from " + res.Path))
+			fmt.Printf("  Backup: %s\n", res.BackupPath)
+		}
+
+		if writer.Slug() == "claude-code" {
+			skill, err := ide.RemoveSkill(scope)
+			switch {
+			case err != nil:
+				fmt.Println(style.Warn(fmt.Sprintf("Could not remove the DBGorilla skill: %v", err)))
+			case skill.Absent:
+				// Nothing installed; say nothing.
+			default:
+				fmt.Println(style.Success("✓ Removed the DBGorilla skill"))
+			}
+		}
+		removed++
+	}
+
+	fmt.Println()
+	if removed == 0 && failed == 0 {
+		fmt.Println("No supported clients selected; nothing to remove.")
+		return nil
+	}
+	summary := fmt.Sprintf("Done. Cleaned: %d, Failed: %d.", removed, failed)
+	if failed > 0 {
+		fmt.Println(style.Error(summary))
+		return fmt.Errorf("%d client(s) could not be cleaned up", failed)
+	}
+	fmt.Println(style.Success(summary))
+	fmt.Println()
+	fmt.Println("The MCP API key is untouched and still valid. `dbgorilla logout` revokes it.")
 	return nil
 }
 
@@ -460,29 +597,95 @@ func printAdminAllowlist(apiURL string) {
 	fmt.Println("Once approved, each developer runs `dbgorilla setup-ide` to wire it in.")
 }
 
-// fetchMCPKey calls the backend to get or create an MCP API key. Response
-// is a JSON-encoded string (e.g. `"abc123"`); falls back to a bare string
-// for resilience against minor backend variations.
-func fetchMCPKey(client *api.Client) (string, error) {
-	body, status, err := client.Post("/api/v0_1/client_api_keys/mcp-api-access", nil)
+// installSkill drops the DBGorilla skill next to the MCP registration, so
+// Claude Code knows to consult the tools it now has rather than waiting to be
+// told. Wiring up the server without it leaves the tools present but unused
+// on exactly the work they exist for.
+//
+// A failure here is reported and stepped over. The MCP registration is the
+// part the user asked for and it has already succeeded; an unwritable skills
+// directory should not turn a working setup into a failed command.
+func installSkill(scope ide.Scope, dryRun bool) {
+	if dryRun {
+		dir, err := ide.SkillDir(scope)
+		if err == nil {
+			fmt.Println(style.Info("Would install the DBGorilla skill to: " + dir))
+		}
+		return
+	}
+	res, err := ide.InstallSkill(scope)
+	switch {
+	case err != nil:
+		fmt.Println(style.Warn(fmt.Sprintf("Could not install the DBGorilla skill: %v", err)))
+	case res.NoOp:
+		fmt.Printf("Skill up to date: %s\n", res.Path)
+	case res.Updated:
+		fmt.Println(style.Success("✓ Updated the DBGorilla skill: " + res.Path))
+	default:
+		fmt.Println(style.Success("✓ Installed the DBGorilla skill: " + res.Path))
+	}
+}
+
+// mcpKeyPath is the backend resource holding this user's MCP API key.
+const mcpKeyPath = "/api/v0_1/client_api_keys/mcp-api-access"
+
+// fetchMCPKey returns the MCP API key to configure clients with, reusing the
+// existing one unless the caller explicitly asked for a new one.
+//
+// The order of those two operations is the whole point. Minting is
+// destructive: the backend issues a fresh secret and overwrites the stored
+// one, and there is exactly one key per user, so a mint does not "get or
+// create" -- it rotates, and every copy of the previous key stops working the
+// instant it returns. Anyone who had the key in a second editor, or in
+// anything outside their editor, would find it rejected later, at use, with
+// nothing at setup time having said so. Reading first means the ordinary case
+// -- configuring one more client, or re-running this command -- leaves every
+// client already configured still working.
+func fetchMCPKey(client *api.Client, rotate bool) (string, error) {
+	if !rotate {
+		if key := lookupMCPKey(client); key != "" {
+			return key, nil
+		}
+	}
+	body, status, err := client.Post(mcpKeyPath, nil)
 	if err != nil {
 		return "", fmt.Errorf("cannot mint MCP key: %w", err)
 	}
 	if status != 200 {
 		return "", fmt.Errorf("backend returned HTTP %d when minting MCP key:\n%s", status, string(body))
 	}
+	if key := decodeMCPKey(body); key != "" {
+		return key, nil
+	}
+	return "", fmt.Errorf("backend returned empty MCP key body")
+}
+
+// lookupMCPKey returns the key already issued to this user, or "" when there
+// is nothing to reuse.
+//
+// Failures are deliberately swallowed rather than returned. Every reason this
+// can fail -- unreachable deployment, expired token, a backend too old to
+// serve the read -- is a reason the mint that follows will fail too, and the
+// mint produces the message the user can act on. Returning an error here
+// would replace that with a worse one for the same underlying problem.
+func lookupMCPKey(client *api.Client) string {
+	body, status, err := client.Get(mcpKeyPath)
+	if err != nil || status != http.StatusOK {
+		return ""
+	}
+	return decodeMCPKey(body)
+}
+
+// decodeMCPKey reads the key out of a response body. It is a JSON-encoded
+// string (e.g. `"abc123"`); the bare-string fallback is resilience against
+// minor backend variations. Returns "" when there is no key in the body.
+func decodeMCPKey(body []byte) string {
 	if len(body) == 0 {
-		return "", fmt.Errorf("backend returned empty MCP key body")
+		return ""
 	}
 	var raw string
-	if err := json.Unmarshal(body, &raw); err == nil && raw != "" {
-		return raw, nil
+	if err := json.Unmarshal(body, &raw); err == nil {
+		return raw
 	}
-	// Fallback: trim quotes from a bare string with no JSON envelope.
-	s := strings.TrimSpace(string(body))
-	s = strings.Trim(s, `"`)
-	if s == "" {
-		return "", fmt.Errorf("backend returned empty MCP key body")
-	}
-	return s, nil
+	return strings.Trim(strings.TrimSpace(string(body)), `"`)
 }

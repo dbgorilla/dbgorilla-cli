@@ -2,7 +2,64 @@
 
 ## v0.5.3
 
+### Added
+
+- `setup-ide` installs a short DBGorilla skill for Claude Code, at
+  `~/.claude/skills/dbgorilla/SKILL.md` (or under the project's `.claude/`
+  with `--scope project`). Registering the MCP server gave the agent the
+  tools but not the habit of using them; the skill triggers on database work
+  — SQL, schema, migrations, indexes, slow queries, database errors — and
+  says to check the live component before reasoning from the source alone.
+  Re-running rewrites it only when the shipped text has changed.
+
+- `setup-ide --remove` undoes the setup: it strips the `dbgorilla` MCP entry
+  from the selected clients and removes the skill, leaving every other entry
+  and setting in those files untouched, and backing each one up first. There
+  was previously no way to un-configure a client short of editing its config
+  by hand. It works with no session and no reachable deployment.
+
+- `setup-ide --rotate-key` issues a new MCP API key on purpose, for when you
+  believe the current one has been exposed. Every client still holding the
+  old key stops working until you re-run `setup-ide` there, and the command
+  says so.
+
+- `whoami` now prints the role, the user id and the organization id underneath
+  the identity line, without being asked. `whoami` is run to answer an identity
+  question, and the answer is usually pasted into a support thread or an issue,
+  where the ids are the part that identifies anything. Scripts parsing the
+  single line this command used to print should move to `whoami --json`.
+
+- `login --verbose` prints the same block on success. `login` is run to get past
+  it rather than to read it, so its default stays one line.
+
+- `doctor` prints the role and the ids under its `Auth + API` line, indented to
+  line up with it. `doctor` output exists to be pasted into a support thread,
+  and it was the one place that showed who you are without showing anything
+  that identifies the account.
+
+### Changed
+
+- `logout` now revokes the MCP API key as well as clearing the login tokens.
+  Previously it cleared only the tokens, so an editor configured through
+  `setup-ide` kept working after sign-out — and that key does not expire. If
+  the deployment cannot be reached, sign-out still completes and says the key
+  is still live. The MCP entries in your editors are left in place, and stop
+  working; `setup-ide --remove` takes those out.
+
+- `whoami --json` matches the API's own field names: `tenant` is now
+  `organization`, `user_id` is now `id`, and `role` is included. `is_admin` is
+  gone — it was never populated by any deployment. A script reading the old
+  names was reading fields that were always empty, and needs the new ones.
+
 ### Fixed
+
+- `setup-ide` no longer invalidates your MCP API key every time it runs. The
+  backend issues one key per user and a mint overwrites the stored one, so
+  each run silently killed the key already in use — anyone with it configured
+  in a second editor, or anywhere outside an editor, found those rejected
+  later, at use, with nothing at setup time having said so. `setup-ide` now
+  reuses the existing key and mints only when there is none, so configuring
+  another client leaves the ones already working alone.
 
 - `login`, `whoami` and `doctor` name your organization instead of printing its
   UUID. The CLI read the organization name, the user id and an admin flag under
@@ -26,29 +83,6 @@
   have explained it. Only a 404, the deployment answering that it genuinely has
   no SSO, still falls back to password sign-in. Everything else now names the
   status.
-
-### Added
-
-- `whoami` now prints the role, the user id and the organization id underneath
-  the identity line, without being asked. `whoami` is run to answer an identity
-  question, and the answer is usually pasted into a support thread or an issue,
-  where the ids are the part that identifies anything. Scripts parsing the
-  single line this command used to print should move to `whoami --json`.
-
-- `login --verbose` prints the same block on success. `login` is run to get past
-  it rather than to read it, so its default stays one line.
-
-- `doctor` prints the role and the ids under its `Auth + API` line, indented to
-  line up with it. `doctor` output exists to be pasted into a support thread,
-  and it was the one place that showed who you are without showing anything
-  that identifies the account.
-
-### Changed
-
-- `whoami --json` matches the API's own field names: `tenant` is now
-  `organization`, `user_id` is now `id`, and `role` is included. `is_admin` is
-  gone — it was never populated by any deployment. A script reading the old
-  names was reading fields that were always empty, and needs the new ones.
 
 ## v0.5.2
 

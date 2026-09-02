@@ -2,6 +2,7 @@ package ide
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -596,4 +597,163 @@ func TestExists(t *testing.T) {
 	if exists(filepath.Join(dir, "missing")) {
 		t.Error("exists(missing) = true, want false")
 	}
+}
+
+// --- RemoveMCPConfig ------------------------------------------------------
+
+func TestRemoveMCPConfig(t *testing.T) {
+	// A config file with our entry alongside somebody else's, plus an
+	// unrelated top-level key. Removal has to take exactly one thing.
+	seed := func(t *testing.T) (Writer, string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		w := &stubWriter{configPath: path}
+		if _, err := WriteMCPConfig(w, "https://x/mcp/", "key123", ScopeUser); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["mcpServers"].(map[string]any)["somebody-else"] = map[string]any{"url": "https://other/"}
+		doc["editorSetting"] = "keep me"
+		out, _ := json.MarshalIndent(doc, "", "  ")
+		if err := os.WriteFile(path, out, 0600); err != nil {
+			t.Fatal(err)
+		}
+		return w, path
+	}
+
+	t.Run("removes only the dbgorilla entry", func(t *testing.T) {
+		w, path := seed(t)
+		res, err := RemoveMCPConfig(w, ScopeUser)
+		if err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		if !res.Removed || res.BackupPath == "" {
+			t.Errorf("res=%+v, want Removed with a backup", res)
+		}
+		var doc map[string]any
+		raw, _ := os.ReadFile(path)
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		servers := doc["mcpServers"].(map[string]any)
+		if _, still := servers[MCPServerName]; still {
+			t.Error("dbgorilla entry survived the removal")
+		}
+		if _, ok := servers["somebody-else"]; !ok {
+			t.Error("removal took another tool's MCP server with it")
+		}
+		if doc["editorSetting"] != "keep me" {
+			t.Error("removal dropped an unrelated top-level key")
+		}
+		// The backup has to be the file as it stood, or it is not a backup.
+		if b, _ := os.ReadFile(res.BackupPath); !strings.Contains(string(b), MCPServerName) {
+			t.Error("backup does not contain the entry that was removed")
+		}
+	})
+
+	t.Run("running it twice is not an error", func(t *testing.T) {
+		w, _ := seed(t)
+		if _, err := RemoveMCPConfig(w, ScopeUser); err != nil {
+			t.Fatal(err)
+		}
+		res, err := RemoveMCPConfig(w, ScopeUser)
+		if err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		if !res.Absent || res.BackupPath != "" {
+			t.Errorf("res=%+v, want Absent and no second backup", res)
+		}
+	})
+
+	t.Run("a client that was never configured", func(t *testing.T) {
+		w := &stubWriter{configPath: filepath.Join(t.TempDir(), "never-written.json")}
+		res, err := RemoveMCPConfig(w, ScopeUser)
+		if err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		if !res.Absent {
+			t.Errorf("res=%+v, want Absent", res)
+		}
+	})
+
+	t.Run("refuses JSONC rather than destroying comments", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte("// mine\n{\"mcpServers\":{}}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RemoveMCPConfig(&stubWriter{configPath: path}, ScopeUser)
+		if !errors.Is(err, ErrJSONCRefused) {
+			t.Errorf("err=%v, want ErrJSONCRefused", err)
+		}
+	})
+
+	t.Run("refuses to modify a file it cannot parse", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(path)
+		if _, err := RemoveMCPConfig(&stubWriter{configPath: path}, ScopeUser); err == nil {
+			t.Fatal("want an error on an unparseable config")
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Error("an unparseable config was modified anyway")
+		}
+	})
+}
+
+// unresolvableWriter cannot say where its config lives. Real adapters hit this
+// when the working directory or home directory cannot be resolved.
+type unresolvableWriter struct{ *stubWriter }
+
+func (unresolvableWriter) ConfigPath(Scope) (string, error) {
+	return "", fmt.Errorf("no such directory")
+}
+
+func TestRemoveMCPConfig_RefusesRatherThanGuessing(t *testing.T) {
+	t.Run("the config path cannot be resolved", func(t *testing.T) {
+		if _, err := RemoveMCPConfig(unresolvableWriter{&stubWriter{}}, ScopeUser); err == nil {
+			t.Error("want the path-resolution failure surfaced")
+		}
+	})
+
+	t.Run("a .jsonc config is refused on its extension alone", func(t *testing.T) {
+		// Refused before it is even read: a .jsonc file is allowed to have
+		// comments, and rewriting it as plain JSON would delete them.
+		path := filepath.Join(t.TempDir(), "settings.jsonc")
+		if err := os.WriteFile(path, []byte(`{"mcpServers":{"dbgorilla":{}}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RemoveMCPConfig(&stubWriter{configPath: path}, ScopeUser)
+		if !errors.Is(err, ErrJSONCRefused) {
+			t.Errorf("err=%v, want ErrJSONCRefused", err)
+		}
+		if data, _ := os.ReadFile(path); !strings.Contains(string(data), "dbgorilla") {
+			t.Error("the file was modified despite being refused")
+		}
+	})
+
+	t.Run("the config cannot be read", func(t *testing.T) {
+		// Something that is not a readable file sits where the config should
+		// be. That is not "nothing to remove" -- we do not know what is there,
+		// so we say so instead of reporting success.
+		dir := filepath.Join(t.TempDir(), "config.json")
+		if err := os.Mkdir(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		res, err := RemoveMCPConfig(&stubWriter{configPath: dir}, ScopeUser)
+		if err == nil {
+			t.Fatal("want a read failure surfaced")
+		}
+		if res.Absent || res.Removed {
+			t.Errorf("res=%+v, want neither Absent nor Removed", res)
+		}
+	})
 }
