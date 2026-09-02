@@ -148,6 +148,19 @@ func cloudDeployFailed(err error, client *api.Client, agentID string, budget tim
 		fmt.Print(watchHint)
 		return nil
 	}
+	// A refusal because another operation is converging must not trigger a
+	// rollback: the message says "wait and re-run", and deleting a deployment
+	// mid-CREATE (force=true) would do exactly what the message promises we
+	// won't. Nothing was created by THIS run, so only the freshly minted
+	// identity is ours to clean up.
+	if errors.Is(err, collector.ErrDeployBusy) {
+		fmt.Printf("Nothing to roll back on the %s; deprovisioning this run's identity...\n", noun)
+		if derr := client.DeleteCollector(agentID); derr != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", agentID, derr)))
+		}
+		_ = collector.RemoveState()
+		return fmt.Errorf("%w\n\nWait for it to finish, then re-run", err)
+	}
 	fmt.Printf("Deploy failed; rolling back the provisioned identity and %s...\n", noun)
 	if derr := client.DeleteCollector(agentID); derr != nil {
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", agentID, derr)))

@@ -52,7 +52,7 @@ type State struct {
 	AgentID    string `json:"agent_id"`
 	TenantID   string `json:"tenant_id"`
 	Domain     string `json:"domain"`
-	Target     string `json:"target,omitempty"` // "docker" (default), "aws", or "helm"
+	Target     string `json:"target,omitempty"` // "docker" (default), "aws", "gcp", or "helm"
 	Image      string `json:"image"`
 	TargetName string `json:"target_name"`
 

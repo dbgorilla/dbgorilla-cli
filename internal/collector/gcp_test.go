@@ -224,3 +224,26 @@ func TestGcpConfigTOML_RoundTripsThroughTheStrictParser(t *testing.T) {
 		t.Fatalf("secrets must stay env references:\n%s", rendered)
 	}
 }
+
+// MySQL spells the IAM flag with underscores (flags cannot contain dots on
+// MySQL); checking only the Postgres dot form made IAM look disabled on every
+// MySQL instance and the install refused with advice to enable a flag that
+// doesn't exist there. Review finding, 2026-09-02.
+func TestMergeCloudSQLInstance_MySQLIamFlagUnderscoreForm(t *testing.T) {
+	var info sqlInstanceInfo
+	info.Name = "prod-my"
+	info.Region = "us-central1"
+	info.DatabaseVersion = "MYSQL_8_0"
+	info.Settings.DatabaseFlags = []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}{{Name: "cloudsql_iam_authentication", Value: "On"}}
+
+	got := mergeCloudSQLInstance(GcpTarget{Project: "p"}, &info)
+	if got.Engine != "mysql" {
+		t.Fatalf("engine: %+v", got)
+	}
+	if !got.IamEnabled {
+		t.Fatalf("underscore-form IAM flag not detected: %+v", got)
+	}
+}

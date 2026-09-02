@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -109,8 +110,8 @@ func (d GcpDeploy) deploy(ctx context.Context) error {
 	}
 	if existing != nil {
 		if gcpDeploymentInProgress(existing.State) {
-			return fmt.Errorf("deployment %q is %s — another operation is already in progress; wait for it to finish and re-run",
-				d.DeploymentName, existing.State)
+			return fmt.Errorf("deployment %q is %s — another operation is already in progress; "+
+				"wait for it to finish and re-run: %w", d.DeploymentName, existing.State, ErrDeployBusy)
 		}
 		// Any settled state — ACTIVE, SUSPENDED, or FAILED — updates in place:
 		// Infrastructure Manager re-applies Terraform against whatever
@@ -185,6 +186,12 @@ func DeleteGcpDeployment(project, region, name string) error {
 	op, err := startGcpOperation(ctx, cfg, http.MethodDelete,
 		infraManagerBase+"/"+gcpDeploymentPath(project, region, name)+"?force=true&deletePolicy=DELETE", nil)
 	if err != nil {
+		// A rollback for a deployment that was never created (the failure
+		// happened before CreateDeployment) must not warn the operator to
+		// delete something from the console that does not exist.
+		if strings.Contains(err.Error(), "404") {
+			return nil
+		}
 		return fmt.Errorf("could not delete deployment %q: %w", name, err)
 	}
 	if err := waitGcpOperation(ctx, cfg, op, gcpDeleteTimeout); err != nil {
@@ -270,3 +277,9 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 		op = &next
 	}
 }
+
+// ErrDeployBusy marks a deploy refused because the deployment is already
+// converging under another operation. The install spine treats it as
+// no-rollback: deleting a converging deployment is never what "wait and
+// re-run" means.
+var ErrDeployBusy = errors.New("deployment busy")

@@ -49,6 +49,8 @@ func TestDiscoverGcpTarget_SoloAlloyDBReusesTheListedLocation(t *testing.T) {
 	f := newGCPFake(t).
 		on("GET", sqlListPath, 200, sqlInstancesJSON()).
 		on("GET", adbClusters, 200, ordersJSON).
+		on("GET", "/v1/projects/p/locations/us-east1/clusters/orders", 200,
+			`{"name":"projects/p/locations/us-east1/clusters/orders","network":"projects/p/global/networks/default"}`).
 		on("GET", adbInstances, 200, primaryJSON)
 	stubGCP(t, f)
 
@@ -62,6 +64,11 @@ func TestDiscoverGcpTarget_SoloAlloyDBReusesTheListedLocation(t *testing.T) {
 	if got.Region != "us-east1" || got.Host != "10.1.2.3" || !got.IamEnabled || got.Engine != "postgres" {
 		t.Fatalf("facts: %+v", got)
 	}
+	// The cluster resource carries its VPC; discovery must surface it or every
+	// AlloyDB install falsely demands --network (review finding, 2026-09-02).
+	if got.Network != "projects/p/global/networks/default" {
+		t.Fatalf("network not read off the cluster: %+v", got)
+	}
 	if n := f.called("GET", adbClusters); n != 1 {
 		t.Errorf("clusters listed %d times; the location from the first listing should be reused", n)
 	}
@@ -70,6 +77,8 @@ func TestDiscoverGcpTarget_SoloAlloyDBReusesTheListedLocation(t *testing.T) {
 func TestDiscoverGcpTarget_ExplicitAlloyDBIdLooksUpTheRegionOnce(t *testing.T) {
 	f := newGCPFake(t).
 		on("GET", adbClusters, 200, ordersJSON).
+		on("GET", "/v1/projects/p/locations/us-east1/clusters/orders", 200,
+			`{"name":"projects/p/locations/us-east1/clusters/orders","network":"projects/p/global/networks/default"}`).
 		on("GET", adbInstances, 200, primaryJSON)
 	stubGCP(t, f)
 
