@@ -116,7 +116,7 @@ func TestDiscoverDeviceConfig_BadRequestURL(t *testing.T) {
 // --- validateEndpoint url.Parse failure ------------------------------------
 
 func TestValidateEndpoint_UnparseableURL(t *testing.T) {
-	err := validateEndpoint("token_endpoint", "https://%zz/x", "https://api", false)
+	_, err := validateEndpoint("token_endpoint", "https://%zz/x", false)
 	if err == nil || !strings.Contains(err.Error(), "not a valid URL") {
 		t.Fatalf("err = %v, want parse failure", err)
 	}

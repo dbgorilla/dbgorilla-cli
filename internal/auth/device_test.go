@@ -221,13 +221,28 @@ func TestPollForToken_StateMachine(t *testing.T) {
 	})
 }
 
-// TestValidateEndpoint_HostMismatchWarns ensures host mismatch is warned
-// but not errored (Keycloak is often on a separate subdomain).
-func TestValidateEndpoint_HostMismatchWarns(t *testing.T) {
-	apiURL := "https://api.example.com"
+// A different host is never fatal -- the identity provider is somebody else's
+// deployment decision, and the CLI's job is to say so, not to refuse.
+func TestValidateEndpoint_ForeignHostIsNotAnError(t *testing.T) {
 	other := "https://idp.different-host.com/device"
-	if err := validateEndpoint("device_authorization_endpoint", other, apiURL, false); err != nil {
-		t.Errorf("host mismatch should warn not error, got: %v", err)
+	host, err := validateEndpoint("device_authorization_endpoint", other, false)
+	if err != nil {
+		t.Errorf("a foreign host should warn, not error, got: %v", err)
+	}
+	if host != "idp.different-host.com" {
+		t.Errorf("host = %q, want the hostname without scheme or path", host)
+	}
+}
+
+// A port is not a change of party. Comparing host:port meant an identity
+// provider on a non-default port of the API's own host looked foreign.
+func TestValidateEndpoint_StripsPort(t *testing.T) {
+	host, err := validateEndpoint("token_endpoint", "https://api.example.com:8443/token", false)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if host != "api.example.com" {
+		t.Errorf("host = %q, want the port stripped", host)
 	}
 }
 
@@ -240,7 +255,7 @@ func TestValidateEndpoint_InvalidURLs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateEndpoint("device_authorization_endpoint", tc.endpoint, "https://api", false)
+			_, err := validateEndpoint("device_authorization_endpoint", tc.endpoint, false)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err=%v want %q", err, tc.want)
 			}

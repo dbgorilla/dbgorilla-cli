@@ -24,10 +24,10 @@
 //   - The discovered endpoints (device_authorization, token) are validated
 //     to use https unless --insecure is set. This prevents a malicious
 //     backend (or one with a typoed config) from silently downgrading the
-//     polling step. We do NOT enforce host-equality with apiURL because
-//     Keycloak is often deployed on a separate subdomain -- but we warn
-//     loudly when the host differs, so an attacker can't quietly redirect
-//     polling to a domain they control.
+//     polling step. We do NOT enforce host-equality with apiURL, because the
+//     identity provider is normally on a sibling subdomain -- but we warn
+//     when an endpoint leaves the API's registrable domain entirely, so an
+//     attacker cannot quietly redirect polling to a domain they control.
 //   - When !insecure, the HTTP client refuses to follow redirects to a
 //     non-https URL, preventing TLS downgrade via redirect.
 package auth
@@ -47,6 +47,7 @@ import (
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/httpx"
 	"github.com/pkg/browser"
+	"golang.org/x/net/publicsuffix"
 )
 
 // openBrowser opens the verification URL in the user's default browser. It is
@@ -155,41 +156,102 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 	if cfg.DeviceAuthorizationEndpoint == "" || cfg.TokenEndpoint == "" || cfg.ClientID == "" {
 		return nil, errors.New("device-config response is missing required fields")
 	}
-	if err := validateEndpoint("device_authorization_endpoint", cfg.DeviceAuthorizationEndpoint, apiURL, insecure); err != nil {
+	authHost, err := validateEndpoint("device_authorization_endpoint", cfg.DeviceAuthorizationEndpoint, insecure)
+	if err != nil {
 		return nil, err
 	}
-	if err := validateEndpoint("token_endpoint", cfg.TokenEndpoint, apiURL, insecure); err != nil {
+	tokenHost, err := validateEndpoint("token_endpoint", cfg.TokenEndpoint, insecure)
+	if err != nil {
 		return nil, err
 	}
+	warnOffDomainEndpoints(os.Stderr, apiURL, authHost, tokenHost)
 	return &cfg, nil
 }
 
-// validateEndpoint ensures a discovered endpoint URL is acceptable:
+// validateEndpoint ensures a discovered endpoint URL is acceptable and returns
+// its hostname (no port):
 //   - Refuses non-https schemes when !insecure.
 //   - Refuses missing/invalid hosts.
-//   - Warns to stderr (does NOT fail) when the endpoint host differs from
-//     apiURL's host -- Keycloak is often on a separate subdomain, but a
-//     completely unrelated host is worth surfacing in case a misconfigured
-//     or malicious backend tries to steer the polling step elsewhere.
-func validateEndpoint(field, endpointURL, apiURL string, insecure bool) error {
+//
+// Whether the host is a reasonable one to be sent to is a separate question,
+// answered once for both endpoints by warnOffDomainEndpoints.
+func validateEndpoint(field, endpointURL string, insecure bool) (string, error) {
 	u, err := url.Parse(endpointURL)
 	if err != nil {
-		return fmt.Errorf("device-config %s is not a valid URL: %w", field, err)
+		return "", fmt.Errorf("device-config %s is not a valid URL: %w", field, err)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("device-config %s has no host: %q", field, endpointURL)
+		return "", fmt.Errorf("device-config %s has no host: %q", field, endpointURL)
 	}
 	if !insecure && u.Scheme != "https" {
-		return fmt.Errorf("device-config %s uses non-https scheme %q (pass --insecure to allow this)", field, u.Scheme)
+		return "", fmt.Errorf("device-config %s uses non-https scheme %q (pass --insecure to allow this)", field, u.Scheme)
 	}
-	if a, err := url.Parse(apiURL); err == nil && a.Host != "" && a.Host != u.Host {
-		fmt.Fprintf(os.Stderr,
-			"warning: device flow %s is at %q which differs from your API host %q.\n"+
-				"         This is normal if Keycloak runs on a separate subdomain; refuse and re-run\n"+
-				"         `dbg login` if you did not expect this.\n",
-			field, u.Host, a.Host)
+	return u.Hostname(), nil
+}
+
+// warnOffDomainEndpoints warns when sign-in would be handed to a host outside
+// the API's own registrable domain.
+//
+// The warning exists for one case: a backend -- misconfigured, or hostile --
+// pointing the token-polling step at a host someone else controls. It is not
+// for the ordinary case, which is the identity provider sitting on a sibling
+// subdomain of the same company domain. Warning on any host difference at all
+// meant the ordinary case printed two alarming paragraphs on the first command
+// a new user ever runs, which teaches people to skip the text. So:
+//
+//   - Same registrable domain (auth.example.com vs api.example.com): silent.
+//   - Different registrable domain (idp.attacker.net vs api.example.com):
+//     one line, once per distinct host, naming the host and what to do.
+//
+// "Registrable domain" and not "last two labels", because the shortcut is
+// wrong precisely where it matters: under a multi-label public suffix,
+// attacker.co.uk and yourcompany.co.uk share their last two labels, and the
+// shortcut would stay silent for the exact handover this warning is for.
+func warnOffDomainEndpoints(w io.Writer, apiURL string, endpointHosts ...string) {
+	a, err := url.Parse(apiURL)
+	if err != nil || a.Hostname() == "" {
+		return
 	}
-	return nil
+	apiHost := a.Hostname()
+	warned := make(map[string]bool, len(endpointHosts))
+	for _, host := range endpointHosts {
+		if host == "" || warned[host] || sameRegistrableDomain(host, apiHost) {
+			continue
+		}
+		warned[host] = true
+		_, _ = fmt.Fprintf(w, "warning: sign-in is handled by %s, which is outside %s -- press Ctrl-C now if that is not your identity provider.\n",
+			host, describeDomain(apiHost))
+	}
+}
+
+// sameRegistrableDomain reports whether two hostnames belong to the same
+// registrable domain -- the level at which one party controls the name.
+//
+// Hosts with no registrable domain (a bare name like "localhost", an IP
+// literal, a name that is itself a public suffix) have no such party to
+// compare, so only exact equality counts. Failing closed here is deliberate:
+// an unknown pair gets the warning rather than silence.
+func sameRegistrableDomain(a, b string) bool {
+	a, b = strings.ToLower(a), strings.ToLower(b)
+	if a == b {
+		return true
+	}
+	da, errA := publicsuffix.EffectiveTLDPlusOne(a)
+	db, errB := publicsuffix.EffectiveTLDPlusOne(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return da == db
+}
+
+// describeDomain names the boundary the warning is about: the API's
+// registrable domain when there is one, and the bare host otherwise (a
+// development box on "localhost", say, where there is nothing shorter to say).
+func describeDomain(host string) string {
+	if d, err := publicsuffix.EffectiveTLDPlusOne(strings.ToLower(host)); err == nil {
+		return d
+	}
+	return host
 }
 
 // LoginDevice runs the full device flow against the given backend URL,

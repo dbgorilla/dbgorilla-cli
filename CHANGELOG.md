@@ -10,6 +10,13 @@
   fell back to the raw identifier. Nothing reported an error — the id was simply
   what you saw where the name belonged.
 
+- `login` no longer warns about the identity provider being on its own
+  subdomain. Signing in printed two multi-line warnings whose own text said the
+  situation was normal — because it is: the identity provider on a sibling
+  subdomain of the API is the ordinary deployment. The warning now fires only
+  when an endpoint leaves the API's registrable domain, which is the case it was
+  written for, and says so in one line naming the host.
+
 - Auto-detecting the sign-in mode no longer reads a broken deployment as one
   without SSO. Every non-200 from the device-config endpoint was treated as
   "this deployment has no SSO" and dropped to a password prompt, so a 502 from
