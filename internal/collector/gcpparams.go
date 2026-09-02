@@ -9,6 +9,11 @@ import (
 // the template's naming contract, the MIG) an install creates by default.
 const DefaultGcpDeploymentName = "dbgorilla-collector"
 
+// gceMetadataConfigLimit caps the base64 collector config carried in instance
+// metadata: the per-value GCE limit is 256KiB (262144); stay under it with
+// margin for the metadata envelope.
+const gceMetadataConfigLimit = 245760
+
 // gcpInputKeys is the template's input-variable contract — the gcp analogue of
 // fargateParamKeys. Every deploy sends exactly these; the template versions on
 // changes to this set, and TestGcpTemplateContract pins the two together.
@@ -74,7 +79,10 @@ func GcpDeployInputs(in GcpStackInput) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := EncodeConfig(configTOML)
+	// GCE metadata values allow 256KiB; cap under it with margin. Sharing
+	// EncodeConfig here inherited CloudFormation's 4KB limit AND its error
+	// text — a GCP overflow was told to blame a CloudFormation parameter.
+	encoded, err := encodeConfigLimited(configTOML, gceMetadataConfigLimit, "a GCE metadata value")
 	if err != nil {
 		return nil, err
 	}

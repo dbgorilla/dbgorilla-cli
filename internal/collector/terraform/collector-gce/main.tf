@@ -7,9 +7,13 @@
 #
 # This file is published, never embedded in the CLI: what a customer reviews
 # at the published address is exactly what their project deploys. Secrets
-# arrive as sensitive input variables and land ONLY in Secret Manager; the
+# arrive as sensitive input variables and are stored in Secret Manager; the
 # instance fetches them at boot with its own service account, so they never
-# appear in instance metadata (which any project viewer can read).
+# appear in instance metadata (which any project viewer can read). Be aware
+# that Infrastructure Manager itself retains input values on the deployment
+# resource and in its Terraform state, so they are also readable by principals
+# holding config.* read roles in the project — passing Secret Manager
+# REFERENCES instead of values is the planned hardening.
 #
 # Naming contract with the CLI (do not change without a version bump): the
 # deployment's resources — the service account, the secrets, the MIG — are all

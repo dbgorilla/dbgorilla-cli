@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
@@ -27,6 +28,10 @@ var (
 	// carries no uncovered statement of its own.
 	runGcpDeploy = collector.GcpDeploy.Run
 )
+
+// gcpDeploymentNameRe is the SA account_id contract the deployment name feeds
+// (6-30 chars, lowercase letter first, [a-z0-9-], no trailing dash).
+var gcpDeploymentNameRe = regexp.MustCompile(`^[a-z](?:[-a-z0-9]{4,28})[a-z0-9]$`)
 
 // gcpSecretInputs are the template inputs a dry run must redact.
 var gcpSecretInputs = []string{"server_secret", "db_password"}
@@ -56,6 +61,14 @@ func runInstallGCP(cmd *cobra.Command) error {
 			"(it needs roles/config.agent plus permission to create the collector's instance group and service account)")
 	}
 	deploymentName, _ := cmd.Flags().GetString("deployment-name")
+	// The deployment name becomes the runtime service account's account_id and
+	// the secret-id prefix, so it inherits the SA naming contract. Rejecting a
+	// bad name here costs nothing; discovering it inside Terraform costs the
+	// operator a minted identity and twenty minutes.
+	if !gcpDeploymentNameRe.MatchString(deploymentName) {
+		return fmt.Errorf("--deployment-name %q must be 6-30 chars of [a-z0-9-], starting with a letter and not ending with '-' "+
+			"(it names the collector's service account and secrets)", deploymentName)
+	}
 	templateSource, _ := cmd.Flags().GetString("template-source")
 	if templateSource == "" {
 		templateSource = collector.HostedGcpTemplateSource()
@@ -253,9 +266,14 @@ func printGcpGrantGuidance(target collector.GcpTarget, deploymentName, project s
 	sa := collector.GcpRuntimeServiceAccountFor(deploymentName, project)
 	fmt.Println("\nGrant the collector database access:")
 	if target.ProviderType == "alloydb" {
+		// AlloyDB registers the LITERAL username given (unlike Cloud SQL, whose
+		// API strips the .gserviceaccount.com suffix server-side), and the
+		// collector logs in as the trimmed form — so the trimmed form is what
+		// must be registered, or step 2's grants land on a user that never
+		// matches the login.
 		fmt.Printf("  1. Register the service account as a database user:\n"+
 			"     gcloud alloydb users create %s --cluster=%s --region=%s --type=IAM_BASED\n",
-			sa, target.ClusterID, target.Region)
+			target.User, target.ClusterID, target.Region)
 	} else {
 		fmt.Printf("  1. Register the service account as a database user:\n"+
 			"     gcloud sql users create %s --instance=%s --type=cloud_iam_service_account\n",

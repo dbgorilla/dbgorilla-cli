@@ -201,7 +201,8 @@ func discoverCloudSQL(ctx context.Context, cfg gcpConfig, into GcpTarget, instan
 	info, err := getCloudSQLInstance(ctx, cfg, into.Project, instance)
 	if err != nil {
 		return into, fmt.Errorf("no Cloud SQL instance named %q found in project %q — "+
-			"check the project (--project) and pass an existing --db-instance-id, then re-run: %w",
+			"check the project (--project) and pass an existing --db-instance-id, then re-run "+
+			"(for an AlloyDB cluster, pass --provider-type alloydb): %w",
 			instance, into.Project, err)
 	}
 	if info.MasterInstanceName != "" {
@@ -266,7 +267,12 @@ func mergeCloudSQLInstance(into GcpTarget, info *sqlInstanceInfo) GcpTarget {
 	}
 	into.Network = info.Settings.IPConfiguration.PrivateNetwork
 	for _, f := range info.Settings.DatabaseFlags {
-		if f.Name == "cloudsql.iam_authentication" && strings.EqualFold(f.Value, "on") {
+		// Postgres spells the flag with a dot; MySQL flags cannot contain dots
+		// and use cloudsql_iam_authentication. Checking only one form makes IAM
+		// look disabled on the other engine, and the install then refuses with
+		// advice to enable a flag that doesn't exist there.
+		if (f.Name == "cloudsql.iam_authentication" || f.Name == "cloudsql_iam_authentication") &&
+			strings.EqualFold(f.Value, "on") {
 			into.IamEnabled = true
 		}
 	}
@@ -279,6 +285,10 @@ const alloydbBase = "https://alloydb.googleapis.com/v1"
 
 type alloydbClusterInfo struct {
 	Name string `json:"name"` // full resource path
+	// Network is the cluster's VPC (projects/<p>/global/networks/<n>) — the
+	// collector instance joins it, so discovery must surface it or every
+	// AlloyDB install falsely demands --network.
+	Network string `json:"network"`
 }
 
 func (c alloydbClusterInfo) shortID() string  { return lastPathSegment(c.Name) }
@@ -385,6 +395,15 @@ func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id, loc
 		}
 		into.Region = region
 	}
+	if into.Network == "" {
+		u := fmt.Sprintf("%s/projects/%s/locations/%s/clusters/%s", alloydbBase,
+			url.PathEscape(into.Project), url.PathEscape(into.Region), url.PathEscape(clusterID))
+		var cl alloydbClusterInfo
+		if err := gcpDo(ctx, cfg, "GET", u, nil, &cl); err == nil {
+			into.Network = cl.Network
+		}
+		// A failed read falls through to the existing --network requirement.
+	}
 	instances, err := listAlloyDBInstances(ctx, cfg, into.Project, into.Region, clusterID)
 	if err != nil {
 		return into, fmt.Errorf("no AlloyDB cluster named %q found in project %q — "+
@@ -462,6 +481,14 @@ func gcpComponent(t GcpTarget) Component {
 	// verified against that CA (fetched by the collector at discovery). AlloyDB
 	// connections ride the collector's connector tunnel, which owns transport
 	// identity, so the connect block's mode is not the identity mechanism there.
+	//
+	// KNOWN EDGE (deliberate, review 2026-09-02): an OLDER Cloud SQL instance
+	// with IAM auth + the per-instance internal CA + no dnsNames gets an IP
+	// host and verify-full, and the hostname check can then fail after deploy.
+	// The exception is keyed on auth method rather than CA mode because token
+	// auth requires a verifying transport; the recommended paths for such
+	// instances are enabling a DNS name / CAS, or --db-password. Widening the
+	// exception to CA-mode+host-form is a follow-up decision, not an accident.
 	sslMode := "verify-full"
 	if t.ProviderType == "cloud_sql" && auth.Method == "password" && t.ServerCaMode == "GOOGLE_MANAGED_INTERNAL_CA" {
 		sslMode = "verify-ca"

@@ -126,6 +126,14 @@ func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, o
 		if time.Now().After(deadline) {
 			return fmt.Errorf("compute operation %s did not finish in time", opName)
 		}
+		// The /wait endpoint normally blocks ~2 minutes, but it MAY return
+		// early with a non-DONE status under load; without a pause that turns
+		// this loop into a hot POST spin until the deadline.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 
