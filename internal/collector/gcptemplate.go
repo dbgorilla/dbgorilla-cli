@@ -18,8 +18,8 @@ import (
 // at this address are exactly the files their project deploys.
 const (
 	// gcpTemplateBucket is named on its own in the egress-blocked error
-	// message. NOTE: the bucket is provisioned by the release pipeline; until
-	// that lands, --template-source overrides this for testing.
+	// message. Until a version is published there, --template-source points a
+	// deploy at any gs:// copy of internal/collector/terraform/collector-gce.
 	gcpTemplateBucket = "dbgorilla-collector-templates"
 
 	gcpTemplateBase = "gs://" + gcpTemplateBucket + "/collector/gce/"
@@ -35,7 +35,7 @@ const GcpTemplateVersion = "v1.0"
 const gcpTemplateProbeTimeout = 5 * time.Second
 
 // HostedGcpTemplateSource returns the published template directory this build
-// deploys, for `dbg doctor` and the dry-run output.
+// deploys — the default for an install's --template-source.
 func HostedGcpTemplateSource() string { return gcpTemplateBase + GcpTemplateVersion }
 
 // probeGcpTemplate confirms the published template is reachable before any
@@ -47,28 +47,16 @@ func probeGcpTemplate(ctx context.Context, cfg gcpConfig, source string) error {
 	if !ok {
 		return fmt.Errorf("template source %q is not a gs:// address", source)
 	}
-	probeURL := "https://storage.googleapis.com/" + rest
-	if !strings.HasSuffix(probeURL, "/") {
-		probeURL += "/"
-	}
-	probeURL += "main.tf"
+	probeURL := "https://storage.googleapis.com/" + strings.TrimSuffix(rest, "/") + "/main.tf"
 
 	probeCtx, cancel := context.WithTimeout(ctx, gcpTemplateProbeTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := cfg.http.Do(req)
+	resp, err := gcpSend(probeCtx, cfg, http.MethodGet, probeURL, "", nil)
 	if err != nil {
 		return fmt.Errorf("could not reach the published collector template at %s "+
 			"(check egress to storage.googleapis.com, or pass --template-source): %w",
 			probeURL, err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("the published collector template at %s returned HTTP %d "+
-			"(check the address, or pass --template-source)", probeURL, resp.StatusCode)
-	}
+	resp.Body.Close()
 	return nil
 }

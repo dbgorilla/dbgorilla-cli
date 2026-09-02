@@ -202,16 +202,16 @@ func TestAwsRegion(t *testing.T) {
 
 // --- small exported helpers -----------------------------------------------
 
-func TestAwsCommandCatalog_IsAStableIndependentCopy(t *testing.T) {
-	got := AwsCommandCatalog()
+func TestCommandCatalog_IsAStableIndependentCopy(t *testing.T) {
+	got := CommandCatalog("postgres")
 	if len(got) != 2 || got[0] != CmdExecuteQuery || got[1] != CmdExplain {
 		t.Fatalf("catalog = %v", got)
 	}
 	// The picker mutates what it is given; the catalog must not be aliased to
 	// the package's own slice.
 	got[0] = "mutated"
-	if AwsCommandCatalog()[0] != CmdExecuteQuery {
-		t.Error("AwsCommandCatalog must return a copy")
+	if CommandCatalog("postgres")[0] != CmdExecuteQuery {
+		t.Error("CommandCatalog must return a copy")
 	}
 }
 

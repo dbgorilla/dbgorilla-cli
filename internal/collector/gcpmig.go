@@ -11,21 +11,25 @@ import (
 )
 
 // Day-2 operations against the deployment's managed instance group and its
-// logs. The template creates a REGIONAL MIG named after the deployment, so
-// these helpers address it by convention — a lookup would add a permission
-// requirement for what is a fixed naming contract, exactly like LogGroupFor.
+// logs. The template names the group (and its instances' base name) after the
+// deployment, so these helpers address it by that name — a lookup would add a
+// permission requirement for what is a fixed naming contract, exactly like
+// LogGroupFor.
 
-const computeBase = "https://compute.googleapis.com/compute/v1"
-const loggingBase = "https://logging.googleapis.com/v2"
+const (
+	computeBase = "https://compute.googleapis.com/compute/v1"
+	loggingBase = "https://logging.googleapis.com/v2"
+)
 
-// GcpMigFor returns the managed instance group the template creates for a
-// deployment. Pure: a naming convention shared with the template, pinned by
-// the template's own tests when it publishes.
-func GcpMigFor(deploymentName string) string { return deploymentName }
+// computeOpTimeout bounds a compute operation (resize, recreate). These finish
+// in seconds; the deploy budget would be absurd here.
+const computeOpTimeout = 2 * time.Minute
 
-func migPath(project, region, mig string) string {
-	return fmt.Sprintf("projects/%s/regions/%s/instanceGroupManagers/%s",
-		url.PathEscape(project), url.PathEscape(region), url.PathEscape(mig))
+// migPath is the REGIONAL instance group manager the template creates for a
+// deployment; by the naming contract its name is the deployment name.
+func migPath(project, region, deploymentName string) string {
+	return fmt.Sprintf("%s/projects/%s/regions/%s/instanceGroupManagers/%s", computeBase,
+		url.PathEscape(project), url.PathEscape(region), url.PathEscape(deploymentName))
 }
 
 // ScaleGcpMig sets the group's target size. 0 stops the collector without
@@ -35,14 +39,12 @@ func ScaleGcpMig(project, region, deploymentName string, size int) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return err
+		return gcpCredsErr(err)
 	}
-	u := fmt.Sprintf("%s/%s/resize?size=%d", computeBase,
-		migPath(project, region, GcpMigFor(deploymentName)), size)
-	op, err := gcpMutateJSON(ctx, cfg, http.MethodPost, u, nil)
+	u := fmt.Sprintf("%s/resize?size=%d", migPath(project, region, deploymentName), size)
+	op, err := startGcpOperation(ctx, cfg, http.MethodPost, u, nil)
 	if err != nil {
-		return fmt.Errorf("could not scale collector group %q to %d: %w",
-			GcpMigFor(deploymentName), size, err)
+		return fmt.Errorf("could not scale collector group %q to %d: %w", deploymentName, size, err)
 	}
 	return waitComputeOperation(ctx, cfg, project, region, op.Name)
 }
@@ -54,52 +56,34 @@ func RestartGcpMig(project, region, deploymentName string) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return err
+		return gcpCredsErr(err)
 	}
-	mig := GcpMigFor(deploymentName)
-	instances, err := listManagedInstances(ctx, cfg, project, region, mig)
+	instances, err := listManagedInstances(ctx, cfg, project, region, deploymentName)
 	if err != nil {
 		return err
 	}
 	if len(instances) == 0 {
 		return fmt.Errorf("collector group %q has no instances to restart — "+
-			"is it stopped? Run: dbg collector start", mig)
+			"is it stopped? Run: dbg collector start", deploymentName)
 	}
-	u := fmt.Sprintf("%s/%s/recreateInstances", computeBase, migPath(project, region, mig))
-	op, err := gcpMutateJSON(ctx, cfg, http.MethodPost, u, map[string]any{"instances": instances})
+	u := migPath(project, region, deploymentName) + "/recreateInstances"
+	op, err := startGcpOperation(ctx, cfg, http.MethodPost, u, map[string]any{"instances": instances})
 	if err != nil {
-		return fmt.Errorf("could not restart collector group %q: %w", mig, err)
+		return fmt.Errorf("could not restart collector group %q: %w", deploymentName, err)
 	}
 	return waitComputeOperation(ctx, cfg, project, region, op.Name)
 }
 
-// GcpMigTargetSize reports the group's target size, for status output.
-func GcpMigTargetSize(project, region, deploymentName string) (int, error) {
-	ctx := context.Background()
-	cfg, err := loadGCPConfig(ctx)
-	if err != nil {
-		return 0, err
-	}
-	var out struct {
-		TargetSize int `json:"targetSize"`
-	}
-	if err := gcpGetJSON(ctx, cfg,
-		computeBase+"/"+migPath(project, region, GcpMigFor(deploymentName)), &out); err != nil {
-		return 0, err
-	}
-	return out.TargetSize, nil
-}
-
-func listManagedInstances(ctx context.Context, cfg gcpConfig, project, region, mig string) ([]string, error) {
-	u := fmt.Sprintf("%s/%s/listManagedInstances", computeBase, migPath(project, region, mig))
+func listManagedInstances(ctx context.Context, cfg gcpConfig, project, region, deploymentName string) ([]string, error) {
 	var out struct {
 		ManagedInstances []struct {
 			Instance string `json:"instance"`
 		} `json:"managedInstances"`
 	}
 	// Answers inline — a plain listing behind a POST, not an LRO.
-	if err := gcpPostJSON(ctx, cfg, u, nil, &out); err != nil {
-		return nil, fmt.Errorf("could not list instances of collector group %q: %w", mig, err)
+	u := migPath(project, region, deploymentName) + "/listManagedInstances"
+	if err := gcpDo(ctx, cfg, http.MethodPost, u, nil, &out); err != nil {
+		return nil, fmt.Errorf("could not list instances of collector group %q: %w", deploymentName, err)
 	}
 	instances := make([]string, 0, len(out.ManagedInstances))
 	for _, mi := range out.ManagedInstances {
@@ -112,15 +96,15 @@ func listManagedInstances(ctx context.Context, cfg gcpConfig, project, region, m
 }
 
 // waitComputeOperation drives a regional compute operation to completion via
-// its blocking /wait endpoint. These finish in seconds; the deploy budget
-// would be absurd here.
+// its blocking /wait endpoint, which returns when the operation finishes or
+// after the server's own ~2 minute cap — so this loop rarely turns twice.
 func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, opName string) error {
 	if opName == "" {
 		return nil
 	}
 	u := fmt.Sprintf("%s/projects/%s/regions/%s/operations/%s/wait", computeBase,
 		url.PathEscape(project), url.PathEscape(region), url.PathEscape(opName))
-	deadline := time.Now().Add(2 * time.Minute)
+	deadline := time.Now().Add(computeOpTimeout)
 	for {
 		var out struct {
 			Status string `json:"status"`
@@ -130,7 +114,7 @@ func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, o
 				} `json:"errors"`
 			} `json:"error"`
 		}
-		if err := gcpPostJSON(ctx, cfg, u, nil, &out); err != nil {
+		if err := gcpDo(ctx, cfg, http.MethodPost, u, nil, &out); err != nil {
 			return err
 		}
 		if out.Error != nil && len(out.Error.Errors) > 0 {
@@ -146,39 +130,32 @@ func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, o
 }
 
 // TailGcpLogs prints the collector's container logs from Cloud Logging,
-// scoped to the deployment's instances by resource name — the TailLogs
-// analogue. `follow` polls every few seconds until interrupted.
+// scoped to the deployment's instances — the TailLogs analogue. `follow`
+// polls every few seconds until interrupted.
 func TailGcpLogs(project, deploymentName string, follow bool) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return err
+		return gcpCredsErr(err)
 	}
-	// COS containers log under resource.type="gce_instance"; the instance name
-	// carries the MIG (= deployment) name as its prefix.
+	// COS containers log under resource.type="gce_instance". The group names
+	// its instances "<deployment>-<4 chars>", so anchor on that: a substring
+	// match would also pick up a deployment whose name merely starts the same
+	// way.
 	filter := fmt.Sprintf(
-		`resource.type="gce_instance" AND labels."compute.googleapis.com/resource_name":"%s"`,
-		GcpMigFor(deploymentName))
-	cursor := time.Now().Add(-10 * time.Minute).UTC()
-	// Only the ids at exactly the newest timestamp need remembering — bounded
-	// memory, and no same-millisecond entry is ever skipped (the TailLogs
-	// approach; ts+1 cursors drop those).
-	seen := map[string]bool{}
+		`resource.type="gce_instance" AND labels."compute.googleapis.com/resource_name"=~"^%s-[a-z0-9]{4}$"`,
+		deploymentName)
+	cur := newLogCursor(time.Now().Add(-10 * time.Minute).UnixNano())
 	for {
-		entries, err := listLogEntries(ctx, cfg, project, filter, cursor)
+		entries, err := listLogEntries(ctx, cfg, project, filter, time.Unix(0, cur.newest).UTC())
 		if err != nil {
 			return err
 		}
 		for _, e := range entries {
-			if seen[e.InsertID] {
+			if !cur.accept(e.InsertID, e.Timestamp.UnixNano()) {
 				continue
 			}
 			fmt.Printf("%s %s\n", e.Timestamp.Format(time.RFC3339), e.text())
-			if e.Timestamp.After(cursor) {
-				cursor = e.Timestamp
-				seen = map[string]bool{}
-			}
-			seen[e.InsertID] = true
 		}
 		if !follow {
 			return nil
@@ -209,18 +186,29 @@ func (e gcpLogEntry) text() string {
 	return string(b)
 }
 
+// listLogEntries reads every entry since `since` (inclusive), following the
+// page token: entries:list is paginated and a busy collector easily exceeds
+// one page — ignoring the token would silently drop everything past the first.
 func listLogEntries(ctx context.Context, cfg gcpConfig, project, filter string, since time.Time) ([]gcpLogEntry, error) {
+	var out []gcpLogEntry
 	body := map[string]any{
 		"resourceNames": []string{"projects/" + project},
 		"filter":        fmt.Sprintf(`%s AND timestamp>="%s"`, filter, since.Format(time.RFC3339Nano)),
 		"orderBy":       "timestamp asc",
 		"pageSize":      1000,
 	}
-	var out struct {
-		Entries []gcpLogEntry `json:"entries"`
+	for {
+		var page struct {
+			gcpPage
+			Entries []gcpLogEntry `json:"entries"`
+		}
+		if err := gcpDo(ctx, cfg, http.MethodPost, loggingBase+"/entries:list", body, &page); err != nil {
+			return nil, fmt.Errorf("could not read logs for project %q: %w", project, err)
+		}
+		out = append(out, page.Entries...)
+		if page.NextPageToken == "" {
+			return out, nil
+		}
+		body["pageToken"] = page.NextPageToken
 	}
-	if err := gcpPostJSON(ctx, cfg, loggingBase+"/entries:list", body, &out); err != nil {
-		return nil, err
-	}
-	return out.Entries, nil
 }

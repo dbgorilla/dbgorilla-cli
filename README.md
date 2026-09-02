@@ -149,6 +149,24 @@ The template takes no injected values, so you can deploy it from the console wit
 
 Secrets never go in the config: reference them as `${DBG_SERVER_SECRET}` and `${DBG_DB_PASSWORD}` and supply the real values through the `ServerSecret` / `DbPassword` parameters, which the stack stores in Secrets Manager.
 
+## Collector on Google Cloud
+
+`dbg collector install --target gcp` deploys the collector as a single Compute Engine instance (a one-instance regional managed instance group on Container-Optimized OS) that monitors your Cloud SQL (PostgreSQL, MySQL) or AlloyDB databases. It runs entirely with **your own** Google Cloud credentials — the CLI reuses Application Default Credentials (`gcloud auth application-default login`, or `GOOGLE_APPLICATION_CREDENTIALS`), and nothing sensitive passes through DBGorilla.
+
+```sh
+dbg collector install --target gcp --deploy-service-account projects/PROJECT/serviceAccounts/EMAIL   # discover the database, deploy
+dbg collector install --target gcp --dry-run                                                        # show the config + probe the template, deploy nothing
+```
+
+Infrastructure Manager actuates the deployment as the service account named by `--deploy-service-account`; it needs `roles/config.agent` plus permission to create the collector's instance group, service account and secrets. The template creates the collector's own service account, which under IAM database authentication is also the database user: the install prints the `gcloud … users create` and `GRANT` steps to run afterwards. Pass `--db-password` to use password authentication instead. With several databases in the project, an interactive run offers a picker; otherwise pass `--db-instance-id` (a Cloud SQL instance, or an AlloyDB `cluster` or `cluster/instance`).
+
+### The Terraform template
+
+The deployment is defined by the Terraform template in [`internal/collector/terraform/collector-gce/`](internal/collector/terraform/collector-gce/), which the CLI expects at `gs://dbgorilla-collector-templates/collector/gce/v1.0/`. It is versioned like the CloudFormation template: independently of the CLI, by its input-variable contract, and a published version is never rewritten. The CLI carries no copy of its own — it deploys the directory at that address, or one you host yourself via `--template-source gs://…` — and if the address cannot be reached the install stops before creating anything. Secrets never land in instance metadata: the template stores them in Secret Manager and the instance fetches them at boot with its own service account.
+
+Not yet available for the gcp target: changing the monitored databases in place, and `dbg collector upgrade`. Both are `dbg collector uninstall` followed by a fresh install for now.
+
+
 ## Centralized Claude allowlist
 
 If your org uses a managed Claude allowlist (Team / Enterprise tier on app.claude.com), `dbg setup-ide` may be blocked by policy. Run:

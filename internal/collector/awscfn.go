@@ -397,52 +397,31 @@ func TailLogs(logGroup, region string, follow bool) error {
 		return err
 	}
 	client := cloudwatchlogs.NewFromConfig(cfg)
-	startMs := time.Now().Add(-10 * time.Minute).UnixMilli()
-	// seen holds the ids of the events at exactly startMs, and nothing else.
-	// FilterLogEvents' StartTime is inclusive, so those specific events come back
-	// on every poll and need suppressing; anything older can never reappear. That
-	// keeps the set bounded no matter how long --follow runs, where a map of every
-	// id ever printed would grow without limit.
-	seen := map[string]bool{}
+	// FilterLogEvents' StartTime is inclusive; the cursor suppresses the events
+	// it has already printed at that instant (see logCursor).
+	cur := newLogCursor(time.Now().Add(-10 * time.Minute).UnixMilli())
 	for {
 		// FilterLogEvents is paginated. A busy collector easily exceeds one page,
 		// and ignoring NextToken silently drops everything past the first.
 		pager := cloudwatchlogs.NewFilterLogEventsPaginator(client, &cloudwatchlogs.FilterLogEventsInput{
 			LogGroupName: aws.String(logGroup),
-			StartTime:    aws.Int64(startMs),
+			StartTime:    aws.Int64(cur.newest),
 		})
-		newest := startMs
-		boundary := map[string]bool{}
 		for pager.HasMorePages() {
 			out, err := pager.NextPage(ctx)
 			if err != nil {
 				return fmt.Errorf("could not read logs from %q: %w", logGroup, err)
 			}
 			for _, e := range out.Events {
-				id := aws.ToString(e.EventId)
-				if id != "" && seen[id] {
+				if !cur.accept(aws.ToString(e.EventId), aws.ToInt64(e.Timestamp)) {
 					continue
 				}
 				fmt.Println(aws.ToString(e.Message))
-				// Track the ids sharing the newest timestamp. Advancing startMs
-				// past it instead (ts+1) would drop any event written in the same
-				// millisecond that we had not yet read.
-				switch ts := aws.ToInt64(e.Timestamp); {
-				case ts > newest:
-					newest = ts
-					boundary = map[string]bool{}
-					fallthrough
-				case ts == newest:
-					if id != "" {
-						boundary[id] = true
-					}
-				}
 			}
 		}
 		if !follow {
 			return nil
 		}
-		startMs, seen = newest, boundary
 		time.Sleep(3 * time.Second)
 	}
 }

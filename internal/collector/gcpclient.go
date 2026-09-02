@@ -1,9 +1,12 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -62,14 +65,20 @@ func loadGCPConfigDefault(ctx context.Context) (gcpConfig, error) {
 	return gcpCfg, gcpCfgErr
 }
 
+// gcpCredsErr wraps a credential-resolution failure with the remediation, so
+// every GCP entry point tells the operator the same next step.
+func gcpCredsErr(err error) error {
+	return fmt.Errorf("could not load Google Cloud credentials "+
+		"(run 'gcloud auth application-default login', or set GOOGLE_APPLICATION_CREDENTIALS): %w", err)
+}
+
 // GcpAvailable returns nil when Google Cloud credentials resolve and mint a
 // working token. Mirrors AwsAvailable / DockerAvailable.
 func GcpAvailable() error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return fmt.Errorf("could not load Google Cloud credentials "+
-			"(run 'gcloud auth application-default login', or set GOOGLE_APPLICATION_CREDENTIALS): %w", err)
+		return gcpCredsErr(err)
 	}
 	if _, err := gcpTokenEmail(ctx, cfg); err != nil {
 		return fmt.Errorf("Google Cloud credentials aren't working "+
@@ -85,8 +94,7 @@ func GcpIdentity() (string, error) {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return "", fmt.Errorf("could not load Google Cloud credentials "+
-			"(run 'gcloud auth application-default login', or set GOOGLE_APPLICATION_CREDENTIALS): %w", err)
+		return "", gcpCredsErr(err)
 	}
 	email, err := gcpTokenEmail(ctx, cfg)
 	if err != nil {
@@ -105,11 +113,10 @@ func GcpIdentity() (string, error) {
 func GcpProject() (string, error) {
 	cfg, err := loadGCPConfig(context.Background())
 	if err != nil {
-		return "", fmt.Errorf("could not load Google Cloud credentials "+
-			"(run 'gcloud auth application-default login', or set GOOGLE_APPLICATION_CREDENTIALS): %w", err)
+		return "", gcpCredsErr(err)
 	}
 	if cfg.project == "" {
-		return "", fmt.Errorf("the Google Cloud credentials name no project — " +
+		return "", errors.New("the Google Cloud credentials name no project — " +
 			"pass --project, or set one with 'gcloud config set project'")
 	}
 	return cfg.project, nil
@@ -124,21 +131,12 @@ func gcpTokenEmail(ctx context.Context, cfg gcpConfig) (string, error) {
 		return "", err
 	}
 	form := url.Values{"access_token": {tok.AccessToken}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://oauth2.googleapis.com/tokeninfo",
-		strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := cfg.http.Do(req)
+	resp, err := gcpSend(ctx, cfg, http.MethodPost, "https://oauth2.googleapis.com/tokeninfo",
+		"application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("tokeninfo rejected the credential (HTTP %d)", resp.StatusCode)
-	}
 	var info struct {
 		Email string `json:"email"`
 	}
@@ -148,61 +146,94 @@ func gcpTokenEmail(ctx context.Context, cfg gcpConfig) (string, error) {
 	return info.Email, nil
 }
 
-// gcpGetJSON performs an authenticated GET and decodes the JSON response into
-// out. Non-2xx responses become errors carrying the API's own message, which
+// errGcpNotFound tags a 404, so callers for whom "absent" is a normal answer
+// (a deployment that was never created) can errors.Is it instead of parsing.
+var errGcpNotFound = errors.New("not found")
+
+// gcpSend issues one authenticated request and returns the response when it is
+// 2xx. Anything else becomes an error carrying Google's own message, which
 // names the missing permission or resource better than a bare status would.
-func gcpGetJSON(ctx context.Context, cfg gcpConfig, rawURL string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+// The caller closes the body.
+func gcpSend(ctx context.Context, cfg gcpConfig, method, rawURL, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := cfg.http.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return gcpAPIError(rawURL, resp)
+		defer resp.Body.Close()
+		return nil, gcpAPIError(rawURL, resp)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resp, nil
 }
 
-// gcpPostJSON performs an authenticated POST (body may be nil) and decodes the
-// JSON response into out — for API calls that answer inline rather than with a
-// long-running operation.
-func gcpPostJSON(ctx context.Context, cfg gcpConfig, rawURL string, body, out any) error {
-	payload := ""
+// gcpDo is gcpSend for the JSON APIs: body (nil for none) is marshalled, and
+// the response decoded into out (nil to discard it). Every Cloud SQL, AlloyDB,
+// Infrastructure Manager, Compute and Logging call in this package goes
+// through here.
+func gcpDo(ctx context.Context, cfg gcpConfig, method, rawURL string, body, out any) error {
+	var payload io.Reader
+	contentType := ""
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		payload = string(encoded)
+		payload = bytes.NewReader(encoded)
+		contentType = "application/json"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, strings.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := cfg.http.Do(req)
+	resp, err := gcpSend(ctx, cfg, method, rawURL, contentType, payload)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return gcpAPIError(rawURL, resp)
-	}
 	if out == nil {
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// gcpPage is embedded in every paginated list response.
+type gcpPage struct {
+	NextPageToken string `json:"nextPageToken"`
+}
+
+func (p gcpPage) next() string { return p.NextPageToken }
+
+// gcpListPages GETs a paginated collection, handing each page to `each` until
+// the API stops returning a page token. Skipping this and reading one page
+// would silently hide every database or log line past the first.
+func gcpListPages[P interface{ next() string }](ctx context.Context, cfg gcpConfig, rawURL string, each func(P)) error {
+	token := ""
+	for {
+		u := rawURL
+		if token != "" {
+			sep := "?"
+			if strings.Contains(u, "?") {
+				sep = "&"
+			}
+			u += sep + "pageToken=" + url.QueryEscape(token)
+		}
+		var page P
+		if err := gcpDo(ctx, cfg, http.MethodGet, u, nil, &page); err != nil {
+			return err
+		}
+		each(page)
+		if token = page.next(); token == "" {
+			return nil
+		}
+	}
+}
+
 // gcpAPIError shapes a non-2xx API response into an error with Google's own
 // message extracted (it usually names the fix: the missing role, the exact
-// resource, the API to enable).
+// resource, the API to enable). A 404 additionally wraps errGcpNotFound.
 func gcpAPIError(rawURL string, resp *http.Response) error {
 	var body struct {
 		Error struct {
@@ -211,11 +242,17 @@ func gcpAPIError(rawURL string, resp *http.Response) error {
 		} `json:"error"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&body)
+	var err error
 	if body.Error.Message != "" {
-		return fmt.Errorf("%s: %s (HTTP %d %s)", apiHost(rawURL), body.Error.Message,
+		err = fmt.Errorf("%s: %s (HTTP %d %s)", apiHost(rawURL), body.Error.Message,
 			resp.StatusCode, body.Error.Status)
+	} else {
+		err = fmt.Errorf("%s returned HTTP %d", apiHost(rawURL), resp.StatusCode)
 	}
-	return fmt.Errorf("%s returned HTTP %d", apiHost(rawURL), resp.StatusCode)
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %w", errGcpNotFound, err)
+	}
+	return err
 }
 
 func apiHost(rawURL string) string {
@@ -223,4 +260,10 @@ func apiHost(rawURL string) string {
 		return u.Host
 	}
 	return rawURL
+}
+
+// lastPathSegment returns the final element of a resource path
+// (projects/p/locations/l/clusters/NAME → NAME).
+func lastPathSegment(name string) string {
+	return name[strings.LastIndex(name, "/")+1:]
 }

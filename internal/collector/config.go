@@ -25,11 +25,11 @@ const (
 	SecretEnv     = "DBG_SERVER_SECRET"
 	DBPasswordEnv = "COLLECTOR_DB_PASSWORD"
 
-	// AwsDBPasswordEnv is the password reference for the aws target. It differs
-	// from DBPasswordEnv because the Fargate task definition names the variable
-	// itself (fed from Secrets Manager), while the docker target names it in the
-	// env-file it writes.
-	AwsDBPasswordEnv = "DBG_DB_PASSWORD"
+	// CloudDBPasswordEnv is the password reference for the cloud targets (aws,
+	// gcp). It differs from DBPasswordEnv because the deployment names the
+	// variable itself (fed from Secrets Manager / Secret Manager), while the
+	// docker target names it in the env-file it writes.
+	CloudDBPasswordEnv = "DBG_DB_PASSWORD"
 
 	// DockerHostInternal is the hostname that resolves to the Docker host from
 	// inside a container (native on Docker Desktop; on Linux we add an
@@ -205,34 +205,24 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 	if sslMode == "" {
 		sslMode = "verify-full"
 	}
-	return Config{
-		Dbgorilla: Dbgorilla{
-			AgentID:      agentID,
-			TenantID:     tenantID,
-			Secret:       "${" + SecretEnv + "}",
-			OpampBaseURL: eps.OpampBaseURL,
-			OtlpBaseURL:  eps.OtlpBaseURL,
-			AuthBaseURL:  eps.AuthBaseURL,
+	cfg := baseConfig(agentID, tenantID, eps, false)
+	cfg.Component = []Component{{
+		Name:     target.Name,
+		Engine:   "postgres",
+		Provider: Provider{Type: "self_hosted"},
+		Auth: Auth{
+			Method:   "password",
+			User:     target.User,
+			Password: "${" + DBPasswordEnv + "}",
 		},
-		Component: []Component{{
-			Name:     target.Name,
-			Engine:   "postgres",
-			Provider: Provider{Type: "self_hosted"},
-			Auth: Auth{
-				Method:   "password",
-				User:     target.User,
-				Password: "${" + DBPasswordEnv + "}",
-			},
-			Connect: Connect{
-				Host:      connectHost,
-				Port:      target.Port,
-				Databases: target.Databases,
-				SSLMode:   sslMode,
-			},
-		}},
-		Topology: Topology{Interval: "60s"},
-		Commands: Commands{Enabled: false},
-	}
+		Connect: Connect{
+			Host:      connectHost,
+			Port:      target.Port,
+			Databases: target.Databases,
+			SSLMode:   sslMode,
+		},
+	}}
+	return cfg
 }
 
 // Render serializes the Config to collector.toml text.

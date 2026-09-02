@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
 	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
@@ -24,11 +23,13 @@ var (
 	scaleGcpMig         = collector.ScaleGcpMig
 	restartGcpMig       = collector.RestartGcpMig
 	tailGcpLogs         = collector.TailGcpLogs
-	// Method expressions (not wrapping closures) so the production defaults
-	// carry no uncovered statement of their own.
-	runGcpDeploy      = collector.GcpDeploy.Run
-	runGcpDeployQuiet = collector.GcpDeploy.RunQuiet
+	// A method expression (not a wrapping closure) so the production default
+	// carries no uncovered statement of its own.
+	runGcpDeploy = collector.GcpDeploy.Run
 )
+
+// gcpSecretInputs are the template inputs a dry run must redact.
+var gcpSecretInputs = []string{"server_secret", "db_password"}
 
 func init() {
 	installCmd.Flags().String("project", "", "GCP: project to act on (default: the credentials' project)")
@@ -39,60 +40,50 @@ func init() {
 }
 
 // runInstallGCP deploys the collector to a Compute Engine managed instance
-// group via Infrastructure Manager. It shares the aws target's provisioning
-// spine — identity preflight, discovery, config-as-parameter, deploy with
-// rollback — against Google's APIs.
+// group via Infrastructure Manager, on the shared cloud install spine.
 func runInstallGCP(cmd *cobra.Command) error {
-	apiURL, err := requireAPIURL(cmd)
+	apiURL, err := requireInstallSession(cmd)
 	if err != nil {
 		return err
 	}
-	if _, err := requireLogin(); err != nil {
-		return err
-	}
-
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	if st, _ := collector.LoadState(); st != nil && !dryRun {
-		if !st.IsGCP() {
-			return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
-				st.AgentID)
-		}
-		status, err := gcpDeploymentStatus(st.Project, st.Region, st.DeploymentName)
-		if err != nil {
-			return err
-		}
-		if status != "" {
-			// In-place component updates (the aws target's runUpdateAWS) need the
-			// stored config read back off the deployment; that lands with the
-			// update slice. Until then, changing the monitored set is
-			// uninstall + install.
-			return fmt.Errorf("collector deployment %q already exists (%s). "+
-				"Run `dbg collector uninstall` first; in-place updates for the gcp target are not wired yet",
-				st.DeploymentName, status)
-		}
-		fmt.Println(style.Warn(fmt.Sprintf(
-			"⚠  deployment %q from the last install no longer exists — installing fresh.\n"+
-				"   Collector %s is still provisioned in DBGorilla; remove it with `dbg collector uninstall` once this finishes.",
-			st.DeploymentName, st.AgentID)))
+
+	// Flag checks first: they cost nothing, and failing them after discovery
+	// has made a round of API calls wastes the operator's time.
+	deployServiceAccount, _ := cmd.Flags().GetString("deploy-service-account")
+	if deployServiceAccount == "" && !dryRun {
+		return errors.New("pass --deploy-service-account: the account Infrastructure Manager actuates Terraform as " +
+			"(it needs roles/config.agent plus permission to create the collector's instance group and service account)")
+	}
+	deploymentName, _ := cmd.Flags().GetString("deployment-name")
+	templateSource, _ := cmd.Flags().GetString("template-source")
+	if templateSource == "" {
+		templateSource = collector.HostedGcpTemplateSource()
 	}
 
-	// Preflight: the caller's own ADC; no keys pass through this tool.
-	if err := gcpAvailable(); err != nil {
-		return err
-	}
-	identity, err := gcpIdentity()
+	prior, status, err := priorCloudInstall(dryRun, (*collector.State).IsGCP,
+		func(st *collector.State) (string, error) {
+			return gcpDeploymentStatus(st.Project, st.Region, st.DeploymentName)
+		},
+		"deployment", func(st *collector.State) string { return st.DeploymentName })
 	if err != nil {
 		return err
 	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Google Cloud identity: %s", identity)))
-
-	client := newAPIClient(cmd)
-	supported, err := client.CollectorSupported()
-	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
+	if prior != nil {
+		// In-place component updates (the aws target's runUpdateAWS) need the
+		// stored config read back off the deployment; until that lands,
+		// changing the monitored set is uninstall + install.
+		return fmt.Errorf("collector deployment %q already exists (%s). "+
+			"Run `dbg collector uninstall` first; in-place updates for the gcp target are not wired yet",
+			prior.DeploymentName, status)
 	}
-	if !supported {
-		return api.ErrCollectorUnsupported
+
+	if err := printCloudIdentity("Google Cloud", gcpAvailable, gcpIdentity); err != nil {
+		return err
+	}
+	client, err := requireCollectorSupport(cmd, apiURL)
+	if err != nil {
+		return err
 	}
 
 	project, _ := cmd.Flags().GetString("project")
@@ -101,18 +92,19 @@ func runInstallGCP(cmd *cobra.Command) error {
 			return err
 		}
 	}
-
 	target, err := resolveGcpTarget(cmd, project)
 	if err != nil {
 		return err
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Target database: %s (%s)", target.InstanceID, target.Host)))
 
-	deploymentName, _ := cmd.Flags().GetString("deployment-name")
-	if err := resolveGcpAuth(cmd, &target, deploymentName, project); err != nil {
+	dbPassword := dbPasswordFlag(cmd)
+	if err := resolveGcpAuth(&target, dbPassword, deploymentName, project); err != nil {
 		return err
 	}
 
+	// The collector instance joins the database's VPC unless --network says
+	// otherwise; a database without a private network has nothing to join.
 	network, _ := cmd.Flags().GetString("network")
 	if network == "" {
 		network = target.Network
@@ -121,18 +113,8 @@ func runInstallGCP(cmd *cobra.Command) error {
 		return errors.New("could not determine the collector's VPC (the database reports no private network); pass --network")
 	}
 
-	deployServiceAccount, _ := cmd.Flags().GetString("deploy-service-account")
-	if deployServiceAccount == "" && !dryRun {
-		return errors.New("pass --deploy-service-account: the account Infrastructure Manager actuates Terraform as " +
-			"(it needs roles/config.agent plus permission to create the collector's instance group and service account)")
-	}
-	templateSource, _ := cmd.Flags().GetString("template-source")
-	if templateSource == "" {
-		templateSource = collector.HostedGcpTemplateSource()
-	}
-	commandsEnabled, _ := cmd.Flags().GetBool("enable-commands")
-	dbPassword := awsDBPassword(cmd) // flag/env resolution is target-agnostic
 	targets := []collector.GcpTarget{target}
+	commandsEnabled := resolveCommands(cmd, targets, gcpTargetLabel)
 
 	if dryRun {
 		image, _ := resolveImage(cmd, nil)
@@ -151,7 +133,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Printf("\nDry run — probing the template for deployment %q (no identity minted):\n", deploymentName)
-		printGcpInputs(inputs)
+		printDeployParams(inputs, gcpSecretInputs, "collector_config")
 		return runGcpDeploy(collector.GcpDeploy{
 			Project: project, Region: target.Region, DeploymentName: deploymentName,
 			TemplateSource: templateSource, DryRun: true,
@@ -165,18 +147,8 @@ func runInstallGCP(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	// Pin to a digest before it reaches the template: the MIG re-pulls when an
-	// instance is recreated, so an unresolved tag changes version on a restart
-	// nobody asked for — and upgrades would have nothing to act on.
 	image, imageSource := resolveImage(cmd, creds)
-	if pinned, perr := pinImageRemote(image); perr == nil {
-		image = pinned
-	} else {
-		fmt.Println(style.Warn(fmt.Sprintf(
-			"⚠  could not resolve %s to a fixed version (%v).\n"+
-				"   Deploying the tag as-is: the collector may change version when its instance restarts.",
-			image, perr)))
-	}
+	image = pinImageOrWarn(image, "instance")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
 	inputs, err := collector.GcpDeployInputs(collector.GcpStackInput{
@@ -197,22 +169,18 @@ func runInstallGCP(cmd *cobra.Command) error {
 		return err
 	}
 
-	// Save state BEFORE the slow deploy so an interrupted install leaves a
-	// tracked collector, not an orphaned deployment + identity.
-	if serr := collector.SaveState(&collector.State{
+	saveStateOrWarn(&collector.State{
 		AgentID:        creds.AgentID,
 		TenantID:       creds.TenantID,
 		Domain:         creds.Domain,
 		Target:         "gcp",
 		Image:          image,
-		TargetName:     target.InstanceID,
+		TargetName:     target.DisplayName(),
 		Project:        project,
 		Region:         target.Region,
 		DeploymentName: deploymentName,
 		CreatedAt:      time.Now().UTC(),
-	}); serr != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not save local state: %v", serr)))
-	}
+	})
 
 	fmt.Printf("Deploying to Compute Engine (deployment %q)...\n", deploymentName)
 	deploy := collector.GcpDeploy{
@@ -220,22 +188,10 @@ func runInstallGCP(cmd *cobra.Command) error {
 		TemplateSource: templateSource, ServiceAccount: deployServiceAccount,
 		Inputs: inputs,
 	}
-	if err := deployGcp(deploy, "Deploying to Compute Engine…"); err != nil {
-		if errors.Is(err, collector.ErrDeployTimeout) {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The deployment was NOT rolled back — "+
-				"it is most likely still converging.", collector.GcpDeployTimeout())))
-			fmt.Println("   Watch it with: dbg collector status")
-			return nil
-		}
-		fmt.Println("Deploy failed; rolling back the provisioned identity and deployment...")
-		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
-		}
-		if serr := deleteGcpDeployment(project, target.Region, deploymentName); serr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete deployment %s: %v (delete it from the console)", deploymentName, serr)))
-		}
-		_ = collector.RemoveState()
-		return fmt.Errorf("%w\n\nRolled back. Fix the issue above and re-run", err)
+	if err := withSpinner("Deploying to Compute Engine…", func() error { return runGcpDeploy(deploy) }); err != nil {
+		return cloudDeployFailed(err, client, creds.AgentID, collector.GcpDeployTimeout(), "deployment", deploymentName,
+			func() error { return deleteGcpDeployment(project, target.Region, deploymentName) },
+			"   Watch it with: dbg collector status\n")
 	}
 
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector deploying to Compute Engine (deployment %s).", deploymentName)))
@@ -243,8 +199,9 @@ func runInstallGCP(cmd *cobra.Command) error {
 	return nil
 }
 
-// resolveGcpTarget picks and completes the database target. On an ambiguous
-// project the typed error's candidate list is printed — never guessed from.
+// resolveGcpTarget picks and completes the database target. An ambiguous
+// project becomes a picker on a real terminal; otherwise the typed error's
+// candidate list is surfaced — never guessed from.
 func resolveGcpTarget(cmd *cobra.Command, project string) (collector.GcpTarget, error) {
 	id, _ := cmd.Flags().GetString("db-instance-id")
 	providerType, _ := cmd.Flags().GetString("provider-type")
@@ -252,20 +209,27 @@ func resolveGcpTarget(cmd *cobra.Command, project string) (collector.GcpTarget, 
 	if names, _ := cmd.Flags().GetString("db-name"); names != "" {
 		seed.Databases = splitCSV(names)
 	}
-	return discoverGcpTarget(id, providerType, seed)
+	seed.User, _ = cmd.Flags().GetString("db-user")
+
+	target, err := discoverGcpTarget(id, providerType, seed)
+	var amb *collector.AmbiguousTargetError
+	if errors.As(err, &amb) && interactiveSelectable(cmd) {
+		choice, perr := pickTarget(amb)
+		if perr != nil {
+			return collector.GcpTarget{}, perr
+		}
+		return discoverGcpTarget(choice.ID, choice.ProviderType, seed)
+	}
+	return target, err
 }
 
 // resolveGcpAuth settles the target's auth: --db-password forces password
-// auth; otherwise IAM when the database supports it (AlloyDB always does;
-// Cloud SQL needs its flag on).
-func resolveGcpAuth(cmd *cobra.Command, target *collector.GcpTarget, deploymentName, project string) error {
-	if pw := awsDBPassword(cmd); pw != "" {
+// auth (as the --db-user, else the collector's default user); otherwise IAM
+// when the database supports it (AlloyDB always does; Cloud SQL needs its
+// flag on), as the runtime service account's database identity.
+func resolveGcpAuth(target *collector.GcpTarget, dbPassword, deploymentName, project string) error {
+	if dbPassword != "" {
 		target.AuthMethod = "password"
-		if user, _ := cmd.Flags().GetString("db-user"); user != "" {
-			target.User = user
-		} else {
-			target.User = "postgres"
-		}
 		return nil
 	}
 	if !target.IamEnabled {
@@ -279,41 +243,14 @@ func resolveGcpAuth(cmd *cobra.Command, target *collector.GcpTarget, deploymentN
 	return nil
 }
 
-// deployGcp runs the deployment with a spinner when interactive, mirroring
-// deployStack.
-func deployGcp(deploy collector.GcpDeploy, title string) error {
-	if !interactiveTerminal() {
-		return runGcpDeploy(deploy)
-	}
-	return withSpinner(title, func() error {
-		_, err := runGcpDeployQuiet(deploy)
-		return err
-	})
-}
-
-// printGcpInputs prints the rendered template inputs with secrets redacted and
-// the config decoded back to readable TOML.
-func printGcpInputs(inputs map[string]string) {
-	for _, k := range []string{"collector_image", "network", "region", "runtime_service_account"} {
-		fmt.Printf("  %s: %s\n", k, inputs[k])
-	}
-	fmt.Println("  server_secret: (redacted)")
-	if inputs["db_password"] != "" {
-		fmt.Println("  db_password: (redacted)")
-	}
-	if decoded, err := collector.DecodeConfig(inputs["collector_config"]); err == nil {
-		fmt.Printf("  collector_config (decoded):\n%s\n", decoded)
-	}
-}
-
 // printGcpGrantGuidance names the two grant steps IAM auth needs: registering
 // the collector's service account as a database user (an API call, not SQL),
 // and the in-database read grants.
 func printGcpGrantGuidance(target collector.GcpTarget, deploymentName, project string) {
-	sa := collector.GcpRuntimeServiceAccountFor(deploymentName, project)
 	if target.AuthMethod != "gcp_iam" {
 		return
 	}
+	sa := collector.GcpRuntimeServiceAccountFor(deploymentName, project)
 	fmt.Println("\nGrant the collector database access:")
 	if target.ProviderType == "alloydb" {
 		fmt.Printf("  1. Register the service account as a database user:\n"+
@@ -333,20 +270,7 @@ func printGcpGrantGuidance(target collector.GcpTarget, deploymentName, project s
 // gcpStatus reports a GCP-deployed collector's deployment state plus its
 // control-plane connection.
 func gcpStatus(cmd *cobra.Command, st *collector.State) error {
-	fmt.Printf("Agent:      %s\n", st.AgentID)
-	fmt.Printf("Tenant:     %s\n", st.TenantID)
-	fmt.Printf("Target:     gcp — %s\n", st.TargetName)
-	fmt.Printf("Image:      %s\n", st.Image)
-	fmt.Printf("Deployment: %s\n", st.DeploymentName)
-	status, err := gcpDeploymentStatus(st.Project, st.Region, st.DeploymentName)
-	switch {
-	case err != nil:
-		fmt.Println(style.Warn(fmt.Sprintf("Deploy:     status unknown (%v)", err)))
-	case status == "":
-		fmt.Println(style.Warn("Deploy:     deployment not found"))
-	default:
-		fmt.Println(style.Success(fmt.Sprintf("Deploy:     %s", status)))
-	}
-	printConnectionStatus(cmd, st.AgentID)
-	return nil
+	return cloudStatus(cmd, st, "Deployment", st.DeploymentName, func() (string, error) {
+		return gcpDeploymentStatus(st.Project, st.Region, st.DeploymentName)
+	})
 }

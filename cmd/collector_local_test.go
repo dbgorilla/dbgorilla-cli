@@ -32,12 +32,10 @@ func TestRunInstall_TargetDispatch(t *testing.T) {
 	})
 
 	t.Run("gcp takes the GCP path", func(t *testing.T) {
-		orig := gcpAvailable
-		gcpAvailable = func() error { return errors.New("sentinel-gcp-path") }
-		t.Cleanup(func() { gcpAvailable = orig })
-		c := awsCmd(t)
-		mustSet(t, c, "target", "gcp")
+		stubGcpAvailable(t, errors.New("sentinel-gcp-path"))
+		c := gcpCmd(t)
 		mustSet(t, c, "yes", "true")
+
 		var err error
 		capture(t, func() { err = runInstall(c, nil) })
 		if err == nil || !strings.Contains(err.Error(), "sentinel-gcp-path") {

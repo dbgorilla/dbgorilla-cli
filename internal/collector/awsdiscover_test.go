@@ -151,7 +151,8 @@ func TestSoloTarget_SingleInstance(t *testing.T) {
 		on("DescribeDBInstances", describeInstancesXML(instanceXML("only-db", "postgres"))).
 		on("DescribeDBClusters", describeClustersXML()))
 
-	id, kind, err := soloTarget()
+	choice, err := soloTarget()
+	id, kind := choice.ID, choice.ProviderType
 	if err != nil {
 		t.Fatalf("soloTarget: %v", err)
 	}
@@ -165,7 +166,8 @@ func TestSoloTarget_SingleAuroraCluster(t *testing.T) {
 		on("DescribeDBInstances", describeInstancesXML()).
 		on("DescribeDBClusters", describeClustersXML(clusterXML("only-aurora", "aurora-postgresql"))))
 
-	id, kind, err := soloTarget()
+	choice, err := soloTarget()
+	id, kind := choice.ID, choice.ProviderType
 	if err != nil {
 		t.Fatalf("soloTarget: %v", err)
 	}
@@ -186,7 +188,8 @@ func TestSoloTarget_IgnoresNonPostgresEngines(t *testing.T) {
 		)).
 		on("DescribeDBClusters", describeClustersXML(clusterXML("aurora-my", "aurora-mysql"))))
 
-	id, kind, err := soloTarget()
+	choice, err := soloTarget()
+	id, kind := choice.ID, choice.ProviderType
 	if err != nil {
 		t.Fatalf("soloTarget: %v", err)
 	}
@@ -201,7 +204,7 @@ func TestSoloTarget_AmbiguousCarriesCandidates(t *testing.T) {
 			instanceXML("pg-a", "postgres"), instanceXML("pg-b", "postgres"))).
 		on("DescribeDBClusters", describeClustersXML(clusterXML("aurora-c", "aurora-postgresql"))))
 
-	_, _, err := soloTarget()
+	_, err := soloTarget()
 	var amb *AmbiguousTargetError
 	if !errors.As(err, &amb) {
 		t.Fatalf("err = %v, want *AmbiguousTargetError", err)
@@ -216,7 +219,7 @@ func TestSoloTarget_NoneFound(t *testing.T) {
 		on("DescribeDBInstances", describeInstancesXML()).
 		on("DescribeDBClusters", describeClustersXML()))
 
-	if _, _, err := soloTarget(); err == nil || !strings.Contains(err.Error(), "--db-instance-id") {
+	if _, err := soloTarget(); err == nil || !strings.Contains(err.Error(), "--db-instance-id") {
 		t.Fatalf("err = %v, want a message offering --db-instance-id", err)
 	}
 }
@@ -225,7 +228,7 @@ func TestSoloTarget_ListErrorsAreDistinguishable(t *testing.T) {
 	t.Run("instance list fails", func(t *testing.T) {
 		stubAWS(t, newAWSFake(t).fail("DescribeDBInstances", http.StatusForbidden,
 			awsErrorXML("AccessDenied", "denied")))
-		_, _, err := soloTarget()
+		_, err := soloTarget()
 		if err == nil || !strings.Contains(err.Error(), "AWS permissions") {
 			t.Fatalf("err = %v, want the permissions hint", err)
 		}
@@ -235,7 +238,7 @@ func TestSoloTarget_ListErrorsAreDistinguishable(t *testing.T) {
 		stubAWS(t, newAWSFake(t).
 			on("DescribeDBInstances", describeInstancesXML()).
 			fail("DescribeDBClusters", http.StatusForbidden, awsErrorXML("AccessDenied", "denied")))
-		_, _, err := soloTarget()
+		_, err := soloTarget()
 		if err == nil || !strings.Contains(err.Error(), "Aurora") {
 			t.Fatalf("err = %v, want the Aurora list named", err)
 		}
@@ -243,7 +246,7 @@ func TestSoloTarget_ListErrorsAreDistinguishable(t *testing.T) {
 
 	t.Run("credentials fail", func(t *testing.T) {
 		stubAWSConfigError(t, errors.New("no credentials"))
-		if _, _, err := soloTarget(); err == nil {
+		if _, err := soloTarget(); err == nil {
 			t.Fatal("expected the credential error")
 		}
 	})
