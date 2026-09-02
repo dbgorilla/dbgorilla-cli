@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -9,10 +10,10 @@ import (
 )
 
 // The gcp target: Cloud SQL (Postgres/MySQL) and AlloyDB (Postgres), monitored
-// by a collector deployed inside the customer's project. Discovery mirrors the
-// aws target's shape — list the supported databases, auto-select a solo
-// candidate, refuse to guess between several — against the Cloud SQL Admin and
-// AlloyDB APIs instead of RDS.
+// by a collector deployed inside the customer's project. Discovery has the aws
+// target's shape — list the supported databases, auto-select a solo candidate,
+// refuse to guess between several — against the Cloud SQL Admin and AlloyDB
+// APIs instead of RDS.
 
 // GcpTarget describes one database the gcp collector will monitor. Provider
 // type "cloud_sql" names an instance; "alloydb" names a cluster plus its
@@ -40,69 +41,18 @@ type GcpTarget struct {
 	Network string // VPC self-link, for the deployment's network preflight
 
 	Databases  []string
-	User       string
-	AuthMethod string // "gcp_iam" | "password"
-	Commands   []string
+	User       string   // empty means DefaultDBUser
+	AuthMethod string   // "gcp_iam" (default) | "password"
+	Commands   []string // query-analysis commands allowed; empty means none
 }
 
-// Complete reports whether discovery still needs to fill anything in.
-func (t GcpTarget) Complete() bool {
-	if t.Project == "" || t.Region == "" || t.InstanceID == "" || t.Host == "" {
-		return false
+// DisplayName is what the component is called in DBGorilla: the cluster for
+// alloydb (its primary is an implementation detail), else the instance.
+func (t GcpTarget) DisplayName() string {
+	if t.ProviderType == "alloydb" {
+		return t.ClusterID
 	}
-	if t.ProviderType == "alloydb" && t.ClusterID == "" {
-		return false
-	}
-	return t.ProviderType != ""
-}
-
-// GcpTargetChoice is one selectable database, for the interactive picker.
-type GcpTargetChoice struct {
-	ID           string // cloud_sql instance id, or "cluster/instance" for alloydb
-	ProviderType string
-}
-
-// AmbiguousGcpTargetError reports that the project holds several supported
-// databases, carrying the candidates so an interactive caller can present a
-// choice. Mirrors AmbiguousTargetError for aws: selection never guesses.
-type AmbiguousGcpTargetError struct {
-	Instances []string // Cloud SQL instance ids
-	Clusters  []string // AlloyDB "cluster/primary-instance" ids
-}
-
-func (e *AmbiguousGcpTargetError) Error() string {
-	return fmt.Sprintf("found multiple databases (Cloud SQL %v, AlloyDB %v); pass --db-instance-id to choose one",
-		e.Instances, e.Clusters)
-}
-
-// Candidates returns the choices in a stable order: Cloud SQL instances, then
-// AlloyDB clusters.
-func (e *AmbiguousGcpTargetError) Candidates() []GcpTargetChoice {
-	out := make([]GcpTargetChoice, 0, len(e.Instances)+len(e.Clusters))
-	for _, id := range e.Instances {
-		out = append(out, GcpTargetChoice{ID: id, ProviderType: "cloud_sql"})
-	}
-	for _, id := range e.Clusters {
-		out = append(out, GcpTargetChoice{ID: id, ProviderType: "alloydb"})
-	}
-	return out
-}
-
-// selectSoloGcp picks the target when exactly one candidate exists, returns a
-// plain error on zero, and *AmbiguousGcpTargetError on more than one. Pure.
-func selectSoloGcp(instances, clusters []string) (id, kind string, err error) {
-	switch len(instances) + len(clusters) {
-	case 0:
-		return "", "", fmt.Errorf("no Cloud SQL or AlloyDB databases found in this project; " +
-			"pass --db-instance-id (Cloud SQL instance, or alloydb cluster/instance)")
-	case 1:
-		if len(instances) == 1 {
-			return instances[0], "cloud_sql", nil
-		}
-		return clusters[0], "alloydb", nil
-	default:
-		return "", "", &AmbiguousGcpTargetError{Instances: instances, Clusters: clusters}
-	}
+	return t.InstanceID
 }
 
 // DiscoverGcpTarget completes `into` from the control plane. `id` may be empty
@@ -110,62 +60,80 @@ func selectSoloGcp(instances, clusters []string) (id, kind string, err error) {
 // "cluster/instance". `providerHint` forces cloud_sql vs alloydb when both
 // carry the same id.
 func DiscoverGcpTarget(id, providerHint string, into GcpTarget) (GcpTarget, error) {
+	if into.Project == "" {
+		return into, errors.New("no project resolved for discovery; pass --project")
+	}
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return into, fmt.Errorf("could not load Google Cloud credentials "+
-			"(run 'gcloud auth application-default login'): %w", err)
-	}
-	if into.Project == "" {
-		return into, fmt.Errorf("no project resolved for discovery; pass --project")
+		return into, gcpCredsErr(err)
 	}
 
+	location := ""
 	if id == "" {
-		instances, clusters, err := listGcpCandidates(ctx, cfg, into.Project, providerHint)
+		cands, err := listGcpCandidates(ctx, cfg, into.Project, providerHint)
 		if err != nil {
 			return into, err
 		}
-		id, providerHint, err = selectSoloGcp(instances, clusters)
+		choice, err := selectSolo(cands.choices, errors.New(
+			"no Cloud SQL or AlloyDB databases found in this project; "+
+				"pass --db-instance-id (Cloud SQL instance, or alloydb cluster/instance)"))
 		if err != nil {
 			return into, err
 		}
+		id, providerHint, location = choice.ID, choice.ProviderType, cands.locations[choice.ID]
 	}
 
-	switch {
-	case providerHint == "alloydb" || strings.Contains(id, "/"):
-		return discoverAlloyDB(ctx, cfg, into, id)
-	default:
-		return discoverCloudSQL(ctx, cfg, into, id)
+	if providerHint == "alloydb" || strings.Contains(id, "/") {
+		return discoverAlloyDB(ctx, cfg, into, id, location)
 	}
+	return discoverCloudSQL(ctx, cfg, into, id)
+}
+
+// gcpCandidates is a listing of the supported databases: the selectable
+// choices in a stable order (Cloud SQL instances, then AlloyDB clusters), plus
+// the AlloyDB locations the listing learned, keyed by choice id, so a
+// solo-selected cluster needs no second lookup to be found again.
+type gcpCandidates struct {
+	choices   []TargetChoice
+	locations map[string]string
 }
 
 // listGcpCandidates enumerates the supported databases: Cloud SQL Postgres +
 // MySQL primaries (replicas follow their primary and are never targets), and
 // AlloyDB primary clusters as "cluster/primary". A provider hint narrows the
 // listing so a hinted install doesn't require permissions on the other API.
-func listGcpCandidates(ctx context.Context, cfg gcpConfig, project, providerHint string) (instances, clusters []string, err error) {
+func listGcpCandidates(ctx context.Context, cfg gcpConfig, project, providerHint string) (gcpCandidates, error) {
+	out := gcpCandidates{locations: map[string]string{}}
 	if providerHint == "" || providerHint == "cloud_sql" {
 		sqlInstances, err := listCloudSQLInstances(ctx, cfg, project)
 		if err != nil {
-			return nil, nil, err
+			return out, err
 		}
+		var ids []string
 		for _, inst := range sqlInstances {
 			if inst.MasterInstanceName != "" || !supportedCloudSQLEngine(inst.DatabaseVersion) {
 				continue
 			}
-			instances = append(instances, inst.Name)
+			ids = append(ids, inst.Name)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			out.choices = append(out.choices, TargetChoice{ID: id, ProviderType: "cloud_sql"})
 		}
 	}
 	if providerHint == "" || providerHint == "alloydb" {
-		adbClusters, err := listAlloyDBPrimaries(ctx, cfg, project)
+		primaries, err := listAlloyDBPrimaries(ctx, cfg, project)
 		if err != nil {
-			return nil, nil, err
+			return out, err
 		}
-		clusters = append(clusters, adbClusters...)
+		sort.Slice(primaries, func(i, j int) bool { return primaries[i].id() < primaries[j].id() })
+		for _, p := range primaries {
+			out.choices = append(out.choices, TargetChoice{ID: p.id(), ProviderType: "alloydb"})
+			out.locations[p.id()] = p.location
+		}
 	}
-	sort.Strings(instances)
-	sort.Strings(clusters)
-	return instances, clusters, nil
+	return out, nil
 }
 
 func supportedCloudSQLEngine(databaseVersion string) bool {
@@ -174,6 +142,8 @@ func supportedCloudSQLEngine(databaseVersion string) bool {
 }
 
 // --- Cloud SQL (sqladmin v1) -----------------------------------------------
+
+const sqlAdminBase = "https://sqladmin.googleapis.com/v1"
 
 type sqlInstanceInfo struct {
 	Name               string `json:"name"`
@@ -199,36 +169,28 @@ type sqlInstanceInfo struct {
 	} `json:"settings"`
 }
 
+type sqlInstancesPage struct {
+	gcpPage
+	Items []sqlInstanceInfo `json:"items"`
+}
+
 func listCloudSQLInstances(ctx context.Context, cfg gcpConfig, project string) ([]sqlInstanceInfo, error) {
 	var out []sqlInstanceInfo
-	pageToken := ""
-	for {
-		u := fmt.Sprintf("https://sqladmin.googleapis.com/v1/projects/%s/instances", url.PathEscape(project))
-		if pageToken != "" {
-			u += "?pageToken=" + url.QueryEscape(pageToken)
-		}
-		var page struct {
-			Items         []sqlInstanceInfo `json:"items"`
-			NextPageToken string            `json:"nextPageToken"`
-		}
-		if err := gcpGetJSON(ctx, cfg, u, &page); err != nil {
-			return nil, fmt.Errorf("could not list Cloud SQL instances in project %q "+
-				"(is the Cloud SQL Admin API enabled, and does this identity hold cloudsql.viewer?): %w",
-				project, err)
-		}
-		out = append(out, page.Items...)
-		if page.NextPageToken == "" {
-			return out, nil
-		}
-		pageToken = page.NextPageToken
+	u := fmt.Sprintf("%s/projects/%s/instances", sqlAdminBase, url.PathEscape(project))
+	err := gcpListPages(ctx, cfg, u, func(p sqlInstancesPage) { out = append(out, p.Items...) })
+	if err != nil {
+		return nil, fmt.Errorf("could not list Cloud SQL instances in project %q "+
+			"(is the Cloud SQL Admin API enabled, and does this identity hold cloudsql.viewer?): %w",
+			project, err)
 	}
+	return out, nil
 }
 
 func getCloudSQLInstance(ctx context.Context, cfg gcpConfig, project, instance string) (*sqlInstanceInfo, error) {
-	u := fmt.Sprintf("https://sqladmin.googleapis.com/v1/projects/%s/instances/%s",
+	u := fmt.Sprintf("%s/projects/%s/instances/%s", sqlAdminBase,
 		url.PathEscape(project), url.PathEscape(instance))
 	var info sqlInstanceInfo
-	if err := gcpGetJSON(ctx, cfg, u, &info); err != nil {
+	if err := gcpDo(ctx, cfg, "GET", u, nil, &info); err != nil {
 		return nil, err
 	}
 	return &info, nil
@@ -313,6 +275,15 @@ func mergeCloudSQLInstance(into GcpTarget, info *sqlInstanceInfo) GcpTarget {
 
 // --- AlloyDB (alloydb v1) ---------------------------------------------------
 
+const alloydbBase = "https://alloydb.googleapis.com/v1"
+
+type alloydbClusterInfo struct {
+	Name string `json:"name"` // full resource path
+}
+
+func (c alloydbClusterInfo) shortID() string  { return lastPathSegment(c.Name) }
+func (c alloydbClusterInfo) location() string { return alloydbLocation(c.Name) }
+
 type alloydbInstanceInfo struct {
 	Name         string `json:"name"` // full resource path
 	InstanceType string `json:"instanceType"`
@@ -320,10 +291,17 @@ type alloydbInstanceInfo struct {
 	IPAddress    string `json:"ipAddress"`
 }
 
-func (i alloydbInstanceInfo) shortID() string {
-	parts := strings.Split(i.Name, "/")
-	return parts[len(parts)-1]
+func (i alloydbInstanceInfo) shortID() string { return lastPathSegment(i.Name) }
+
+// alloydbPrimary is one cluster's PRIMARY instance together with the location
+// the listing saw it in. Kept structured rather than flattened into the
+// "cluster/instance" id, so discovery of a solo-selected cluster does not
+// have to re-list every cluster to recover the location it just dropped.
+type alloydbPrimary struct {
+	cluster, instance, location string
 }
+
+func (p alloydbPrimary) id() string { return p.cluster + "/" + p.instance }
 
 // alloydbLocation extracts the region from a full resource path.
 func alloydbLocation(name string) string {
@@ -336,50 +314,45 @@ func alloydbLocation(name string) string {
 	return ""
 }
 
-// listAlloyDBPrimaries returns "cluster/primary-instance" ids across all
-// locations (the aggregate `locations/-` listing).
-func listAlloyDBPrimaries(ctx context.Context, cfg gcpConfig, project string) ([]string, error) {
-	var clusters []struct {
-		Name  string `json:"name"`
-		State string `json:"state"`
-	}
-	pageToken := ""
-	for {
-		u := fmt.Sprintf("https://alloydb.googleapis.com/v1/projects/%s/locations/-/clusters", url.PathEscape(project))
-		if pageToken != "" {
-			u += "?pageToken=" + url.QueryEscape(pageToken)
-		}
-		var page struct {
-			Clusters []struct {
-				Name  string `json:"name"`
-				State string `json:"state"`
-			} `json:"clusters"`
-			NextPageToken string `json:"nextPageToken"`
-		}
-		if err := gcpGetJSON(ctx, cfg, u, &page); err != nil {
-			return nil, fmt.Errorf("could not list AlloyDB clusters in project %q "+
-				"(is the AlloyDB API enabled, and does this identity hold alloydb.viewer?): %w",
-				project, err)
-		}
-		clusters = append(clusters, page.Clusters...)
-		if page.NextPageToken == "" {
-			break
-		}
-		pageToken = page.NextPageToken
-	}
+type alloydbClustersPage struct {
+	gcpPage
+	Clusters []alloydbClusterInfo `json:"clusters"`
+}
 
-	var out []string
+type alloydbInstancesPage struct {
+	gcpPage
+	Instances []alloydbInstanceInfo `json:"instances"`
+}
+
+// listAlloyDBClusters lists every cluster across locations (the aggregate
+// `locations/-` listing).
+func listAlloyDBClusters(ctx context.Context, cfg gcpConfig, project string) ([]alloydbClusterInfo, error) {
+	var out []alloydbClusterInfo
+	u := fmt.Sprintf("%s/projects/%s/locations/-/clusters", alloydbBase, url.PathEscape(project))
+	err := gcpListPages(ctx, cfg, u, func(p alloydbClustersPage) { out = append(out, p.Clusters...) })
+	if err != nil {
+		return nil, fmt.Errorf("could not list AlloyDB clusters in project %q "+
+			"(is the AlloyDB API enabled, and does this identity hold alloydb.viewer?): %w",
+			project, err)
+	}
+	return out, nil
+}
+
+// listAlloyDBPrimaries returns every cluster's PRIMARY instance.
+func listAlloyDBPrimaries(ctx context.Context, cfg gcpConfig, project string) ([]alloydbPrimary, error) {
+	clusters, err := listAlloyDBClusters(ctx, cfg, project)
+	if err != nil {
+		return nil, err
+	}
+	var out []alloydbPrimary
 	for _, c := range clusters {
-		parts := strings.Split(c.Name, "/")
-		clusterID := parts[len(parts)-1]
-		location := alloydbLocation(c.Name)
-		instances, err := listAlloyDBInstances(ctx, cfg, project, location, clusterID)
+		instances, err := listAlloyDBInstances(ctx, cfg, project, c.location(), c.shortID())
 		if err != nil {
 			return nil, err
 		}
 		for _, inst := range instances {
 			if inst.InstanceType == "PRIMARY" {
-				out = append(out, clusterID+"/"+inst.shortID())
+				out = append(out, alloydbPrimary{cluster: c.shortID(), instance: inst.shortID(), location: c.location()})
 			}
 		}
 	}
@@ -387,21 +360,24 @@ func listAlloyDBPrimaries(ctx context.Context, cfg gcpConfig, project string) ([
 }
 
 func listAlloyDBInstances(ctx context.Context, cfg gcpConfig, project, location, cluster string) ([]alloydbInstanceInfo, error) {
-	u := fmt.Sprintf("https://alloydb.googleapis.com/v1/projects/%s/locations/%s/clusters/%s/instances",
+	var out []alloydbInstanceInfo
+	u := fmt.Sprintf("%s/projects/%s/locations/%s/clusters/%s/instances", alloydbBase,
 		url.PathEscape(project), url.PathEscape(location), url.PathEscape(cluster))
-	var page struct {
-		Instances []alloydbInstanceInfo `json:"instances"`
-	}
-	if err := gcpGetJSON(ctx, cfg, u, &page); err != nil {
+	err := gcpListPages(ctx, cfg, u, func(p alloydbInstancesPage) { out = append(out, p.Instances...) })
+	if err != nil {
 		return nil, fmt.Errorf("could not list instances of AlloyDB cluster %q: %w", cluster, err)
 	}
-	return page.Instances, nil
+	return out, nil
 }
 
 // discoverAlloyDB fills the target from the cluster's instance listing. `id`
-// is "cluster" (primary auto-picked) or "cluster/instance".
-func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id string) (GcpTarget, error) {
+// is "cluster" (primary auto-picked) or "cluster/instance"; `location` is the
+// cluster's region when the caller already knows it, else it is looked up.
+func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id, location string) (GcpTarget, error) {
 	clusterID, instanceID, _ := strings.Cut(id, "/")
+	if into.Region == "" {
+		into.Region = location
+	}
 	if into.Region == "" {
 		region, err := findAlloyDBClusterRegion(ctx, cfg, into.Project, clusterID)
 		if err != nil {
@@ -451,19 +427,13 @@ func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id stri
 
 // findAlloyDBClusterRegion locates a cluster by id across locations.
 func findAlloyDBClusterRegion(ctx context.Context, cfg gcpConfig, project, clusterID string) (string, error) {
-	u := fmt.Sprintf("https://alloydb.googleapis.com/v1/projects/%s/locations/-/clusters", url.PathEscape(project))
-	var page struct {
-		Clusters []struct {
-			Name string `json:"name"`
-		} `json:"clusters"`
+	clusters, err := listAlloyDBClusters(ctx, cfg, project)
+	if err != nil {
+		return "", err
 	}
-	if err := gcpGetJSON(ctx, cfg, u, &page); err != nil {
-		return "", fmt.Errorf("could not list AlloyDB clusters in project %q: %w", project, err)
-	}
-	for _, c := range page.Clusters {
-		parts := strings.Split(c.Name, "/")
-		if parts[len(parts)-1] == clusterID {
-			return alloydbLocation(c.Name), nil
+	for _, c := range clusters {
+		if c.shortID() == clusterID {
+			return c.location(), nil
 		}
 	}
 	return "", fmt.Errorf("no AlloyDB cluster named %q found in project %q — "+
@@ -472,16 +442,8 @@ func findAlloyDBClusterRegion(ctx context.Context, cfg gcpConfig, project, clust
 
 // --- config rendering --------------------------------------------------------
 
-// GcpDBPasswordEnv is the password reference for the gcp target. Like the aws
-// target, the deployment names the variable itself (fed from Secret Manager).
-const GcpDBPasswordEnv = "DBG_DB_PASSWORD"
-
 // gcpComponent lowers one target into its [[component]] block.
 func gcpComponent(t GcpTarget) Component {
-	name := t.InstanceID
-	if t.ProviderType == "alloydb" {
-		name = t.ClusterID
-	}
 	provider := Provider{
 		Type:     t.ProviderType,
 		Project:  t.Project,
@@ -491,30 +453,21 @@ func gcpComponent(t GcpTarget) Component {
 	if t.ProviderType == "alloydb" {
 		provider.Cluster = t.ClusterID
 	}
-	auth := Auth{Method: t.AuthMethod, User: t.User}
-	if auth.Method == "" {
-		auth.Method = "gcp_iam"
-	}
-	if auth.User == "" {
-		auth.User = "dbgorilla"
-	}
+	auth := Auth{Method: orDefault(t.AuthMethod, "gcp_iam"), User: orDefault(t.User, DefaultDBUser)}
 	if auth.Method == "password" {
-		auth.Password = "${" + GcpDBPasswordEnv + "}"
+		auth.Password = "${" + CloudDBPasswordEnv + "}"
 	}
+	// verify-full everywhere, with one exception: password auth on Cloud SQL's
+	// default per-instance CA, which attests no hostname — there the chain is
+	// verified against that CA (fetched by the collector at discovery). AlloyDB
+	// connections ride the collector's connector tunnel, which owns transport
+	// identity, so the connect block's mode is not the identity mechanism there.
 	sslMode := "verify-full"
-	switch {
-	case t.ProviderType == "alloydb":
-		// Every alloydb connection rides the collector's in-process connector
-		// tunnel; the collector owns the transport, so the connect block's
-		// ssl_mode is not the identity mechanism there.
-		sslMode = "verify-full"
-	case t.AuthMethod != "gcp_iam" && t.ServerCaMode == "GOOGLE_MANAGED_INTERNAL_CA":
-		// Password auth on the default per-instance CA verifies the chain
-		// against that CA (fetched by the collector at discovery): verify-ca.
+	if t.ProviderType == "cloud_sql" && auth.Method == "password" && t.ServerCaMode == "GOOGLE_MANAGED_INTERNAL_CA" {
 		sslMode = "verify-ca"
 	}
 	return Component{
-		Name:     name,
+		Name:     t.DisplayName(),
 		Engine:   t.Engine,
 		Commands: t.Commands,
 		Provider: provider,
@@ -532,18 +485,7 @@ func gcpComponent(t GcpTarget) Component {
 // stay ${ENV} references; the real values ride the deployment's Secret Manager
 // parameters, never this document.
 func GcpConfigTOML(agentID, tenantID string, targets []GcpTarget, eps Endpoints, commandsEnabled bool) (string, error) {
-	cfg := Config{
-		Dbgorilla: Dbgorilla{
-			AgentID:      agentID,
-			TenantID:     tenantID,
-			Secret:       "${" + SecretEnv + "}",
-			OpampBaseURL: eps.OpampBaseURL,
-			OtlpBaseURL:  eps.OtlpBaseURL,
-			AuthBaseURL:  eps.AuthBaseURL,
-		},
-		Topology: Topology{Interval: "60s"},
-		Commands: Commands{Enabled: commandsEnabled},
-	}
+	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
 	for _, t := range targets {
 		cfg.Component = append(cfg.Component, gcpComponent(t))
 	}

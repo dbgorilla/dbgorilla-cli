@@ -1,48 +1,45 @@
 package collector
 
 import (
-	"errors"
+	"context"
+	"reflect"
 	"strings"
 	"testing"
 )
 
 // --- solo-target selection ---------------------------------------------------
 
-func TestSelectSoloGcp_PicksTheOnlyCandidate(t *testing.T) {
-	id, kind, err := selectSoloGcp([]string{"prod-pg"}, nil)
-	if err != nil || id != "prod-pg" || kind != "cloud_sql" {
-		t.Fatalf("got (%q, %q, %v)", id, kind, err)
+// The gcp listing feeds the shared selector: Cloud SQL instances first, then
+// AlloyDB clusters, each tagged with its provider type so a pick discovers the
+// right way.
+func TestListGcpCandidates_OrderAndKinds(t *testing.T) {
+	stubGCP(t, newGCPFake(t).
+		on("GET", "/v1/projects/p/instances", 200, sqlInstancesJSON(
+			sqlInstanceJSON("zeta-pg", "POSTGRES_16", ""),
+			sqlInstanceJSON("alpha-my", "MYSQL_8_0", ""),
+			sqlInstanceJSON("replica", "POSTGRES_16", "zeta-pg"), // replicas are never targets
+			sqlInstanceJSON("legacy-sqlserver", "SQLSERVER_2019_STANDARD", ""))).
+		on("GET", "/v1/projects/p/locations/-/clusters", 200,
+			`{"clusters":[{"name":"projects/p/locations/us-east1/clusters/orders"}]}`).
+		on("GET", "/v1/projects/p/locations/us-east1/clusters/orders/instances", 200,
+			`{"instances":[{"name":"projects/p/locations/us-east1/clusters/orders/instances/orders-primary","instanceType":"PRIMARY","ipAddress":"10.1.2.3"}]}`))
+	cfg, _ := loadGCPConfig(context.Background())
+	got, err := listGcpCandidates(context.Background(), cfg, "p", "")
+	if err != nil {
+		t.Fatalf("listGcpCandidates: %v", err)
 	}
-	id, kind, err = selectSoloGcp(nil, []string{"orders/orders-primary"})
-	if err != nil || id != "orders/orders-primary" || kind != "alloydb" {
-		t.Fatalf("got (%q, %q, %v)", id, kind, err)
+	want := []TargetChoice{
+		{ID: "alpha-my", ProviderType: "cloud_sql"},
+		{ID: "zeta-pg", ProviderType: "cloud_sql"},
+		{ID: "orders/orders-primary", ProviderType: "alloydb"},
 	}
-}
-
-func TestSelectSoloGcp_ZeroCandidatesIsAPlainActionableError(t *testing.T) {
-	_, _, err := selectSoloGcp(nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "--db-instance-id") {
-		t.Fatalf("error must name the flag to pass: %v", err)
+	if !reflect.DeepEqual(got.choices, want) {
+		t.Fatalf("choices:\n got  %+v\n want %+v", got.choices, want)
 	}
-	var amb *AmbiguousGcpTargetError
-	if errors.As(err, &amb) {
-		t.Fatalf("zero candidates must not be ambiguous: %v", err)
-	}
-}
-
-func TestSelectSoloGcp_ManyCandidatesIsTypedSoTheTUICanPrompt(t *testing.T) {
-	_, _, err := selectSoloGcp([]string{"a", "b"}, []string{"c/c-primary"})
-	var amb *AmbiguousGcpTargetError
-	if !errors.As(err, &amb) {
-		t.Fatalf("expected *AmbiguousGcpTargetError, got %v", err)
-	}
-	choices := amb.Candidates()
-	if len(choices) != 3 {
-		t.Fatalf("candidates: %v", choices)
-	}
-	// Stable order: Cloud SQL instances first, then AlloyDB clusters.
-	if choices[0].ProviderType != "cloud_sql" || choices[2].ProviderType != "alloydb" {
-		t.Fatalf("candidate order changed: %v", choices)
+	// The location rides along with the AlloyDB choice, so discovery of a
+	// solo-selected cluster needs no second listing to find it again.
+	if got.locations["orders/orders-primary"] != "us-east1" {
+		t.Fatalf("locations: %v", got.locations)
 	}
 }
 
@@ -169,7 +166,7 @@ func TestGcpComponent_PasswordOnInternalCAConnectsAtVerifyCA(t *testing.T) {
 	if c.Connect.SSLMode != "verify-ca" {
 		t.Fatalf("expected verify-ca on the internal CA, got %q", c.Connect.SSLMode)
 	}
-	if c.Auth.Password != "${"+GcpDBPasswordEnv+"}" {
+	if c.Auth.Password != "${"+CloudDBPasswordEnv+"}" {
 		t.Fatalf("password must be an env reference, got %q", c.Auth.Password)
 	}
 }
@@ -225,25 +222,5 @@ func TestGcpConfigTOML_RoundTripsThroughTheStrictParser(t *testing.T) {
 	}
 	if strings.Contains(rendered, "tenant123secret") || !strings.Contains(rendered, "${DBG_SERVER_SECRET}") {
 		t.Fatalf("secrets must stay env references:\n%s", rendered)
-	}
-}
-
-func TestGcpTargetComplete(t *testing.T) {
-	base := GcpTarget{ProviderType: "cloud_sql", Project: "p", Region: "r", InstanceID: "i", Host: "h"}
-	if !base.Complete() {
-		t.Fatalf("complete target read as incomplete: %+v", base)
-	}
-	missing := base
-	missing.Host = ""
-	if missing.Complete() {
-		t.Fatal("a hostless target is not complete")
-	}
-	adb := GcpTarget{ProviderType: "alloydb", Project: "p", Region: "r", InstanceID: "i", Host: "h"}
-	if adb.Complete() {
-		t.Fatal("alloydb without a cluster is not complete")
-	}
-	adb.ClusterID = "c"
-	if !adb.Complete() {
-		t.Fatalf("complete alloydb target read as incomplete: %+v", adb)
 	}
 }

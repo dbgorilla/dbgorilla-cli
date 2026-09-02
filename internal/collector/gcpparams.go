@@ -2,7 +2,7 @@ package collector
 
 import (
 	"fmt"
-	"sort"
+	"strings"
 )
 
 // DefaultGcpDeploymentName is the Infrastructure Manager deployment (and, by
@@ -11,7 +11,7 @@ const DefaultGcpDeploymentName = "dbgorilla-collector"
 
 // gcpInputKeys is the template's input-variable contract — the gcp analogue of
 // fargateParamKeys. Every deploy sends exactly these; the template versions on
-// changes to this set.
+// changes to this set, and TestGcpTemplateContract pins the two together.
 var gcpInputKeys = []string{
 	"collector_config",
 	"collector_image",
@@ -23,10 +23,10 @@ var gcpInputKeys = []string{
 }
 
 // GcpRuntimeServiceAccountFor is the service account the template creates for
-// the collector VM — a naming contract shared with the template, like
-// GcpMigFor. The install computes it upfront because the IAM database user
-// (gcp_iam auth) is derived from it, and the config referencing that user is
-// rendered before the account exists.
+// the collector VM — a naming contract shared with the template. The install
+// computes it upfront because the IAM database user (gcp_iam auth) is derived
+// from it, and the config referencing that user is rendered before the account
+// exists.
 func GcpRuntimeServiceAccountFor(deploymentName, project string) string {
 	return fmt.Sprintf("%s@%s.iam.gserviceaccount.com", deploymentName, project)
 }
@@ -37,18 +37,10 @@ func GcpRuntimeServiceAccountFor(deploymentName, project string) string {
 // before the @ (verified live against both engines).
 func GcpDatabaseUserFor(saEmail, engine string) string {
 	if engine == "mysql" {
-		for i := range saEmail {
-			if saEmail[i] == '@' {
-				return saEmail[:i]
-			}
-		}
-		return saEmail
+		local, _, _ := strings.Cut(saEmail, "@")
+		return local
 	}
-	const suffix = ".gserviceaccount.com"
-	if len(saEmail) > len(suffix) && saEmail[len(saEmail)-len(suffix):] == suffix {
-		return saEmail[:len(saEmail)-len(suffix)]
-	}
-	return saEmail
+	return strings.TrimSuffix(saEmail, ".gserviceaccount.com")
 }
 
 // GcpStackInput carries everything GcpDeployInputs needs to render the
@@ -86,26 +78,13 @@ func GcpDeployInputs(in GcpStackInput) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	inputs := map[string]string{
-		"collector_config": encoded,
-		"collector_image":  in.Image,
-		"db_password":      in.DBPassword,
-		"network":          in.Network,
-		"region":           in.Region,
-		"runtime_service_account": GcpRuntimeServiceAccountFor(
-			in.DeploymentName, in.Project),
-		"server_secret": in.ServerSecret,
-	}
-	// Belt-and-suspenders against key drift: the rendered set IS the contract.
-	keys := make([]string, 0, len(inputs))
-	for k := range inputs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for i, k := range keys {
-		if k != gcpInputKeys[i] {
-			return nil, fmt.Errorf("template input set drifted (%q vs %q) — bump the template contract", k, gcpInputKeys[i])
-		}
-	}
-	return inputs, nil
+	return map[string]string{
+		"collector_config":        encoded,
+		"collector_image":         in.Image,
+		"db_password":             in.DBPassword,
+		"network":                 in.Network,
+		"region":                  in.Region,
+		"runtime_service_account": GcpRuntimeServiceAccountFor(in.DeploymentName, in.Project),
+		"server_secret":           in.ServerSecret,
+	}, nil
 }

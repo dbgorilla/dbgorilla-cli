@@ -47,25 +47,22 @@ func TestGcpTemplateContract_VariablesMatchInputKeys(t *testing.T) {
 func TestGcpTemplateContract_NamingContractHolds(t *testing.T) {
 	// The template derives every resource name from the runtime service
 	// account's local part, which GcpRuntimeServiceAccountFor sets to the
-	// deployment name — and GcpMigFor promises the MIG carries that name.
+	// deployment name; the day-2 helpers address the MIG by that same name.
 	sa := GcpRuntimeServiceAccountFor("dbgorilla-collector", "acme-prod")
 	if sa != "dbgorilla-collector@acme-prod.iam.gserviceaccount.com" {
 		t.Fatalf("service-account naming contract changed: %s", sa)
 	}
-	if GcpMigFor("dbgorilla-collector") != "dbgorilla-collector" {
-		t.Fatal("MIG naming contract changed")
+	main, err := os.ReadFile("terraform/collector-gce/main.tf")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
 	}
-}
-
-func TestGcpDatabaseUserFor(t *testing.T) {
-	sa := "dbgorilla-collector@acme-prod.iam.gserviceaccount.com"
-	// Postgres (Cloud SQL and AlloyDB): the email minus the suffix.
-	if got := GcpDatabaseUserFor(sa, "postgres"); got != "dbgorilla-collector@acme-prod.iam" {
-		t.Fatalf("postgres IAM username: %q", got)
+	for _, want := range []string{"name               = local.name", "base_instance_name = local.name"} {
+		if !strings.Contains(string(main), want) {
+			t.Errorf("the MIG and its instances must carry the deployment name (%q missing)", want)
+		}
 	}
-	// MySQL: the part before the @ (verified live).
-	if got := GcpDatabaseUserFor(sa, "mysql"); got != "dbgorilla-collector" {
-		t.Fatalf("mysql IAM username: %q", got)
+	if got := migPath("acme-prod", "us-central1", "dbgorilla-collector"); !strings.HasSuffix(got, "/instanceGroupManagers/dbgorilla-collector") {
+		t.Errorf("day-2 helpers must address the MIG by the deployment name, got %s", got)
 	}
 }
 
@@ -78,11 +75,11 @@ func TestGcpDeployInputs_RendersTheFullContract(t *testing.T) {
 			InstanceID: "orders-pg", Engine: "postgres", Host: "h.", Port: 5432,
 			AuthMethod: "gcp_iam", User: "u",
 		}},
-		Network:        "projects/p/global/networks/default",
-		Region:         "us-central1",
-		DeploymentName: "dbgorilla-collector",
-		Project:        "p",
-		ServerSecret:   "secret123",
+		Network:         "projects/p/global/networks/default",
+		Region:          "us-central1",
+		DeploymentName:  "dbgorilla-collector",
+		Project:         "p",
+		ServerSecret:    "secret123",
 		CommandsEnabled: true,
 	})
 	if err != nil {

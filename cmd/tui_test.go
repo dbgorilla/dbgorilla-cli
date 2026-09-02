@@ -108,8 +108,8 @@ func TestPromptCommands(t *testing.T) {
 	// enables the lot.
 	t.Run("confirming keeps every command", func(t *testing.T) {
 		var got []string
-		scriptForm(t, "\n\n\n", func() { got = promptCommands(collector.AwsTarget{Name: "prod"}) })
-		if len(got) != len(collector.AwsCommandCatalog()) {
+		scriptForm(t, "\n\n\n", func() { got = promptCommands("postgres", "prod") })
+		if len(got) != len(collector.CommandCatalog("postgres")) {
 			t.Errorf("commands = %v, want the full catalog", got)
 		}
 	})
@@ -118,14 +118,14 @@ func TestPromptCommands(t *testing.T) {
 	// would quietly reduce what the collector reports.
 	t.Run("abort falls back to the catalog", func(t *testing.T) {
 		var got []string
-		scriptForm(t, "", func() { got = promptCommands(collector.AwsTarget{Name: "prod"}) })
-		if len(got) != len(collector.AwsCommandCatalog()) {
+		scriptForm(t, "", func() { got = promptCommands("postgres", "prod") })
+		if len(got) != len(collector.CommandCatalog("postgres")) {
 			t.Errorf("commands = %v, want the full catalog on abort", got)
 		}
 	})
 
 	t.Run("the database is named in the title", func(t *testing.T) {
-		out := scriptForm(t, "", func() { _ = promptCommands(collector.AwsTarget{Name: "prod-db"}) })
+		out := scriptForm(t, "", func() { _ = promptCommands("postgres", "prod-db") })
 		if !strings.Contains(out, "prod-db") {
 			t.Errorf("out = %q", out)
 		}
@@ -133,10 +133,11 @@ func TestPromptCommands(t *testing.T) {
 }
 
 func TestPickTargets(t *testing.T) {
-	amb := &collector.AmbiguousTargetError{
-		Instances: []string{"prod-db", "staging-db"},
-		Clusters:  []string{"analytics"},
-	}
+	amb := &collector.AmbiguousTargetError{Choices: []collector.TargetChoice{
+		{ID: "prod-db", ProviderType: "aws_rds"},
+		{ID: "staging-db", ProviderType: "aws_rds"},
+		{ID: "analytics", ProviderType: "aws_aurora"},
+	}}
 
 	// In line-based mode each option is a number and 0 confirms.
 	const confirm = "0\n"

@@ -2,12 +2,10 @@ package collector
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 )
 
@@ -26,14 +24,13 @@ const infraManagerBase = "https://config.googleapis.com/v1"
 // gcpDeployTimeout bounds how long we wait for a deployment create/update.
 // Terraform applies a MIG and waits for the instance; a cold image pull can
 // legitimately take a while. Giving up too early must not tear anything down —
-// see ErrDeployTimeout, whose contract this target shares with aws.
-const gcpDeployTimeout = 30 * time.Minute
-
-// gcpDeleteTimeout bounds a deployment delete.
-const gcpDeleteTimeout = 15 * time.Minute
-
-// gcpPollInterval is the LRO poll cadence.
-const gcpPollInterval = 5 * time.Second
+// see ErrDeployTimeout, whose contract this target shares with aws. Variables
+// rather than constants so tests can shorten the wait.
+var (
+	gcpDeployTimeout = 30 * time.Minute
+	gcpDeleteTimeout = 15 * time.Minute
+	gcpPollInterval  = 5 * time.Second
+)
 
 // GcpDeploy describes one Infrastructure Manager deployment of the collector.
 type GcpDeploy struct {
@@ -41,8 +38,8 @@ type GcpDeploy struct {
 	Region         string
 	DeploymentName string
 	// TemplateSource is the published template's GCS directory
-	// (gs://…/collector/gce/<version>/). Resolved by resolveGcpTemplate;
-	// overridable the way --template-url overrides the aws template.
+	// (gs://…/collector/gce/<version>/), HostedGcpTemplateSource unless
+	// --template-source overrides it the way --template-url does for aws.
 	TemplateSource string
 	// ServiceAccount is the account Infrastructure Manager actuates Terraform
 	// as (projects/{p}/serviceAccounts/{email} — IM requires one explicitly).
@@ -56,32 +53,21 @@ type GcpDeploy struct {
 // Run deploys (create, or update in place) and waits for a terminal state.
 func (d GcpDeploy) Run() error { return d.deploy(context.Background()) }
 
-// RunQuiet is Run for the spinner path; the error is self-describing.
-func (d GcpDeploy) RunQuiet() (string, error) { return "", d.deploy(context.Background()) }
-
 // GcpDeployTimeout exposes the wait budget so the command layer can name it.
 func GcpDeployTimeout() time.Duration { return gcpDeployTimeout }
 
-func (d GcpDeploy) deploymentPath() string {
+func gcpDeploymentPath(project, region, name string) string {
 	return fmt.Sprintf("projects/%s/locations/%s/deployments/%s",
-		d.Project, d.Region, d.DeploymentName)
+		url.PathEscape(project), url.PathEscape(region), url.PathEscape(name))
 }
 
 // gcpDeployment is the subset of the Infrastructure Manager Deployment
 // resource this package reads.
 type gcpDeployment struct {
-	Name             string `json:"name"`
-	State            string `json:"state"` // CREATING | ACTIVE | UPDATING | DELETING | FAILED | SUSPENDED
-	StateDetail      string `json:"stateDetail"`
-	LatestRevision   string `json:"latestRevision"`
-	ErrorLogs        string `json:"errorLogs"`
-	ServiceAccount   string `json:"serviceAccount"`
-	TerraformBlueprint struct {
-		GcsSource   string `json:"gcsSource"`
-		InputValues map[string]struct {
-			InputValue any `json:"inputValue"`
-		} `json:"inputValues"`
-	} `json:"terraformBlueprint"`
+	Name        string `json:"name"`
+	State       string `json:"state"` // CREATING | ACTIVE | UPDATING | DELETING | FAILED | SUSPENDED
+	StateDetail string `json:"stateDetail"`
+	ErrorLogs   string `json:"errorLogs"`
 }
 
 func (d GcpDeploy) body() map[string]any {
@@ -101,33 +87,37 @@ func (d GcpDeploy) body() map[string]any {
 func (d GcpDeploy) deploy(ctx context.Context) error {
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
+		return gcpCredsErr(err)
+	}
+	// The published template must be reachable before anything is touched:
+	// this turns "the deploy failed twenty minutes in" into "your egress or the
+	// template address is wrong" upfront, on every path — not only the dry run.
+	if err := probeGcpTemplate(ctx, cfg, d.TemplateSource); err != nil {
 		return err
 	}
 	if d.DryRun {
 		// Infrastructure Manager has no server-side validate-only call the way
-		// CloudFormation does; the dry run checks what it can — that the
-		// published template is reachable — and stops before any mutation.
-		return probeGcpTemplate(ctx, cfg, d.TemplateSource)
+		// CloudFormation does; the probe above is what a dry run can check, and
+		// it stops here before any mutation.
+		return nil
 	}
 
-	existing, err := getGcpDeployment(ctx, cfg, d.deploymentPath())
+	path := gcpDeploymentPath(d.Project, d.Region, d.DeploymentName)
+	existing, err := getGcpDeployment(ctx, cfg, path)
 	if err != nil {
 		return err
 	}
 	if existing != nil {
-		switch {
-		case gcpDeploymentInProgress(existing.State):
+		if gcpDeploymentInProgress(existing.State) {
 			return fmt.Errorf("deployment %q is %s — another operation is already in progress; wait for it to finish and re-run",
 				d.DeploymentName, existing.State)
-		case existing.State == "FAILED":
-			// A failed deployment updates in place: Infrastructure Manager
-			// re-applies Terraform against whatever half-converged, unlike a
-			// CloudFormation ROLLBACK_COMPLETE stack that must be recreated.
-			fallthrough
-		default:
-			return d.mutate(ctx, cfg, http.MethodPatch,
-				infraManagerBase+"/"+d.deploymentPath()+"?updateMask=service_account,terraform_blueprint")
 		}
+		// Any settled state — ACTIVE, SUSPENDED, or FAILED — updates in place:
+		// Infrastructure Manager re-applies Terraform against whatever
+		// half-converged, unlike a CloudFormation ROLLBACK_COMPLETE stack that
+		// must be recreated.
+		return d.mutate(ctx, cfg, http.MethodPatch,
+			infraManagerBase+"/"+path+"?updateMask=service_account,terraform_blueprint")
 	}
 	createURL := fmt.Sprintf("%s/projects/%s/locations/%s/deployments?deploymentId=%s",
 		infraManagerBase, url.PathEscape(d.Project), url.PathEscape(d.Region),
@@ -137,7 +127,7 @@ func (d GcpDeploy) deploy(ctx context.Context) error {
 
 // mutate issues the create/update and waits for its operation.
 func (d GcpDeploy) mutate(ctx context.Context, cfg gcpConfig, method, rawURL string) error {
-	op, err := gcpMutateJSON(ctx, cfg, method, rawURL, d.body())
+	op, err := startGcpOperation(ctx, cfg, method, rawURL, d.body())
 	if err != nil {
 		return fmt.Errorf("could not deploy %q: %w", d.DeploymentName, err)
 	}
@@ -146,8 +136,9 @@ func (d GcpDeploy) mutate(ctx context.Context, cfg gcpConfig, method, rawURL str
 			return fmt.Errorf("deployment %q is still applying after %s: %w",
 				d.DeploymentName, gcpDeployTimeout, err)
 		}
+		path := gcpDeploymentPath(d.Project, d.Region, d.DeploymentName)
 		return fmt.Errorf("deployment %q did not apply cleanly: %w%s",
-			d.DeploymentName, err, gcpDeploymentFailureReason(ctx, cfg, d.deploymentPath()))
+			d.DeploymentName, err, gcpDeploymentFailureReason(ctx, cfg, path))
 	}
 	return nil
 }
@@ -167,10 +158,9 @@ func GcpDeploymentStatus(project, region, name string) (string, error) {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return "", err
+		return "", gcpCredsErr(err)
 	}
-	dep, err := getGcpDeployment(ctx, cfg,
-		fmt.Sprintf("projects/%s/locations/%s/deployments/%s", project, region, name))
+	dep, err := getGcpDeployment(ctx, cfg, gcpDeploymentPath(project, region, name))
 	if err != nil {
 		return "", err
 	}
@@ -182,19 +172,18 @@ func GcpDeploymentStatus(project, region, name string) (string, error) {
 
 // DeleteGcpDeployment removes the deployment and everything Terraform created,
 // waiting for the delete (unlike DeleteStack, whose console shows progress —
-// Infrastructure Manager gives the operator nothing to watch, so silence here
-// would look like a hang).
+// Infrastructure Manager gives the operator nothing to watch). The command
+// layer runs it under a spinner so the wait is visible.
 func DeleteGcpDeployment(project, region, name string) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
-		return err
+		return gcpCredsErr(err)
 	}
-	path := fmt.Sprintf("projects/%s/locations/%s/deployments/%s", project, region, name)
-	// delete_policy=DELETE destroys the Terraform-managed resources rather than
+	// deletePolicy=DELETE destroys the Terraform-managed resources rather than
 	// abandoning them; force=true clears stray revisions.
-	op, err := gcpMutateJSON(ctx, cfg, http.MethodDelete,
-		infraManagerBase+"/"+path+"?force=true&deletePolicy=DELETE", nil)
+	op, err := startGcpOperation(ctx, cfg, http.MethodDelete,
+		infraManagerBase+"/"+gcpDeploymentPath(project, region, name)+"?force=true&deletePolicy=DELETE", nil)
 	if err != nil {
 		return fmt.Errorf("could not delete deployment %q: %w", name, err)
 	}
@@ -223,23 +212,12 @@ func gcpDeploymentFailureReason(ctx context.Context, cfg gcpConfig, path string)
 // getGcpDeployment fetches a deployment; a 404 is (nil, nil) — not installed
 // is a normal answer, not an error.
 func getGcpDeployment(ctx context.Context, cfg gcpConfig, path string) (*gcpDeployment, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, infraManagerBase+"/"+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := cfg.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	var dep gcpDeployment
+	err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+path, nil, &dep)
+	if errors.Is(err, errGcpNotFound) {
 		return nil, nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, gcpAPIError(infraManagerBase, resp)
-	}
-	var dep gcpDeployment
-	if err := json.NewDecoder(resp.Body).Decode(&dep); err != nil {
+	if err != nil {
 		return nil, err
 	}
 	return &dep, nil
@@ -255,35 +233,11 @@ type gcpOperation struct {
 	} `json:"error"`
 }
 
-// gcpMutateJSON issues a POST/PATCH/DELETE and decodes the returned operation.
-func gcpMutateJSON(ctx context.Context, cfg gcpConfig, method, rawURL string, body any) (*gcpOperation, error) {
-	var reader *strings.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		reader = strings.NewReader(string(encoded))
-	} else {
-		reader = strings.NewReader("")
-	}
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
-	if err != nil {
-		return nil, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := cfg.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, gcpAPIError(rawURL, resp)
-	}
+// startGcpOperation issues a mutation (POST/PATCH/DELETE) that answers with a
+// long-running operation.
+func startGcpOperation(ctx context.Context, cfg gcpConfig, method, rawURL string, body any) (*gcpOperation, error) {
 	var op gcpOperation
-	if err := json.NewDecoder(resp.Body).Decode(&op); err != nil {
+	if err := gcpDo(ctx, cfg, method, rawURL, body, &op); err != nil {
 		return nil, err
 	}
 	return &op, nil
@@ -297,7 +251,7 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 	for {
 		if op.Done {
 			if op.Error != nil {
-				return fmt.Errorf("%s", op.Error.Message)
+				return errors.New(op.Error.Message)
 			}
 			return nil
 		}
@@ -310,7 +264,7 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 		case <-time.After(gcpPollInterval):
 		}
 		var next gcpOperation
-		if err := gcpGetJSON(ctx, cfg, infraManagerBase+"/"+op.Name, &next); err != nil {
+		if err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+op.Name, nil, &next); err != nil {
 			return err
 		}
 		op = &next
