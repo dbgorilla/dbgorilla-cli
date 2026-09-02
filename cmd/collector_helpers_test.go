@@ -43,7 +43,14 @@ func TestEndpointsFromFlags(t *testing.T) {
 	_ = c.Flags().Set("auth-url", "https://auth")
 	_ = c.Flags().Set("otlp-url", "https://otlp")
 	e := endpointsFromFlags(c)
-	if e.AuthBaseURL != "https://auth" || e.OtlpBaseURL != "https://otlp" || e.OpampBaseURL != "" {
+	// OTLP gains the scheme's port, exactly as endpointsFor does. This assertion
+	// used to expect the bare host, which pinned a divergence rather than a
+	// behaviour: both callers of this function render a config that is supposed
+	// to match what a provisioning run produces -- `install --dry-run` says so in
+	// its own comment -- and the exporter fails to start on a host with no port.
+	// So the same flag value produced a working config down one path and a
+	// non-starting one down the other.
+	if e.AuthBaseURL != "https://auth" || e.OtlpBaseURL != "https://otlp:443" || e.OpampBaseURL != "" {
 		t.Errorf("endpointsFromFlags = %+v", e)
 	}
 }

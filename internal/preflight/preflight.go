@@ -17,6 +17,26 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// CloudNativePG (CNPG) runs PostgreSQL as Kubernetes pods and owns
+// postgresql.conf declaratively, so the psql-shaped remediations below do not
+// apply to it. Both notes are emitted unconditionally: this package holds a DSN
+// and no provider, so it cannot tell a CNPG server from any other self-hosted
+// one. The cost is one extra line for a non-CNPG reader; the alternative is
+// telling a CNPG operator to run a command their cluster refuses.
+//
+// ALTER SYSTEM has been disabled by default since CNPG 1.22 and fails with
+// `could not open file "postgresql.auto.conf": Permission denied`. Declaring any
+// `pg_stat_statements.*` parameter makes the operator add the library to
+// shared_preload_libraries and run CREATE EXTENSION in every database, so the
+// two psql steps below collapse into one manifest key.
+const (
+	cnpgParametersNote = "On CloudNativePG, ALTER SYSTEM is disabled by default -- set this " +
+		"under spec.postgresql.parameters in the Cluster resource instead."
+	cnpgStatStatementsNote = "On CloudNativePG, set a spec.postgresql.parameters key beginning " +
+		"`pg_stat_statements.` (e.g. pg_stat_statements.max) -- the operator then loads the " +
+		"library and creates the extension in every database for you."
+)
+
 // Severity classifies a preflight outcome.
 type Severity string
 
@@ -269,6 +289,7 @@ func CheckSharedPreload(ctx context.Context, ins Inspector) Result {
 				"To capture query performance, add pg_stat_statements as a superuser:",
 				"  ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';",
 				"Then RESTART the server (a reload is not enough for this parameter).",
+				cnpgStatStatementsNote,
 			},
 		}
 	}
@@ -307,6 +328,7 @@ func CheckExtension(ctx context.Context, ins Inspector) Result {
 			Fix: []string{
 				"Create the extension in the postgres maintenance DB (the one the collector probes):",
 				"  psql \"host=<host> port=<port> user=<user> dbname=postgres\" -c 'CREATE EXTENSION pg_stat_statements;'",
+				cnpgStatStatementsNote,
 			},
 		}
 	}
@@ -317,6 +339,7 @@ func CheckExtension(ctx context.Context, ins Inspector) Result {
 		Fix: []string{
 			"Create the extension in the postgres maintenance DB:",
 			"  psql -d postgres -c 'CREATE EXTENSION pg_stat_statements;'",
+			cnpgStatStatementsNote,
 		},
 	}
 }
@@ -383,6 +406,7 @@ func CheckTrackIOTiming(ctx context.Context, ins Inspector) Result {
 				"For richer query I/O stats, enable timing:",
 				"  ALTER SYSTEM SET track_io_timing = 'on';",
 				"  SELECT pg_reload_conf();",
+				cnpgParametersNote,
 			},
 		}
 	}
@@ -404,6 +428,7 @@ func CheckTrackFunctions(ctx context.Context, ins Inspector) Result {
 				"If you use PL/pgSQL (or other procedural) functions, enable tracking:",
 				"  ALTER SYSTEM SET track_functions = 'pl';",
 				"  SELECT pg_reload_conf();",
+				cnpgParametersNote,
 			},
 		}
 	}

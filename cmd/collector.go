@@ -1166,6 +1166,9 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	if st.IsAWS() {
 		return awsStatus(cmd, st)
 	}
+	if st.IsHelm() {
+		return helmStatus(cmd, st)
+	}
 
 	runner := collector.Runner{Name: st.ContainerName}
 	exists, running, _ := runner.Running()
@@ -1230,6 +1233,32 @@ func awsStatus(cmd *cobra.Command, st *collector.State) error {
 	default:
 		fmt.Println(style.Success(fmt.Sprintf("Deploy:     %s", status)))
 	}
+	printConnectionStatus(cmd, st.AgentID)
+	return nil
+}
+
+// helmStatus reports an in-cluster (Helm) collector. There is no container to
+// inspect and no stack to describe -- the release belongs to the customer's
+// cluster, which this CLI has no credentials for and deliberately does not ask
+// for. What it can answer is the question that actually matters: has the control
+// plane seen this agent.
+//
+// The runtime lines say plainly where to look instead of guessing, because a
+// blank field reads as "broken" and an honest pointer does not.
+func helmStatus(cmd *cobra.Command, st *collector.State) error {
+	fmt.Printf("Agent:      %s\n", st.AgentID)
+	fmt.Printf("Tenant:     %s\n", st.TenantID)
+	fmt.Printf("Target:     cnpg — %s\n", st.TargetName)
+	fmt.Printf("Config:     %s\n", st.ConfigPath)
+	fmt.Printf("Release:    %s (namespace %s)\n", orUnknown(st.ReleaseName), orUnknown(st.ReleaseNamespace))
+	fmt.Printf("Runtime:    in-cluster — inspect it with:\n")
+	fmt.Printf("              kubectl --context <your-context> -n %s get pods -l app.kubernetes.io/name=dbg-collector\n",
+		orUnknown(st.ReleaseNamespace))
+
+	// The live answer. This is the whole reason state is written for a Helm
+	// install: without it `dbg collector list` shows the collector while
+	// `status` claims none is installed, and a customer reads that as a broken
+	// CLI rather than an unsupported install path.
 	printConnectionStatus(cmd, st.AgentID)
 	return nil
 }
@@ -1379,7 +1408,7 @@ var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Show the collector's logs",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		st, err := requireState()
+		st, err := requireRunnableState("logs")
 		if err != nil {
 			return err
 		}
@@ -1396,7 +1425,7 @@ var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the stopped collector container",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		st, err := requireState()
+		st, err := requireRunnableState("start")
 		if err != nil {
 			return err
 		}
@@ -1416,7 +1445,7 @@ var stopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the collector container (identity is preserved)",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		st, err := requireState()
+		st, err := requireRunnableState("stop")
 		if err != nil {
 			return err
 		}
@@ -1436,7 +1465,7 @@ var restartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart the collector container",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		st, err := requireState()
+		st, err := requireRunnableState("restart")
 		if err != nil {
 			return err
 		}
@@ -1461,7 +1490,7 @@ var collectorUpgradeCmd = &cobra.Command{
 }
 
 func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
-	st, err := requireState()
+	st, err := requireRunnableState("upgrade")
 	if err != nil {
 		return err
 	}
@@ -1585,8 +1614,16 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		return errors.New("aborted")
 	}
 
-	// Remove the runtime — an AWS CloudFormation stack or a local container.
-	if st.IsAWS() {
+	// Remove the runtime — an AWS CloudFormation stack, a local container, or
+	// (for an in-cluster release) nothing, because this CLI has no cluster
+	// credentials. Deprovisioning the identity below still applies: that is ours
+	// to do and leaving it minted is what orphans a collector.
+	if st.IsHelm() {
+		fmt.Println(style.Warn("⚠  This collector runs in your cluster and this CLI cannot remove it. Run:"))
+		fmt.Printf("     helm uninstall %s --namespace %s\n",
+			orUnknown(st.ReleaseName), orUnknown(st.ReleaseNamespace))
+		fmt.Println("   Its identity is deprovisioned below either way, so the release will stop being accepted.")
+	} else if st.IsAWS() {
 		if err := deleteStack(st.StackName, st.Region); err != nil {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v", st.StackName, err)))
 		} else {
@@ -1642,6 +1679,32 @@ func requireState() (*collector.State, error) {
 	}
 	if st == nil {
 		return nil, errors.New("no collector installed. Run: dbg collector install")
+	}
+	return st, nil
+}
+
+// requireRunnableState is requireState for the lifecycle verbs that drive a
+// runtime this CLI started -- logs, start, stop, restart, upgrade.
+//
+// An in-cluster release is not one of those. Falling through would run the
+// Docker path against an empty container name, so the command would fail with a
+// Docker error about a collector that is running perfectly well in Kubernetes.
+// Naming the equivalent kubectl/helm command is the useful answer; `status` and
+// `uninstall` deliberately still accept a Helm collector.
+func requireRunnableState(verb string) (*collector.State, error) {
+	st, err := requireState()
+	if err != nil {
+		return nil, err
+	}
+	if st.IsHelm() {
+		return nil, fmt.Errorf("this collector runs in your cluster as Helm release %q, so `dbg collector %s` does not drive it.\n"+
+			"  logs:            kubectl --context <your-context> -n %s logs -l app.kubernetes.io/name=dbg-collector\n"+
+			"  stop / start:    kubectl --context <your-context> -n %s scale deploy/%s --replicas=0 (or 1)\n"+
+			"  upgrade:         helm upgrade %s %s --namespace %s --reuse-values\n"+
+			"`dbg collector status` and `dbg collector uninstall` do work here",
+			orUnknown(st.ReleaseName), verb,
+			orUnknown(st.ReleaseNamespace), orUnknown(st.ReleaseNamespace), orUnknown(st.ReleaseName),
+			orUnknown(st.ReleaseName), collector.DefaultChartRef, orUnknown(st.ReleaseNamespace))
 	}
 	return st, nil
 }
@@ -1745,8 +1808,13 @@ func endpointsFromFlags(cmd *cobra.Command) collector.Endpoints {
 	otlp, _ := cmd.Flags().GetString("otlp-url")
 	opamp, _ := cmd.Flags().GetString("opamp-url")
 	return collector.Endpoints{
-		AuthBaseURL:  authURLFlag(cmd),
-		OtlpBaseURL:  otlp,
+		AuthBaseURL: authURLFlag(cmd),
+		// Same port defaulting as endpointsFor. The exporter needs an explicit
+		// host:port and fails on a bare host, so a flag value has to be treated
+		// identically whichever path rendered it -- otherwise the config a
+		// provisioning run produces and the config a flags-only run produces
+		// differ from the same input, and only one of them starts.
+		OtlpBaseURL:  withDefaultPort(otlp),
 		OpampBaseURL: opamp,
 	}
 }

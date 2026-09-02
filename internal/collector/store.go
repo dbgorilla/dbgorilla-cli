@@ -52,7 +52,7 @@ type State struct {
 	AgentID    string `json:"agent_id"`
 	TenantID   string `json:"tenant_id"`
 	Domain     string `json:"domain"`
-	Target     string `json:"target,omitempty"` // "docker" (default) or "aws"
+	Target     string `json:"target,omitempty"` // "docker" (default), "aws", or "helm"
 	Image      string `json:"image"`
 	TargetName string `json:"target_name"`
 
@@ -66,12 +66,27 @@ type State struct {
 	StackName string `json:"stack_name,omitempty"`
 	Region    string `json:"region,omitempty"`
 
+	// helm target -- the collector runs in-cluster as a Helm release this CLI
+	// never started, so there is no container to inspect and no stack to query.
+	// The release coordinates are recorded anyway so `status` can say where it
+	// lives, and so `uninstall` can print the `helm uninstall` to run.
+	ReleaseName      string `json:"release_name,omitempty"`
+	ReleaseNamespace string `json:"release_namespace,omitempty"`
+	DBNamespace      string `json:"db_namespace,omitempty"`
+	DBCluster        string `json:"db_cluster,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 }
 
 // IsAWS reports whether this collector was deployed to AWS (vs local Docker).
 // An empty Target predates the field and means Docker.
 func (s *State) IsAWS() bool { return s.Target == "aws" }
+
+// IsHelm reports whether this collector was provisioned for an in-cluster Helm
+// install. Recording it is what stops `dbg collector list` showing the collector
+// while `dbg collector status` reports none installed -- the two disagreeing is
+// read as a broken CLI, which is worse than either answer alone.
+func (s *State) IsHelm() bool { return s.Target == "helm" }
 
 // LoadState reads the installed-collector record. A missing file returns
 // (nil, nil) — no collector installed.
