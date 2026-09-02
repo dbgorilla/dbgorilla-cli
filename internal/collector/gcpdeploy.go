@@ -255,6 +255,14 @@ func startGcpOperation(ctx context.Context, cfg gcpConfig, method, rawURL string
 // on a timeout" contract the aws target established.
 func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budget time.Duration) error {
 	deadline := time.Now().Add(budget)
+	// A failed poll is NOT a failed operation: the server keeps converging
+	// whether or not this laptop can reach it, and treating one dropped GET
+	// (wifi blip, IPv6 route flap) as deploy failure triggers a rollback that
+	// force-deletes a healthy in-flight deployment — which is exactly what a
+	// live transient did on 2026-09-02. Tolerate a few consecutive poll
+	// failures inside the budget before giving up.
+	const maxConsecutivePollFailures = 4
+	pollFailures := 0
 	for {
 		if op.Done {
 			if op.Error != nil {
@@ -272,8 +280,15 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 		}
 		var next gcpOperation
 		if err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+op.Name, nil, &next); err != nil {
-			return err
+			pollFailures++
+			if pollFailures >= maxConsecutivePollFailures {
+				return fmt.Errorf("polling operation %s failed %d times in a row "+
+					"(the operation itself may still be converging server-side): %w",
+					op.Name, pollFailures, err)
+			}
+			continue
 		}
+		pollFailures = 0
 		op = &next
 	}
 }
