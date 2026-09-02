@@ -170,15 +170,28 @@ func (c *Client) Post(path string, body any) ([]byte, int, error) {
 
 // --- Response types -------------------------------------------------------
 
-// UserInfo matches GET /api/v0_1/auth/user on backend release-202603.007.
-// `tenant` is the organization display name; `tenant_id` is the UUID.
+// UserInfo is the subset of GET /api/v0_1/auth/user that the CLI displays.
+//
+// Every tag below has to name a key the API actually sends. A tag that names
+// a key the API does not send is not an error -- encoding/json leaves the
+// field at its zero value and the request still looks like a success. Three
+// tags here were wrong for exactly that reason, and the only visible symptom
+// was the CLI printing the organization's UUID in the place a human expects
+// its name. Check the API's OpenAPI document before editing a tag.
 type UserInfo struct {
-	Username       string `json:"username"`
-	Email          string `json:"email"`
-	Tenant         string `json:"tenant"`
-	UserID         string `json:"user_id"`
-	TenantID       string `json:"tenant_id"`
-	IsAdmin        bool   `json:"is_admin"`
+	// UserID is the API's `id`. There is no `user_id` key in the response.
+	UserID string `json:"id"`
+
+	Username string `json:"username"`
+	Email    string `json:"email"`
+
+	// Organization is the display name people recognise ("Acme Corp").
+	// TenantID is the same organization's UUID. Both come back on every
+	// successful response; prefer the name in anything a person reads.
+	Organization string `json:"organization"`
+	TenantID     string `json:"tenant_id"`
+
+	Role           string `json:"role"`
 	IsSystemTenant bool   `json:"is_system_tenant"`
 }
 

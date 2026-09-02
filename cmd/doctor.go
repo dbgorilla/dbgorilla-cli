@@ -18,24 +18,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// checkAuthAndAPI runs the /auth/user probe and returns (ok, message).
+// checkAuthAndAPI runs the /auth/user probe and returns (ok, message, identity).
 // Separated so doctor can run it concurrently with the MCP-key check.
-func checkAuthAndAPI(cmd *cobra.Command, apiURL string) (bool, string) {
+//
+// The identity is returned as well as rendered into the message because doctor
+// prints the role and the ids under the check line, and reaching them from the
+// message string would mean parsing back what was just formatted. On any
+// failure path the returned UserInfo is the zero value; callers must only read
+// it when ok is true.
+func checkAuthAndAPI(cmd *cobra.Command, apiURL string) (bool, string, api.UserInfo) {
 	client := newAPIClient(cmd)
 	body, status, err := client.Get("/api/v0_1/auth/user")
 	switch {
 	case err != nil:
-		return false, fmt.Sprintf("cannot reach %s: %v", apiURL, err)
+		return false, fmt.Sprintf("cannot reach %s: %v", apiURL, err), api.UserInfo{}
 	case status == http.StatusUnauthorized:
-		return false, "token expired or invalid -- run: dbgorilla login"
+		return false, "token expired or invalid -- run: dbgorilla login", api.UserInfo{}
 	case status != http.StatusOK:
-		return false, fmt.Sprintf("HTTP %d from %s", status, apiURL)
+		return false, fmt.Sprintf("HTTP %d from %s", status, apiURL), api.UserInfo{}
 	}
 	var u api.UserInfo
 	_ = json.Unmarshal(body, &u)
-	return true, fmt.Sprintf("%s  (org: %s)",
-		firstNonEmpty(u.Email, u.Username),
-		firstNonEmpty(u.Tenant, u.TenantID))
+	return true, describeIdentity(u), u
 }
 
 // checkMCPKey runs the MCP-key probe and returns (ok, message).
@@ -99,6 +103,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	var (
 		authMsg, keyMsg string
 		authOK, keyOK   bool
+		authUser        api.UserInfo
 		hasTokens       = tokens != nil
 	)
 	if hasTokens {
@@ -106,7 +111,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			authOK, authMsg = checkAuthAndAPI(cmd, apiURL)
+			authOK, authMsg, authUser = checkAuthAndAPI(cmd, apiURL)
 		}()
 		go func() {
 			defer wg.Done()
@@ -124,6 +129,13 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 			label = "Auth"
 		}
 		printCheck(label, authOK, authMsg)
+		if authOK {
+			// doctor output exists to be pasted into a support thread, and the
+			// role and the ids are the part of it that identifies anything.
+			// Indented to the detail column so the block reads as detail about
+			// the check above rather than as three more checks.
+			printIdentityDetail(os.Stdout, authUser, strings.Repeat(" ", checkDetailColumn))
+		}
 		if !authOK {
 			allOK = false
 		}
@@ -178,6 +190,15 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	fmt.Println(style.Error("Some checks failed. See above for details."))
 	return errDoctorFailed
 }
+
+// checkDetailColumn is the printed width of everything printCheck emits before
+// the detail text: two spaces of indent, the bracketed four-column status tag,
+// a space, the 18-column name field, and one more space. Continuation lines
+// under a check indent to here so they line up with the detail above them.
+//
+// The style helpers wrap the tag in colour escapes, which take no columns, so
+// the visible width is the same whether or not colour is on.
+const checkDetailColumn = 2 + len("[ OK ]") + 1 + 18 + 1
 
 func printCheck(name string, ok bool, detail string) {
 	tag := style.Error("FAIL")

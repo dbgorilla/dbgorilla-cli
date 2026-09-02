@@ -22,6 +22,7 @@ func init() {
 	loginCmd.Flags().String("mode", "", "Force auth mode: sso (Keycloak device flow) or password (internal). Auto-detect if omitted.")
 	loginCmd.Flags().String("tenant", "", "Tenant slug (password mode only; prompted if omitted)")
 	loginCmd.Flags().String("account", "", "Account / username (password mode only; prompted if omitted)")
+	loginCmd.Flags().BoolP("verbose", "v", false, "Also show the role and the internal user/organization ids on success")
 	rootCmd.AddCommand(loginCmd)
 }
 
@@ -127,8 +128,10 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr, "Signed in.")
 		return nil
 	}
-	fmt.Printf("%s\n", style.Success(fmt.Sprintf("✓ Signed in as %s  (org: %s)",
-		firstNonEmpty(u.Email, u.Username), firstNonEmpty(u.Tenant, u.TenantID))))
+	fmt.Printf("%s\n", style.Success("✓ Signed in as "+describeIdentity(u)))
+	if verbose, _ := cmd.Flags().GetBool("verbose"); verbose {
+		printIdentityDetail(cmd.OutOrStdout(), u, "  ")
+	}
 
 	// Persist URL + insecure so subsequent commands don't need the flags.
 	// This is the DevUX fix for "I logged in but still have to specify
