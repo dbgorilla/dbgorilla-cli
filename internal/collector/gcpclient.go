@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,26 +10,21 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
 
-// GCP access uses Application Default Credentials via golang.org/x/oauth2/google
-// rather than shelling out to `gcloud`, so no external binary is required. ADC
-// resolves from the same chain gcloud uses — GOOGLE_APPLICATION_CREDENTIALS, the
-// gcloud ADC file, and instance metadata — so the customer's own credentials are
-// reused and nothing sensitive passes through this tool.
-//
-// Dependency note (per the repo rule): x/oauth2 is the only addition. The full
-// Google Cloud SDK would pull dozens of modules to make what is a handful of
-// documented REST calls; the collector itself talks to these APIs the same way.
+// GCP access uses Application Default Credentials (golang.org/x/oauth2/google),
+// so no gcloud binary is required and the operator's own credentials are reused.
 
-// gcpConfig is what every GCP call in this package builds from: an
-// authenticated HTTP client, the raw token source (tokeninfo needs the token
-// itself), and the credentials' default project.
+// gcpConfig is what every GCP call in this package builds from.
 type gcpConfig struct {
 	http    *http.Client
 	tokens  oauth2.TokenSource
@@ -41,13 +37,14 @@ var (
 	gcpCfgErr  error
 )
 
-// loadGCPConfig resolves ADC. A package var rather than a plain func so tests
-// can substitute a config whose HTTP client answers from a fixture instead of
-// the network — without it, every GCP code path is only reachable against a
-// live project. Mirrors loadAWSConfig.
+// gcpRequestTimeout bounds a single API exchange that carries no deadline of
+// its own.
+const gcpRequestTimeout = 60 * time.Second
+
+// loadGCPConfig resolves ADC. A variable so tests can substitute a fake
+// transport.
 var loadGCPConfig = loadGCPConfigDefault
 
-// loadGCPConfigDefault resolves ADC once (credential + project resolution).
 func loadGCPConfigDefault(ctx context.Context) (gcpConfig, error) {
 	gcpCfgOnce.Do(func() {
 		creds, err := google.FindDefaultCredentials(ctx,
@@ -65,15 +62,14 @@ func loadGCPConfigDefault(ctx context.Context) (gcpConfig, error) {
 	return gcpCfg, gcpCfgErr
 }
 
-// gcpCredsErr wraps a credential-resolution failure with the remediation, so
-// every GCP entry point tells the operator the same next step.
+// gcpCredsErr wraps a credential-resolution failure with the remediation.
 func gcpCredsErr(err error) error {
 	return fmt.Errorf("could not load Google Cloud credentials "+
 		"(run 'gcloud auth application-default login', or set GOOGLE_APPLICATION_CREDENTIALS): %w", err)
 }
 
 // GcpAvailable returns nil when Google Cloud credentials resolve and mint a
-// working token. Mirrors AwsAvailable / DockerAvailable.
+// working token.
 func GcpAvailable() error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
@@ -87,9 +83,7 @@ func GcpAvailable() error {
 	return nil
 }
 
-// GcpIdentity returns the ADC principal (its email when the token carries
-// one), for display during preflight — the install must name who it will act
-// as before it acts.
+// GcpIdentity returns the ADC principal's email when the token carries one.
 func GcpIdentity() (string, error) {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
@@ -101,42 +95,99 @@ func GcpIdentity() (string, error) {
 		return "", fmt.Errorf("could not confirm the Google Cloud identity: %w", err)
 	}
 	if email == "" {
-		// Service-account tokens without the email scope still work; say so
-		// rather than printing an empty identity.
 		return "authenticated (the credential reports no email)", nil
 	}
 	return email, nil
 }
 
-// GcpProject returns the project the install will act on: the ADC default.
-// Callers pass an explicit --project through instead when the flag is set.
+// GcpProject returns the project to act on when --project is not given: the
+// credentials' own project (service-account keys, instance metadata), else
+// GOOGLE_CLOUD_PROJECT / CLOUDSDK_CORE_PROJECT, else gcloud's active
+// configuration.
 func GcpProject() (string, error) {
 	cfg, err := loadGCPConfig(context.Background())
 	if err != nil {
 		return "", gcpCredsErr(err)
 	}
-	if cfg.project == "" {
-		return "", errors.New("the Google Cloud credentials name no project — " +
-			"pass --project, or set one with 'gcloud config set project'")
+	if cfg.project != "" {
+		return cfg.project, nil
 	}
-	return cfg.project, nil
+	for _, env := range []string{"GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT", "GCLOUD_PROJECT"} {
+		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+			return v, nil
+		}
+	}
+	if p := gcloudConfigProject(); p != "" {
+		return p, nil
+	}
+	return "", errors.New("no Google Cloud project is configured — " +
+		"pass --project, or set one with 'gcloud config set project'")
 }
 
-// gcpTokenEmail validates the current token against Google's tokeninfo
-// endpoint and returns the principal email when present. The token travels in
-// a POST form body, never in a URL that proxies or logs could retain.
+// gcloudConfigDir is where gcloud keeps its configurations; a variable so
+// tests can point it at a fixture.
+var gcloudConfigDir = func() string {
+	if d := os.Getenv("CLOUDSDK_CONFIG"); d != "" {
+		return d
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("APPDATA"), "gcloud")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "gcloud")
+}
+
+// gcloudConfigProject reads core/project from gcloud's active configuration.
+func gcloudConfigProject() string {
+	dir := gcloudConfigDir()
+	if dir == "" {
+		return ""
+	}
+	name := "default"
+	if b, err := os.ReadFile(filepath.Join(dir, "active_config")); err == nil && strings.TrimSpace(string(b)) != "" {
+		name = strings.TrimSpace(string(b))
+	}
+	f, err := os.Open(filepath.Join(dir, "configurations", "config_"+name))
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	inCore := false
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		switch {
+		case strings.HasPrefix(line, "["):
+			inCore = line == "[core]"
+		case inCore:
+			if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "project" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	return ""
+}
+
+// gcpTokenEmail validates the token against Google's tokeninfo endpoint and
+// returns the principal email when present. The token travels in the POST
+// body, never in a URL.
 func gcpTokenEmail(ctx context.Context, cfg gcpConfig) (string, error) {
 	tok, err := cfg.tokens.Token()
 	if err != nil {
 		return "", err
 	}
+	ctx, cancel := gcpRequestContext(ctx)
+	defer cancel()
 	form := url.Values{"access_token": {tok.AccessToken}}
 	resp, err := gcpSend(ctx, cfg, http.MethodPost, "https://oauth2.googleapis.com/tokeninfo",
 		"application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var info struct {
 		Email string `json:"email"`
 	}
@@ -146,14 +197,20 @@ func gcpTokenEmail(ctx context.Context, cfg gcpConfig) (string, error) {
 	return info.Email, nil
 }
 
-// errGcpNotFound tags a 404, so callers for whom "absent" is a normal answer
-// (a deployment that was never created) can errors.Is it instead of parsing.
+// errGcpNotFound tags a 404 so callers can errors.Is it.
 var errGcpNotFound = errors.New("not found")
 
-// gcpSend issues one authenticated request and returns the response when it is
-// 2xx. Anything else becomes an error carrying Google's own message, which
-// names the missing permission or resource better than a bare status would.
-// The caller closes the body.
+// gcpRequestContext adds the per-request deadline unless ctx already has one.
+func gcpRequestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, gcpRequestTimeout)
+}
+
+// gcpSend issues one authenticated request and returns the 2xx response; the
+// caller closes the body. Anything else becomes an error carrying Google's
+// own message.
 func gcpSend(ctx context.Context, cfg gcpConfig, method, rawURL, contentType string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if err != nil {
@@ -167,17 +224,17 @@ func gcpSend(ctx context.Context, cfg gcpConfig, method, rawURL, contentType str
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, gcpAPIError(rawURL, resp)
 	}
 	return resp, nil
 }
 
-// gcpDo is gcpSend for the JSON APIs: body (nil for none) is marshalled, and
-// the response decoded into out (nil to discard it). Every Cloud SQL, AlloyDB,
-// Infrastructure Manager, Compute and Logging call in this package goes
-// through here.
+// gcpDo is gcpSend for the JSON APIs: body (nil for none) is marshalled and the
+// response decoded into out (nil to discard it).
 func gcpDo(ctx context.Context, cfg gcpConfig, method, rawURL string, body, out any) error {
+	ctx, cancel := gcpRequestContext(ctx)
+	defer cancel()
 	var payload io.Reader
 	contentType := ""
 	if body != nil {
@@ -192,7 +249,7 @@ func gcpDo(ctx context.Context, cfg gcpConfig, method, rawURL string, body, out 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if out == nil {
 		return nil
 	}
@@ -206,9 +263,7 @@ type gcpPage struct {
 
 func (p gcpPage) next() string { return p.NextPageToken }
 
-// gcpListPages GETs a paginated collection, handing each page to `each` until
-// the API stops returning a page token. Skipping this and reading one page
-// would silently hide every database or log line past the first.
+// gcpListPages GETs a paginated collection, handing each page to `each`.
 func gcpListPages[P interface{ next() string }](ctx context.Context, cfg gcpConfig, rawURL string, each func(P)) error {
 	token := ""
 	for {
@@ -231,9 +286,8 @@ func gcpListPages[P interface{ next() string }](ctx context.Context, cfg gcpConf
 	}
 }
 
-// gcpAPIError shapes a non-2xx API response into an error with Google's own
-// message extracted (it usually names the fix: the missing role, the exact
-// resource, the API to enable). A 404 additionally wraps errGcpNotFound.
+// gcpAPIError shapes a non-2xx response into an error carrying Google's own
+// message. A 404 additionally wraps errGcpNotFound.
 func gcpAPIError(rawURL string, resp *http.Response) error {
 	var body struct {
 		Error struct {
@@ -262,8 +316,7 @@ func apiHost(rawURL string) string {
 	return rawURL
 }
 
-// lastPathSegment returns the final element of a resource path
-// (projects/p/locations/l/clusters/NAME → NAME).
+// lastPathSegment returns the final element of a resource path.
 func lastPathSegment(name string) string {
 	return name[strings.LastIndex(name, "/")+1:]
 }

@@ -164,18 +164,12 @@ func runInstallLocal(cmd *cobra.Command) error {
 		return dryRunInstall(cmd)
 	}
 
-	apiURL, err := requireAPIURL(cmd)
+	apiURL, err := requireInstallSession(cmd)
 	if err != nil {
 		return err
 	}
-	if _, err := requireLogin(); err != nil {
+	if err := requireNoInstall(); err != nil {
 		return err
-	}
-
-	// Refuse to clobber an existing install.
-	if st, _ := collector.LoadState(); st != nil {
-		return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
-			st.AgentID)
 	}
 
 	// Environment preflight: Docker must be usable before we mint anything.
@@ -183,15 +177,9 @@ func runInstallLocal(cmd *cobra.Command) error {
 		return err
 	}
 
-	client := newAPIClient(cmd)
-
-	// Capability gate: the managed collector only exists on main-based backends.
-	supported, err := client.CollectorSupported()
+	client, err := requireCollectorSupport(cmd, apiURL)
 	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
-	}
-	if !supported {
-		return api.ErrCollectorUnsupported
+		return err
 	}
 
 	// Gather the database target.
@@ -417,6 +405,11 @@ func runInstallAWS(cmd *cobra.Command) error {
 		return err
 	}
 	templateURL, _ := cmd.Flags().GetString("template-url")
+	if err := requireNoRuntime(dryRun,
+		func() (string, error) { return stackStatus(stackName, region) },
+		"stack", stackName, "--stack-name"); err != nil {
+		return err
+	}
 
 	// Dry run: validate the template without minting an identity or creating
 	// anything. Placeholder identity keeps the template shape valid.
@@ -471,6 +464,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 		DBPassword:      dbPassword,
 	})
 	if err != nil {
+		deprovisionOrWarn(client, creds.AgentID)
 		return err
 	}
 
@@ -489,10 +483,14 @@ func runInstallAWS(cmd *cobra.Command) error {
 	fmt.Printf("Deploying to Fargate (stack %q, %d database(s))...\n", stackName, len(targets))
 	deploy := collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
-		return cloudDeployFailed(err, client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
+		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
 			func() error { return deleteStack(stackName, region) },
-			fmt.Sprintf("   Watch it with: dbg collector status\n"+
-				"   If it ends up failed, remove it with: dbg collector uninstall --stack-name %s\n", stackName))
+			"   Watch it with: dbg collector status\n"+
+				"   If it ends up failed, remove it with: dbg collector uninstall\n")
+		if kept {
+			applyGrants(cmd, targets)
+		}
+		return derr
 	}
 
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector deploying to Fargate (stack %s).", stackName)))
@@ -836,7 +834,7 @@ func resolveAwsTarget(cmd *cobra.Command) (collector.AwsTarget, error) {
 	// old behavior: surface the error and ask for --db-instance-id.
 	var amb *collector.AmbiguousTargetError
 	if errors.As(err, &amb) && interactiveSelectable(cmd) {
-		choice, perr := pickTarget(amb)
+		choice, perr := pickTarget(amb, ", or --config to monitor several")
 		if perr != nil {
 			return collector.AwsTarget{}, perr
 		}
@@ -855,13 +853,14 @@ func interactiveSelectable(cmd *cobra.Command) bool {
 }
 
 // pickTarget prints the ambiguous candidates and reads the user's choice.
-func pickTarget(amb *collector.AmbiguousTargetError) (collector.TargetChoice, error) {
+// moreHint names any further way out, appended to the --db-instance-id hint.
+func pickTarget(amb *collector.AmbiguousTargetError, moreHint string) (collector.TargetChoice, error) {
 	cands := amb.Candidates()
 	fmt.Println("Multiple databases found. Select one to monitor:")
 	for i, c := range cands {
 		fmt.Printf("  [%d] %s (%s)\n", i+1, c.ID, collector.ProviderLabel(c.ProviderType))
 	}
-	fmt.Println("  (or re-run with --db-instance-id, or --config to monitor several)")
+	fmt.Printf("  (or re-run with --db-instance-id%s)\n", moreHint)
 	choice := prompt("Enter a number", "1")
 	n, err := strconv.Atoi(strings.TrimSpace(choice))
 	if err != nil || n < 1 || n > len(cands) {
@@ -1290,7 +1289,7 @@ var logsCmd = &cobra.Command{
 			return collector.TailLogs(collector.LogGroupFor(st.StackName), st.Region, follow)
 		}
 		if st.IsGCP() {
-			return tailGcpLogs(st.Project, st.DeploymentName, follow)
+			return tailGcpLogs(st.Project, st.Region, st.DeploymentName, follow)
 		}
 		tail, _ := cmd.Flags().GetString("tail")
 		return dockerRunner(st).Logs(follow, tail)
@@ -1386,10 +1385,8 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// deployment-blessed version without re-provisioning isn't wired yet.)
 	image, _ := resolveImage(cmd, nil)
 
-	// The gcp upgrade rides the update slice (the image is a template input
-	// read back off the deployment, like the aws parameter) — not wired yet.
 	if st.IsGCP() {
-		return errors.New("upgrade for the gcp target is not wired yet; run `dbg collector uninstall` and re-install with --image")
+		return errors.New("upgrade is not supported for the gcp target yet; run `dbg collector uninstall` and re-install with --image")
 	}
 
 	// Resolve the tag to a digest BEFORE deciding whether to act. The default
@@ -1508,11 +1505,8 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		return errors.New("aborted")
 	}
 
-	// Remove the runtime — an AWS CloudFormation stack, a GCP Infrastructure
-	// Manager deployment, a local container, or (for an in-cluster release)
-	// nothing, because this CLI has no cluster credentials. Deprovisioning the
-	// identity below still applies: that is ours to do and leaving it minted is
-	// what orphans a collector.
+	// Remove the runtime (an in-cluster release is the operator's to remove);
+	// the identity is deprovisioned below either way.
 	if st.IsHelm() {
 		fmt.Println(style.Warn("⚠  This collector runs in your cluster and this CLI cannot remove it. Run:"))
 		fmt.Printf("     helm uninstall %s --namespace %s\n",
@@ -1520,18 +1514,21 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		fmt.Println("   Its identity is deprovisioned below either way, so the release will stop being accepted.")
 	} else if st.IsAWS() {
 		if err := deleteStack(st.StackName, st.Region); err != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v", st.StackName, err)))
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  %v", err)))
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Stack %s deletion started", st.StackName)))
 		}
 	} else if st.IsGCP() {
-		// Infrastructure Manager destroys the Terraform-managed resources and
-		// answers only when done, which can take minutes — hence the spinner.
+		// Infrastructure Manager answers only once the resources are destroyed.
 		err := withSpinner("Deleting the deployment…", func() error {
 			return deleteGcpDeployment(st.Project, st.Region, st.DeploymentName)
 		})
+		if errors.Is(err, errInterrupted) {
+			return fmt.Errorf("%w: the deployment may still be deleting and the identity was NOT deprovisioned. "+
+				"Check `dbg collector status`, then run `dbg collector uninstall` again", err)
+		}
 		if err != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete deployment %s: %v (delete it from the console)", st.DeploymentName, err)))
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  %v (delete deployment %s from the console)", err, st.DeploymentName)))
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Deployment %s deleted", st.DeploymentName)))
 		}

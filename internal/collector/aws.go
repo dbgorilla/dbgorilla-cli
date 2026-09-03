@@ -564,9 +564,8 @@ func EncodeConfig(configTOML string) (string, error) {
 	return encodeConfigLimited(configTOML, maxConfigParamBytes, "a CloudFormation parameter")
 }
 
-// encodeConfigLimited is the carrier shared by the cloud targets: each target
-// names its own limit and its own carrier, so a GCP install is neither capped
-// at CloudFormation's 4KB nor told about CloudFormation when it overflows.
+// encodeConfigLimited base64-encodes the config against a target's own limit,
+// naming the carrier in the error.
 func encodeConfigLimited(configTOML string, limit int, carrier string) (string, error) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(configTOML))
 	if len(encoded) > limit {

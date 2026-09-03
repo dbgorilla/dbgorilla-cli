@@ -2,6 +2,12 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +168,99 @@ func TestRunInstallAWS_TimeoutDoesNotRollBack(t *testing.T) {
 	}
 	if !strings.Contains(out, "dbg collector status") {
 		t.Errorf("output should say how to watch it, got: %s", out)
+	}
+	// The removal hint must be a command uninstall accepts.
+	if !strings.Contains(out, "dbg collector uninstall\n") || strings.Contains(out, "--stack-name") {
+		t.Errorf("the removal hint should be plain `dbg collector uninstall`, got: %s", out)
+	}
+	// The stack was kept, so the grant the collector needs is still printed.
+	if !strings.Contains(out, "GRANT rds_iam") {
+		t.Errorf("grant guidance should still print when the stack is kept, got: %s", out)
+	}
+}
+
+// A stack of that name with no local record: updating it in place would hand
+// it a new identity and orphan the old one.
+func TestRunInstallAWS_ExistingStackWithoutStateIsRefused(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	stubStackStatus(t, "CREATE_COMPLETE", nil)
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	srv := installServer(t, "agent-aws")
+	defer srv.Close()
+
+	c := awsCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	capture(t, func() { err = runInstallAWS(c) })
+	if err == nil || !strings.Contains(err.Error(), "already exists") || !strings.Contains(err.Error(), "--stack-name") {
+		t.Fatalf("err = %v, want the existing-stack refusal", err)
+	}
+	if deploys.count != 0 {
+		t.Error("nothing may be deployed over an unrecorded stack")
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		t.Error("a refused install must not record state")
+	}
+}
+
+// A parameter-rendering failure after the identity was minted must
+// deprovision it: no state exists yet, so nothing else could.
+func TestRunInstallAWS_ParamsFailureDeprovisionsTheIdentity(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	deleted := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0_2/collectors", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"agent_id":"agent-aws","secret":"sek","tenant_id":"ten","domain":"dep.example"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `[]`)
+	})
+	mux.HandleFunc("/api/v0_2/collectors/agent-aws", func(w http.ResponseWriter, r *http.Request) {
+		deleted = r.Method == http.MethodDelete
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Enough databases to overflow the CloudFormation parameter.
+	var cfg strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&cfg, "[[database]]\ninstance-id = \"prod-db-%02d\"\n\n", i)
+	}
+	path := filepath.Join(t.TempDir(), "dbs.toml")
+	if err := os.WriteFile(path, []byte(cfg.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := awsCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "config", path)
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	capture(t, func() { err = runInstallAWS(c) })
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err = %v, want the size error", err)
+	}
+	if !deleted {
+		t.Error("the minted identity must be deprovisioned")
+	}
+	if deploys.count != 0 {
+		t.Error("nothing may be deployed")
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		t.Error("no state may be left behind")
 	}
 }
 

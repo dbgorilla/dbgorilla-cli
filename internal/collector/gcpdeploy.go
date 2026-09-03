@@ -9,30 +9,16 @@ import (
 	"time"
 )
 
-// The gcp deployment: Google Infrastructure Manager (managed Terraform)
-// actuating a published template that runs the collector container on a
-// single-instance managed instance group. The same philosophy as the aws
-// target's CloudFormation path: one published template serves the CLI, a
-// direct deploy, and a customer's own security review — never a copy embedded
-// in this binary.
+// The gcp deployment: Infrastructure Manager (managed Terraform) actuating the
+// published template. The template is never embedded in this binary.
 
-// Infrastructure Manager's API host. Deployments are
-// projects/{p}/locations/{r}/deployments/{name}; mutations return
-// long-running operations polled on the same host.
 const infraManagerBase = "https://config.googleapis.com/v1"
 
-// gcpDeployTimeout bounds how long we wait for a deployment create/update.
-// Terraform applies a MIG and waits for the instance; a cold image pull can
-// legitimately take a while. Giving up too early must not tear anything down —
-// see ErrDeployTimeout, whose contract this target shares with aws. Variables
-// rather than constants so tests can shorten the wait.
+// Variables rather than constants so tests can shorten the waits.
 var (
-	gcpDeployTimeout = 30 * time.Minute
-	gcpDeleteTimeout = 15 * time.Minute
-	gcpPollInterval  = 5 * time.Second
-	// gcpPollRequestTimeout bounds each poll GET. Without it a blackholed
-	// connection (NAT/proxy silently dropping an established flow) blocks the
-	// wait loop forever and the budget deadline is never consulted.
+	gcpDeployTimeout      = 30 * time.Minute
+	gcpDeleteTimeout      = 15 * time.Minute
+	gcpPollInterval       = 5 * time.Second
 	gcpPollRequestTimeout = 30 * time.Second
 )
 
@@ -41,15 +27,12 @@ type GcpDeploy struct {
 	Project        string
 	Region         string
 	DeploymentName string
-	// TemplateSource is the published template's GCS directory
-	// (gs://…/collector/gce/<version>/), HostedGcpTemplateSource unless
-	// --template-source overrides it the way --template-url does for aws.
+	// TemplateSource is the template's gs:// directory.
 	TemplateSource string
 	// ServiceAccount is the account Infrastructure Manager actuates Terraform
-	// as (projects/{p}/serviceAccounts/{email} — IM requires one explicitly).
+	// as (projects/{p}/serviceAccounts/{email}).
 	ServiceAccount string
-	// Inputs are the template's input variables — the config blob, secrets,
-	// image, network. The template's contract, like fargateParamKeys.
+	// Inputs are the template's input variables (gcpInputKeys).
 	Inputs map[string]string
 	DryRun bool
 }
@@ -65,8 +48,6 @@ func gcpDeploymentPath(project, region, name string) string {
 		url.PathEscape(project), url.PathEscape(region), url.PathEscape(name))
 }
 
-// gcpDeployment is the subset of the Infrastructure Manager Deployment
-// resource this package reads.
 type gcpDeployment struct {
 	Name        string `json:"name"`
 	State       string `json:"state"` // CREATING | ACTIVE | UPDATING | DELETING | FAILED | SUSPENDED
@@ -93,16 +74,14 @@ func (d GcpDeploy) deploy(ctx context.Context) error {
 	if err != nil {
 		return gcpCredsErr(err)
 	}
-	// The published template must be reachable before anything is touched:
-	// this turns "the deploy failed twenty minutes in" into "your egress or the
-	// template address is wrong" upfront, on every path — not only the dry run.
+	// Probed on every path so an unreachable template fails before anything
+	// is created.
 	if err := probeGcpTemplate(ctx, cfg, d.TemplateSource); err != nil {
 		return err
 	}
 	if d.DryRun {
-		// Infrastructure Manager has no server-side validate-only call the way
-		// CloudFormation does; the probe above is what a dry run can check, and
-		// it stops here before any mutation.
+		// Infrastructure Manager has no validate-only call; the probe is the
+		// whole dry run.
 		return nil
 	}
 
@@ -116,10 +95,7 @@ func (d GcpDeploy) deploy(ctx context.Context) error {
 			return fmt.Errorf("deployment %q is %s — another operation is already in progress; "+
 				"wait for it to finish and re-run: %w", d.DeploymentName, existing.State, ErrDeployBusy)
 		}
-		// Any settled state — ACTIVE, SUSPENDED, or FAILED — updates in place:
-		// Infrastructure Manager re-applies Terraform against whatever
-		// half-converged, unlike a CloudFormation ROLLBACK_COMPLETE stack that
-		// must be recreated.
+		// Any settled state (ACTIVE, SUSPENDED, FAILED) re-applies in place.
 		return d.mutate(ctx, cfg, http.MethodPatch,
 			infraManagerBase+"/"+path+"?updateMask=service_account,terraform_blueprint")
 	}
@@ -129,16 +105,18 @@ func (d GcpDeploy) deploy(ctx context.Context) error {
 	return d.mutate(ctx, cfg, http.MethodPost, createURL)
 }
 
-// mutate issues the create/update and waits for its operation.
 func (d GcpDeploy) mutate(ctx context.Context, cfg gcpConfig, method, rawURL string) error {
 	op, err := startGcpOperation(ctx, cfg, method, rawURL, d.body())
 	if err != nil {
 		return fmt.Errorf("could not deploy %q: %w", d.DeploymentName, err)
 	}
 	if err := waitGcpOperation(ctx, cfg, op, gcpDeployTimeout); err != nil {
-		if errors.Is(err, ErrDeployTimeout) {
+		switch {
+		case errors.Is(err, ErrDeployTimeout):
 			return fmt.Errorf("deployment %q is still applying after %s: %w",
 				d.DeploymentName, gcpDeployTimeout, err)
+		case errors.Is(err, ErrDeployUnknown):
+			return fmt.Errorf("deployment %q may still be applying: %w", d.DeploymentName, err)
 		}
 		path := gcpDeploymentPath(d.Project, d.Region, d.DeploymentName)
 		return fmt.Errorf("deployment %q did not apply cleanly: %w%s",
@@ -155,9 +133,8 @@ func gcpDeploymentInProgress(state string) bool {
 	return false
 }
 
-// GcpDeploymentStatus reports the deployment's state (e.g. ACTIVE), or ""
-// when it does not exist — the same "empty means gone" contract StackStatus
-// has, which is what lets install decide update-vs-fresh.
+// GcpDeploymentStatus reports the deployment's state, or "" when it does not
+// exist.
 func GcpDeploymentStatus(project, region, name string) (string, error) {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
@@ -174,24 +151,18 @@ func GcpDeploymentStatus(project, region, name string) (string, error) {
 	return dep.State, nil
 }
 
-// DeleteGcpDeployment removes the deployment and everything Terraform created,
-// waiting for the delete (unlike DeleteStack, whose console shows progress —
-// Infrastructure Manager gives the operator nothing to watch). The command
-// layer runs it under a spinner so the wait is visible.
+// DeleteGcpDeployment destroys the deployment and everything Terraform
+// created, waiting for the delete. A deployment that does not exist is not an
+// error.
 func DeleteGcpDeployment(project, region, name string) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
 		return gcpCredsErr(err)
 	}
-	// deletePolicy=DELETE destroys the Terraform-managed resources rather than
-	// abandoning them; force=true clears stray revisions.
 	op, err := startGcpOperation(ctx, cfg, http.MethodDelete,
 		infraManagerBase+"/"+gcpDeploymentPath(project, region, name)+"?force=true&deletePolicy=DELETE", nil)
 	if err != nil {
-		// A rollback for a deployment that was never created (the failure
-		// happened before CreateDeployment) must not warn the operator to
-		// delete something from the console that does not exist.
 		if errors.Is(err, errGcpNotFound) {
 			return nil
 		}
@@ -219,8 +190,7 @@ func gcpDeploymentFailureReason(ctx context.Context, cfg gcpConfig, path string)
 	return "\n  reason: " + detail
 }
 
-// getGcpDeployment fetches a deployment; a 404 is (nil, nil) — not installed
-// is a normal answer, not an error.
+// getGcpDeployment fetches a deployment; a 404 is (nil, nil).
 func getGcpDeployment(ctx context.Context, cfg gcpConfig, path string) (*gcpDeployment, error) {
 	var dep gcpDeployment
 	err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+path, nil, &dep)
@@ -233,7 +203,7 @@ func getGcpDeployment(ctx context.Context, cfg gcpConfig, path string) (*gcpDepl
 	return &dep, nil
 }
 
-// gcpOperation is the LRO envelope mutations return.
+// gcpOperation is the long-running operation envelope mutations return.
 type gcpOperation struct {
 	Name  string `json:"name"`
 	Done  bool   `json:"done"`
@@ -243,8 +213,6 @@ type gcpOperation struct {
 	} `json:"error"`
 }
 
-// startGcpOperation issues a mutation (POST/PATCH/DELETE) that answers with a
-// long-running operation.
 func startGcpOperation(ctx context.Context, cfg gcpConfig, method, rawURL string, body any) (*gcpOperation, error) {
 	var op gcpOperation
 	if err := gcpDo(ctx, cfg, method, rawURL, body, &op); err != nil {
@@ -253,17 +221,11 @@ func startGcpOperation(ctx context.Context, cfg gcpConfig, method, rawURL string
 	return &op, nil
 }
 
-// waitGcpOperation polls the LRO until done, error, or the budget runs out —
-// exhaustion is tagged ErrDeployTimeout so callers keep the "do not roll back
-// on a timeout" contract the aws target established.
+// waitGcpOperation polls the operation until done, error, or the budget runs
+// out (ErrDeployTimeout). A few consecutive poll failures are tolerated; past
+// that the outcome is ErrDeployUnknown, since the server converges regardless.
 func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budget time.Duration) error {
 	deadline := time.Now().Add(budget)
-	// A failed poll is NOT a failed operation: the server keeps converging
-	// whether or not this laptop can reach it, and treating one dropped GET
-	// (wifi blip, IPv6 route flap) as deploy failure triggers a rollback that
-	// force-deletes a healthy in-flight deployment — which is exactly what a
-	// live transient did on 2026-09-02. Tolerate a few consecutive poll
-	// failures inside the budget before giving up.
 	const maxConsecutivePollFailures = 4
 	pollFailures := 0
 	for {
@@ -297,16 +259,3 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 		op = &next
 	}
 }
-
-// ErrDeployBusy marks a deploy refused because the deployment is already
-// converging under another operation. The install spine treats it as
-// no-rollback: deleting a converging deployment is never what "wait and
-// re-run" means.
-var ErrDeployBusy = errors.New("deployment busy")
-
-// ErrDeployUnknown marks a deploy whose outcome could not be observed — the
-// client lost the operation (polling kept failing), not the server. The
-// deployment may well be converging to healthy, so the install spine must
-// leave everything in place: no deployment delete, no identity deprovision,
-// state kept. `dbg collector status` picks it up once connectivity returns.
-var ErrDeployUnknown = errors.New("deploy outcome unknown")

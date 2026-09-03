@@ -378,8 +378,14 @@ func TestWaitErr_TimeoutIsTaggedDistinctly(t *testing.T) {
 	}
 
 	terminal := waitErr(errors.New("waiter state transitioned to Failure"))
-	if errors.Is(terminal, ErrDeployTimeout) {
-		t.Error("a terminal CREATE_FAILED must not be reported as a timeout")
+	if errors.Is(terminal, ErrDeployTimeout) || errors.Is(terminal, ErrDeployUnknown) {
+		t.Error("a terminal CREATE_FAILED must not be reported as a timeout or an unknown outcome")
+	}
+	// A poll that never got an API response (DNS, a dropped connection) says
+	// nothing about the stack.
+	lost := waitErr(errors.New("expected err to be of type smithy.APIError, got dial tcp: lookup cloudformation.us-east-1.amazonaws.com: no such host"))
+	if !errors.Is(lost, ErrDeployUnknown) || errors.Is(lost, ErrDeployTimeout) {
+		t.Errorf("a transport failure while polling must be ErrDeployUnknown, got %v", lost)
 	}
 	if waitErr(nil) != nil {
 		t.Error("waitErr(nil) should be nil")

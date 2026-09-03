@@ -3,6 +3,10 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -10,9 +14,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The `--target gcp` install mints an identity, creates an Infrastructure
-// Manager deployment, and on failure rolls both back. These drive it end to
-// end with every Google Cloud call faked through the seams.
+// The `--target gcp` install, driven end to end with every Google Cloud call
+// faked through the seams.
 
 // --- seams -----------------------------------------------------------------
 
@@ -21,7 +24,16 @@ func stubGCPOK(t *testing.T) {
 	stubGcpAvailable(t, nil)
 	stubGcpIdentity(t, "dev@example.com", nil)
 	stubGcpProject(t, "acme-prod", nil)
+	stubGcpDeploymentStatus(t, "", nil)
+	stubResolveGcpSubnetwork(t, "", nil)
 	stubRemoteDigest(t, nil)
+}
+
+func stubResolveGcpSubnetwork(t *testing.T, subnetwork string, err error) {
+	t.Helper()
+	orig := resolveGcpSubnetwork
+	resolveGcpSubnetwork = func(string, string) (string, error) { return subnetwork, err }
+	t.Cleanup(func() { resolveGcpSubnetwork = orig })
 }
 
 func stubGcpAvailable(t *testing.T, err error) *int {
@@ -47,8 +59,7 @@ func stubGcpProject(t *testing.T, project string, err error) {
 	t.Cleanup(func() { gcpProject = orig })
 }
 
-// stubGcpDiscover answers discovery with target; explicit seed fields still
-// win, mirroring the real merge.
+// stubGcpDiscover answers discovery with target; explicit seed fields win.
 func stubGcpDiscover(t *testing.T, target collector.GcpTarget, err error) {
 	t.Helper()
 	orig := discoverGcpTarget
@@ -131,12 +142,13 @@ func gcpCmd(t *testing.T) *cobra.Command {
 	c.Flags().String("template-source", "", "")
 	c.Flags().String("deploy-service-account", "projects/acme-prod/serviceAccounts/deployer@acme-prod.iam.gserviceaccount.com", "")
 	c.Flags().String("network", "", "")
+	c.Flags().String("subnetwork", "", "")
 	c.SetContext(context.Background())
 	return c
 }
 
 // completeGcpTarget is a fully-discovered Cloud SQL Postgres instance with IAM
-// auth on, so tests that are not about discovery can skip it.
+// auth on.
 func completeGcpTarget() collector.GcpTarget {
 	return collector.GcpTarget{
 		ProviderType: "cloud_sql",
@@ -192,8 +204,6 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 	if d.ServiceAccount == "" || d.TemplateSource != collector.HostedGcpTemplateSource() {
 		t.Errorf("deploy must carry the actuating account and the published template, got %+v", d)
 	}
-	// The IAM database user is the runtime service account the template will
-	// create, by naming contract — rendered before that account exists.
 	if d.Inputs["runtime_service_account"] != "dbg-test@acme-prod.iam.gserviceaccount.com" {
 		t.Errorf("runtime SA = %q", d.Inputs["runtime_service_account"])
 	}
@@ -206,11 +216,10 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 	if strings.Contains(cfg, "sek") || d.Inputs["server_secret"] != "sek" {
 		t.Error("the server secret rides its own input, never the config")
 	}
-	// The image is digest-pinned before it reaches the template.
 	if !strings.Contains(d.Inputs["collector_image"], "@sha256:") {
 		t.Errorf("image should be pinned, got %s", d.Inputs["collector_image"])
 	}
-	// State is saved BEFORE the slow deploy.
+	// State is saved before the slow deploy.
 	st, lerr := collector.LoadState()
 	if lerr != nil || st == nil {
 		t.Fatalf("state not saved: %v", lerr)
@@ -218,9 +227,17 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 	if st.AgentID != "agent-gcp" || !st.IsGCP() || st.Project != "acme-prod" || st.Region != "us-central1" || st.DeploymentName != "dbg-test" {
 		t.Errorf("state = %+v", st)
 	}
-	// IAM auth needs the operator to register the service account as a user.
+	// IAM auth needs the operator to register the service account as a user,
+	// then grant it; the SQL is the GCP script, not the RDS one.
 	if !strings.Contains(out, "gcloud sql users create dbg-test@acme-prod.iam.gserviceaccount.com") {
 		t.Errorf("grant guidance should name the gcloud step, got:\n%s", out)
+	}
+	if !strings.Contains(out, `GRANT pg_monitor TO "dbg-test@acme-prod.iam";`) ||
+		strings.Contains(out, "rds_iam") || strings.Contains(out, "CREATE USER") {
+		t.Errorf("grant guidance should be the GCP script, got:\n%s", out)
+	}
+	if !strings.Contains(out, "dbg collector status") {
+		t.Errorf("the operator should be pointed at status to confirm the connection, got:\n%s", out)
 	}
 }
 
@@ -287,8 +304,7 @@ func TestRunInstallGCP_FailedDeployRollsBackIdentityAndDeployment(t *testing.T) 
 	}
 }
 
-// A deploy TIMEOUT is not a failure: rolling back would delete a deployment
-// that is still converging.
+// A deploy timeout is not a failure: the deployment is still converging.
 func TestRunInstallGCP_TimeoutDoesNotRollBack(t *testing.T) {
 	isolate(t)
 	writeTokens(t)
@@ -316,6 +332,78 @@ func TestRunInstallGCP_TimeoutDoesNotRollBack(t *testing.T) {
 	}
 	if !strings.Contains(out, "NOT rolled back") || !strings.Contains(out, "dbg collector status") {
 		t.Errorf("the operator should be told to watch it, got: %s", out)
+	}
+	// The deployment was kept, so the grant steps IAM auth needs still print.
+	if !strings.Contains(out, "gcloud sql users create") {
+		t.Errorf("grant guidance should print when the deployment is kept, got: %s", out)
+	}
+}
+
+// Ctrl-C under the spinner and a lost operation are both unknown outcomes:
+// nothing is rolled back, state stays for `status`, and the grant steps print.
+func TestRunInstallGCP_UnknownOutcomeLeavesEverything(t *testing.T) {
+	for name, deployErr := range map[string]error{
+		"interrupted": fmt.Errorf("%w: program was interrupted", errInterrupted),
+		"lost":        fmt.Errorf("polling failed: %w", collector.ErrDeployUnknown),
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolate(t)
+			writeTokens(t)
+			stubGCPOK(t)
+			stubGcpDiscover(t, completeGcpTarget(), nil)
+			stubGcpDeploy(t, deployErr)
+			deleted := stubDeleteGcpDeployment(t, nil)
+			srv := installServer(t, "agent-gcp")
+			defer srv.Close()
+
+			c := gcpCmd(t)
+			mustSet(t, c, "api-url", srv.URL)
+			mustSet(t, c, "yes", "true")
+
+			var err error
+			out := capture(t, func() { err = runInstallGCP(c) })
+			if err == nil || !strings.Contains(err.Error(), "dbg collector status") {
+				t.Fatalf("err = %v, want a pointer at status", err)
+			}
+			if *deleted {
+				t.Error("an unknown outcome must not delete the deployment")
+			}
+			if st, _ := collector.LoadState(); st == nil {
+				t.Error("state must survive so status/uninstall can find the deployment")
+			}
+			if !strings.Contains(out, "nothing was rolled back") || !strings.Contains(out, "gcloud sql users create") {
+				t.Errorf("want the no-rollback notice and the grant steps, got: %s", out)
+			}
+		})
+	}
+}
+
+// A deployment of that name with no local record: updating it in place would
+// hand it a new identity and orphan the old one.
+func TestRunInstallGCP_ExistingDeploymentWithoutStateIsRefused(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubGCPOK(t)
+	stubGcpDeploymentStatus(t, "ACTIVE", nil)
+	stubGcpDiscover(t, completeGcpTarget(), nil)
+	deploys := stubGcpDeploy(t, nil)
+	srv := installServer(t, "agent-gcp")
+	defer srv.Close()
+
+	c := gcpCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	capture(t, func() { err = runInstallGCP(c) })
+	if err == nil || !strings.Contains(err.Error(), "already exists") || !strings.Contains(err.Error(), "--deployment-name") {
+		t.Fatalf("err = %v, want the existing-deployment refusal", err)
+	}
+	if deploys.count != 0 {
+		t.Error("nothing may be deployed over an unrecorded deployment")
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		t.Error("a refused install must not record state")
 	}
 }
 
@@ -380,19 +468,79 @@ func TestRunInstallGCP_PriorInstall(t *testing.T) {
 }
 
 // Flag mistakes are caught before a single cloud call is made.
-func TestRunInstallGCP_MissingDeployServiceAccountFailsFirst(t *testing.T) {
+func TestRunInstallGCP_FlagMistakesFailFirst(t *testing.T) {
+	cases := map[string]struct {
+		set  func(*cobra.Command)
+		want string
+	}{
+		"missing deploy service account": {
+			func(c *cobra.Command) { mustSet(t, c, "deploy-service-account", "") },
+			"--deploy-service-account",
+		},
+		"deploy service account not in resource form": {
+			func(c *cobra.Command) {
+				mustSet(t, c, "deploy-service-account", "deployer@acme-prod.iam.gserviceaccount.com")
+			},
+			"projects/<project>/serviceAccounts/<email>",
+		},
+		"deployment name outside the service-account grammar": {
+			func(c *cobra.Command) { mustSet(t, c, "deployment-name", "Bad_Name") },
+			"--deployment-name",
+		},
+		"provider type from the other cloud": {
+			func(c *cobra.Command) { mustSet(t, c, "provider-type", "aws_rds") },
+			"cloud_sql or alloydb",
+		},
+		"an aws-only flag": {
+			func(c *cobra.Command) {
+				c.Flags().String("subnets", "", "")
+				mustSet(t, c, "subnets", "subnet-a")
+			},
+			"--subnets applies to --target aws only",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			isolate(t)
+			writeTokens(t)
+			avail := stubGcpAvailable(t, nil)
+			c := gcpCmd(t)
+			mustSet(t, c, "api-url", "https://x")
+			tc.set(c)
+			err := runInstallGCP(c)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if *avail != 0 {
+				t.Error("the flag check must run before any Google Cloud call")
+			}
+		})
+	}
+}
+
+// A project number is accepted by every API but cannot name the service
+// account the template creates.
+func TestRunInstallGCP_ProjectNumberIsRefused(t *testing.T) {
 	isolate(t)
 	writeTokens(t)
-	avail := stubGcpAvailable(t, nil)
+	stubGCPOK(t)
+	stubGcpDiscover(t, completeGcpTarget(), nil)
+	deploys := stubGcpDeploy(t, nil)
+	srv := installServer(t, "agent-gcp")
+	defer srv.Close()
+
 	c := gcpCmd(t)
-	mustSet(t, c, "api-url", "https://x")
-	mustSet(t, c, "deploy-service-account", "")
-	err := runInstallGCP(c)
-	if err == nil || !strings.Contains(err.Error(), "--deploy-service-account") {
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "yes", "true")
+	mustSet(t, c, "project", "123456789012")
+
+	var err error
+	capture(t, func() { err = runInstallGCP(c) })
+	if err == nil || !strings.Contains(err.Error(), "project number") {
 		t.Fatalf("err = %v", err)
 	}
-	if *avail != 0 {
-		t.Error("the flag check must run before any Google Cloud call")
+	if deploys.count != 0 {
+		t.Error("nothing may be deployed under a project number")
 	}
 }
 
@@ -464,9 +612,6 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 	})
 
 	t.Run("MySQL without the flag gets the MySQL refusal, not the Postgres flag advice", func(t *testing.T) {
-		// The flag advice would send a MySQL operator through an instance
-		// restart straight into the MySQL-IAM refusal — the dead end must be
-		// named first.
 		target := completeGcpTarget()
 		target.Engine, target.Port, target.IamEnabled = "mysql", 3306, false
 		c, _ := setup(t, target)
@@ -478,10 +623,7 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 		}
 	})
 
-	t.Run("MySQL under IAM is refused — the collector's matrix excludes it", func(t *testing.T) {
-		// Rendering mysql+cloud_sql+gcp_iam would deploy a collector that
-		// refuses its own config at startup and crash-loops; the install must
-		// refuse first, naming the way out.
+	t.Run("MySQL under IAM is refused", func(t *testing.T) {
 		target := completeGcpTarget()
 		target.Engine, target.Port = "mysql", 3306
 		c, _ := setup(t, target)
@@ -579,8 +721,72 @@ func TestRunInstallGCP_NetworkComesFromTheDatabaseOrTheFlag(t *testing.T) {
 	})
 }
 
+func TestRunInstallGCP_Subnetwork(t *testing.T) {
+	setup := func(t *testing.T) (*cobra.Command, *gcpDeployCall) {
+		isolate(t)
+		writeTokens(t)
+		stubGCPOK(t)
+		stubGcpDiscover(t, completeGcpTarget(), nil)
+		deploys := stubGcpDeploy(t, nil)
+		srv := installServer(t, "agent-gcp")
+		t.Cleanup(srv.Close)
+		c := gcpCmd(t)
+		mustSet(t, c, "api-url", srv.URL)
+		mustSet(t, c, "yes", "true")
+		return c, deploys
+	}
+	t.Run("--subnetwork rides into the template", func(t *testing.T) {
+		c, deploys := setup(t)
+		mustSet(t, c, "subnetwork", "projects/acme-prod/regions/us-central1/subnetworks/db")
+		var err error
+		capture(t, func() { err = runInstallGCP(c) })
+		if err != nil {
+			t.Fatalf("runInstallGCP: %v", err)
+		}
+		if got := deploys.deploy.Inputs["subnetwork"]; got != "projects/acme-prod/regions/us-central1/subnetworks/db" {
+			t.Errorf("subnetwork = %q", got)
+		}
+	})
+	t.Run("otherwise the VPC's subnetwork in the region is resolved", func(t *testing.T) {
+		c, deploys := setup(t)
+		var gotNetwork, gotRegion string
+		orig := resolveGcpSubnetwork
+		resolveGcpSubnetwork = func(network, region string) (string, error) {
+			gotNetwork, gotRegion = network, region
+			return "projects/acme-prod/regions/us-central1/subnetworks/auto", nil
+		}
+		t.Cleanup(func() { resolveGcpSubnetwork = orig })
+		var err error
+		capture(t, func() { err = runInstallGCP(c) })
+		if err != nil {
+			t.Fatalf("runInstallGCP: %v", err)
+		}
+		if gotNetwork != completeGcpTarget().Network || gotRegion != "us-central1" {
+			t.Errorf("resolved for %s/%s", gotNetwork, gotRegion)
+		}
+		if got := deploys.deploy.Inputs["subnetwork"]; got != "projects/acme-prod/regions/us-central1/subnetworks/auto" {
+			t.Errorf("subnetwork = %q", got)
+		}
+	})
+	t.Run("an unresolvable subnetwork stops before anything is minted", func(t *testing.T) {
+		c, deploys := setup(t)
+		stubResolveGcpSubnetwork(t, "", errors.New("VPC has several subnetworks; pass --subnetwork"))
+		var err error
+		capture(t, func() { err = runInstallGCP(c) })
+		if err == nil || !strings.Contains(err.Error(), "--subnetwork") {
+			t.Fatalf("err = %v", err)
+		}
+		if deploys.count != 0 {
+			t.Error("nothing may be deployed")
+		}
+		if st, _ := collector.LoadState(); st != nil {
+			t.Error("no state may be left behind")
+		}
+	})
+}
+
 // With no --db-instance-id and a real terminal, an ambiguous project becomes
-// a picker rather than an error — the same UX as the aws target.
+// a picker rather than an error.
 func TestResolveGcpTarget_AmbiguityBecomesAPicker(t *testing.T) {
 	isolate(t)
 	setStdin(t, "2\n")
@@ -724,7 +930,7 @@ func TestCollectorLifecycle_GCPRoutesToTheInstanceGroup(t *testing.T) {
 		saveGCP(t)
 		var gotProject, gotName string
 		orig := tailGcpLogs
-		tailGcpLogs = func(project, name string, follow bool) error { gotProject, gotName = project, name; return nil }
+		tailGcpLogs = func(project, _, name string, follow bool) error { gotProject, gotName = project, name; return nil }
 		t.Cleanup(func() { tailGcpLogs = orig })
 		if err := logsCmd.RunE(logsCmd, nil); err != nil {
 			t.Fatalf("logs: %v", err)
@@ -768,5 +974,39 @@ func TestRunUninstall_GCPDeletesTheDeployment(t *testing.T) {
 	}
 	if st, _ := collector.LoadState(); st != nil {
 		t.Error("state should be removed after successful deprovision")
+	}
+}
+
+// Ctrl-C during the delete: the deployment may still be deleting, so the
+// identity must not be deprovisioned and the record must stay for a retry.
+func TestRunUninstall_GCPInterruptedDeleteKeepsTheIdentity(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	deprovisioned := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deprovisioned = true
+		}
+		w.WriteHeader(http.StatusNoContent)
+		_, _ = io.WriteString(w, "")
+	}))
+	defer srv.Close()
+	if err := collector.SaveState(&collector.State{AgentID: "a1", Target: "gcp", Project: "acme-prod", Region: "us-central1", DeploymentName: "dbg-test"}); err != nil {
+		t.Fatal(err)
+	}
+	stubDeleteGcpDeployment(t, fmt.Errorf("%w: program was interrupted", errInterrupted))
+	c := uninstallTestCmd()
+	mustSet(t, c, "yes", "true")
+	mustSet(t, c, "api-url", srv.URL)
+	var err error
+	capture(t, func() { err = runUninstall(c, nil) })
+	if err == nil || !strings.Contains(err.Error(), "uninstall") {
+		t.Fatalf("err = %v, want a retry hint", err)
+	}
+	if deprovisioned {
+		t.Error("the identity must not be deprovisioned while the deployment may be alive")
+	}
+	if st, _ := collector.LoadState(); st == nil {
+		t.Error("state must stay for the retry")
 	}
 }

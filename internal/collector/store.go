@@ -66,9 +66,7 @@ type State struct {
 	StackName string `json:"stack_name,omitempty"`
 	Region    string `json:"region,omitempty"`
 
-	// gcp target (Region above is shared: both clouds pin the region the
-	// install captured, so status/uninstall can't be orphaned by a changed
-	// default).
+	// gcp target (Region above is shared with aws).
 	Project        string `json:"project,omitempty"`
 	DeploymentName string `json:"deployment_name,omitempty"`
 

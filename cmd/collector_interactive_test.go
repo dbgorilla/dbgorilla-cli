@@ -273,7 +273,7 @@ func TestPickTarget(t *testing.T) {
 		setStdin(t, "3\n")
 		var got collector.TargetChoice
 		var err error
-		out := capture(t, func() { got, err = pickTarget(amb) })
+		out := capture(t, func() { got, err = pickTarget(amb, "") })
 		if err != nil {
 			t.Fatalf("pickTarget: %v", err)
 		}
@@ -289,7 +289,7 @@ func TestPickTarget(t *testing.T) {
 		setStdin(t, "\n")
 		var got collector.TargetChoice
 		var err error
-		capture(t, func() { got, err = pickTarget(amb) })
+		capture(t, func() { got, err = pickTarget(amb, "") })
 		if err != nil {
 			t.Fatalf("pickTarget: %v", err)
 		}
@@ -303,7 +303,7 @@ func TestPickTarget(t *testing.T) {
 		t.Run("rejects "+strings.TrimSpace(in), func(t *testing.T) {
 			setStdin(t, in)
 			var err error
-			capture(t, func() { _, err = pickTarget(amb) })
+			capture(t, func() { _, err = pickTarget(amb, "") })
 			if err == nil {
 				t.Fatalf("%q must not select a database", in)
 			}

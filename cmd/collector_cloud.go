@@ -14,17 +14,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The cloud deploy targets (aws, gcp) share one install spine: check for a
-// prior install, name the identity that will act, confirm the deployment
-// supports collectors, mint an identity, pin the image, save state before the
-// slow deploy, and on failure roll back — but never on a timeout. These are
-// the target-neutral pieces; each target's own file adds its discovery, auth,
-// networking and deployment API. A third cloud extends this file rather than
-// copying an install function.
+// The cloud deploy targets (aws, gcp) share this install spine: prior-install
+// check, identity preflight, capability gate, identity mint, image pin, state
+// saved before the slow deploy, and rollback on failure but never on a timeout.
 
 // dbPasswordFlag resolves --db-password from the flag or the env var. The cloud
-// targets never prompt for it: the value rides into the deployment's secret
-// store, so it must be supplied deliberately.
+// targets never prompt for it.
 func dbPasswordFlag(cmd *cobra.Command) string {
 	if p, _ := cmd.Flags().GetString("db-password"); p != "" {
 		return p
@@ -32,8 +27,7 @@ func dbPasswordFlag(cmd *cobra.Command) string {
 	return os.Getenv(collector.DBPasswordEnv)
 }
 
-// requireInstallSession is the login gate every install starts with: a
-// resolvable API URL and a current login.
+// requireInstallSession is the login gate every install starts with.
 func requireInstallSession(cmd *cobra.Command) (apiURL string, err error) {
 	apiURL, err = requireAPIURL(cmd)
 	if err != nil {
@@ -45,8 +39,18 @@ func requireInstallSession(cmd *cobra.Command) (apiURL string, err error) {
 	return apiURL, nil
 }
 
+// requireNoInstall refuses when a collector is already recorded on this
+// machine.
+func requireNoInstall() error {
+	if st, _ := collector.LoadState(); st != nil {
+		return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
+			st.AgentID)
+	}
+	return nil
+}
+
 // requireCollectorSupport builds the API client and confirms the deployment
-// can provision collectors at all, before anything cloud-side is touched.
+// can provision collectors.
 func requireCollectorSupport(cmd *cobra.Command, apiURL string) (*api.Client, error) {
 	client := newAPIClient(cmd)
 	supported, err := client.CollectorSupported()
@@ -60,12 +64,9 @@ func requireCollectorSupport(cmd *cobra.Command, apiURL string) (*api.Client, er
 }
 
 // priorCloudInstall inspects the local install record before a cloud install.
-// A collector of another target blocks (it cannot be reconciled here). One of
-// this target whose runtime still exists is returned with its status, for the
-// caller to update or refuse. One whose runtime is gone — deleted from the
-// console, or left by an uninstall that could not deprovision the identity —
-// is announced, and the install proceeds fresh; updating it would fail deep in
-// the cloud API instead. Dry runs always take the fresh path.
+// A collector of another target blocks. One of this target whose runtime still
+// exists is returned with its status. One whose runtime is gone is announced
+// and the install proceeds fresh. Dry runs always take the fresh path.
 func priorCloudInstall(dryRun bool, isMine func(*collector.State) bool,
 	status func(*collector.State) (string, error), noun string, name func(*collector.State) string,
 ) (*collector.State, string, error) {
@@ -84,9 +85,6 @@ func priorCloudInstall(dryRun bool, isMine func(*collector.State) bool,
 	if s != "" {
 		return st, s, nil
 	}
-	// The install below overwrites state with the NEW agent, so the stale
-	// identity named here is unreachable by any CLI command afterwards —
-	// point at the console, not at `uninstall`.
 	fmt.Println(style.Warn(fmt.Sprintf(
 		"⚠  %s %q from the last install no longer exists — installing fresh.\n"+
 			"   Collector %s is still provisioned in DBGorilla; remove it from the console (this install replaces the local record).",
@@ -94,9 +92,27 @@ func priorCloudInstall(dryRun bool, isMine func(*collector.State) bool,
 	return nil, "", nil
 }
 
+// requireNoRuntime refuses a fresh install when the runtime it would create
+// already exists but this machine has no record of it: updating it in place
+// would hand it a new identity and orphan the old one.
+func requireNoRuntime(dryRun bool, status func() (string, error), noun, name, nameFlag string) error {
+	if dryRun {
+		return nil
+	}
+	s, err := status()
+	if err != nil {
+		return err
+	}
+	if s == "" {
+		return nil
+	}
+	return fmt.Errorf("%s %q already exists (%s) but this machine has no record of it. "+
+		"Run `dbg collector uninstall` where it was installed, delete it from the console, or pass %s to use another name",
+		noun, name, s, nameFlag)
+}
+
 // printCloudIdentity runs the credential preflight and names the principal
-// the install will act as — before it acts. The caller's own credentials are
-// reused; no keys pass through this tool.
+// the install will act as.
 func printCloudIdentity(cloud string, available func() error, identity func() (string, error)) error {
 	if err := available(); err != nil {
 		return err
@@ -110,12 +126,8 @@ func printCloudIdentity(cloud string, available func() error, identity func() (s
 }
 
 // pinImageOrWarn resolves the image tag to a digest over the registry's HTTP
-// API (the cloud installers may have no container runtime), so the deployment
-// records what actually runs and an upgrade has something to compare against.
-// When that fails the tag deploys as-is, with a warning: the runtime re-pulls
-// whenever it restarts the collector, so its version may then change on a
-// restart nobody asked for. restartNoun names that runtime unit ("task",
-// "instance").
+// API. When that fails the tag deploys as-is, with a warning. restartNoun
+// names the runtime unit ("task", "instance").
 func pinImageOrWarn(image, restartNoun string) string {
 	pinned, err := pinImageRemote(image)
 	if err == nil {
@@ -128,67 +140,60 @@ func pinImageOrWarn(image, restartNoun string) string {
 	return image
 }
 
-// saveStateOrWarn records the install. It runs BEFORE the slow deploy, so an
-// interrupted install leaves a tracked collector that status/uninstall can find
-// and clean — not an orphaned runtime plus identity.
+// saveStateOrWarn records the install before the slow deploy, so an
+// interrupted install leaves a collector that status/uninstall can find.
 func saveStateOrWarn(st *collector.State) {
 	if err := collector.SaveState(st); err != nil {
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not save local state: %v", err)))
 	}
 }
 
-// cloudDeployFailed handles a deploy error. A timeout is not a failure — the
-// runtime is still converging, so it is left alone and the operator is handed
-// the way to watch it (watchHint, printed verbatim). Anything else rolls back
-// BOTH the identity and the runtime: leaving either behind means a customer
-// pays for an orphan they cannot see.
+// deprovisionOrWarn deletes a freshly minted identity that will not be used.
+func deprovisionOrWarn(client *api.Client, agentID string) {
+	if err := client.DeleteCollector(agentID); err != nil {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not deprovision %s: %v (remove it from the console)", agentID, err)))
+	}
+}
+
+// cloudDeployFailed handles a deploy error and reports whether the runtime was
+// left in place. A timeout, an unobserved outcome, or an interrupt leaves
+// everything (runtime, identity, state) for `status` to pick up. A busy
+// refusal created nothing, so only this run's identity is deprovisioned.
+// Anything else rolls back both the identity and the runtime.
 func cloudDeployFailed(err error, client *api.Client, agentID string, budget time.Duration,
 	noun, name string, deleteRuntime func() error, watchHint string,
-) error {
-	if errors.Is(err, collector.ErrDeployTimeout) {
+) (kept bool, result error) {
+	switch {
+	case errors.Is(err, collector.ErrDeployTimeout):
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The %s was NOT rolled back — "+
 			"it is most likely still converging.", budget, noun)))
 		fmt.Print(watchHint)
-		return nil
-	}
-	// A refusal because another operation is converging must not trigger a
-	// rollback: the message says "wait and re-run", and deleting a deployment
-	// mid-CREATE (force=true) would do exactly what the message promises we
-	// won't. Nothing was created by THIS run, so only the freshly minted
-	// identity is ours to clean up.
-	// An unknown outcome is not a failure: the client lost sight of the
-	// operation (connectivity, not the server), and the deployment may be
-	// converging to healthy right now. Rolling back would destroy a working
-	// install; deprovisioning would strand it. Leave everything — identity,
-	// deployment, local state — and point at `status`.
-	if errors.Is(err, collector.ErrDeployUnknown) {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  lost sight of the %s while it was converging — nothing was rolled back", noun)))
-		return fmt.Errorf("%w\n\nWhen connectivity returns, run `dbg collector status`: "+
-			"if the %s converged, the install is complete; if it failed, re-run the install", err, noun)
-	}
-	if errors.Is(err, collector.ErrDeployBusy) {
+		return true, nil
+	case errors.Is(err, errInterrupted):
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  Interrupted while the %s was converging — nothing was rolled back.", noun)))
+		return true, fmt.Errorf("%w\n\nRun `dbg collector status` to see whether the %s converged; "+
+			"to remove it, run `dbg collector uninstall`", err, noun)
+	case errors.Is(err, collector.ErrDeployUnknown):
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  Lost sight of the %s while it was converging — nothing was rolled back.", noun)))
+		return true, fmt.Errorf("%w\n\nWhen connectivity returns, run `dbg collector status`: "+
+			"if the %s converged, the install is complete; if it failed, run `dbg collector uninstall` and re-run the install", err, noun)
+	case errors.Is(err, collector.ErrDeployBusy):
 		fmt.Printf("Nothing to roll back on the %s; deprovisioning this run's identity...\n", noun)
-		if derr := client.DeleteCollector(agentID); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", agentID, derr)))
-		}
+		deprovisionOrWarn(client, agentID)
 		_ = collector.RemoveState()
-		return fmt.Errorf("%w\n\nWait for it to finish, then re-run", err)
+		return false, fmt.Errorf("%w\n\nWait for it to finish, then re-run", err)
 	}
 	fmt.Printf("Deploy failed; rolling back the provisioned identity and %s...\n", noun)
-	if derr := client.DeleteCollector(agentID); derr != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", agentID, derr)))
-	}
+	deprovisionOrWarn(client, agentID)
 	if serr := deleteRuntime(); serr != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete %s %s: %v (delete it from the console)", noun, name, serr)))
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %v (delete %s %s from the console)", serr, noun, name)))
 	}
 	_ = collector.RemoveState()
-	return fmt.Errorf("%w\n\nRolled back. Fix the issue above and re-run", err)
+	return false, fmt.Errorf("%w\n\nRolled back. Fix the issue above and re-run", err)
 }
 
 // cloudStatus prints a cloud collector's record, its runtime's state, and its
-// control-plane connection. resource labels the runtime unit ("Stack",
-// "Deployment"); a status error is reported, not fatal — the record is still
-// worth showing.
+// control-plane connection. A status error is reported, not fatal.
 func cloudStatus(cmd *cobra.Command, st *collector.State, resource, name string, status func() (string, error)) error {
 	fmt.Printf("Agent:      %s\n", st.AgentID)
 	fmt.Printf("Tenant:     %s\n", st.TenantID)
@@ -208,10 +213,8 @@ func cloudStatus(cmd *cobra.Command, st *collector.State, resource, name string,
 	return nil
 }
 
-// printDeployParams prints a deploy's rendered parameters for a dry run —
-// something people paste into tickets. Sorted; secrets redacted, but only when
-// set (an unset password must not read as configured); the config decoded back
-// to readable TOML, or shown raw when it will not decode.
+// printDeployParams prints a deploy's rendered parameters for a dry run:
+// sorted, secrets redacted when set, the config decoded to readable TOML.
 func printDeployParams(params map[string]string, secretKeys []string, configKey string) {
 	secret := map[string]bool{}
 	for _, k := range secretKeys {
@@ -243,9 +246,8 @@ func printDeployParams(params map[string]string, secretKeys []string, configKey 
 }
 
 // resolveCommands reads the query-analysis flags and hands the precedence to
-// collector.ResolveCommands, supplying the interactive checklist when this is a
-// real terminal. The policy lives there; this is the flag-and-prompt half.
-// label names a database in the checklist's title.
+// collector.ResolveCommands, supplying the interactive checklist on a real
+// terminal. label names a database in the checklist's title.
 func resolveCommands[T any, PT interface {
 	*T
 	collector.CommandTarget

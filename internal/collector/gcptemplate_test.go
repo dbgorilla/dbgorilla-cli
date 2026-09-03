@@ -8,11 +8,9 @@ import (
 	"testing"
 )
 
-// The template's input contract and version live in two places each — the Go
-// constants the CLI deploys with, and the Terraform files that get published.
-// These pins are what turns a forgotten bump into a test failure instead of a
-// silent behavior change for already-released CLIs (the aws target's
-// TestTemplateVersionMatches, ported).
+// The template's input contract and version live in the Go constants the CLI
+// deploys with and in the published Terraform files; these pins keep the two
+// together.
 
 func TestGcpTemplateContract_VersionMatches(t *testing.T) {
 	main, err := os.ReadFile("terraform/collector-gce/main.tf")
@@ -45,9 +43,6 @@ func TestGcpTemplateContract_VariablesMatchInputKeys(t *testing.T) {
 }
 
 func TestGcpTemplateContract_NamingContractHolds(t *testing.T) {
-	// The template derives every resource name from the runtime service
-	// account's local part, which GcpRuntimeServiceAccountFor sets to the
-	// deployment name; the day-2 helpers address the MIG by that same name.
 	sa := GcpRuntimeServiceAccountFor("dbgorilla-collector", "acme-prod")
 	if sa != "dbgorilla-collector@acme-prod.iam.gserviceaccount.com" {
 		t.Fatalf("service-account naming contract changed: %s", sa)
@@ -63,6 +58,24 @@ func TestGcpTemplateContract_NamingContractHolds(t *testing.T) {
 	}
 	if got := migPath("acme-prod", "us-central1", "dbgorilla-collector"); !strings.HasSuffix(got, "/instanceGroupManagers/dbgorilla-collector") {
 		t.Errorf("day-2 helpers must address the MIG by the deployment name, got %s", got)
+	}
+}
+
+// What `dbg collector logs` and the boot sequence rely on in the template.
+func TestGcpTemplateContract_RuntimePins(t *testing.T) {
+	main, err := os.ReadFile("terraform/collector-gce/main.tf")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	for _, want := range []string{
+		`google-logging-enabled  = "true"`,
+		`--name ` + gcpCollectorContainerName,
+		`subnetwork = var.subnetwork == "" ? null : var.subnetwork`,
+		"depends_on = [",
+	} {
+		if !strings.Contains(string(main), want) {
+			t.Errorf("main.tf must contain %q", want)
+		}
 	}
 }
 
@@ -93,7 +106,6 @@ func TestGcpDeployInputs_RendersTheFullContract(t *testing.T) {
 	if strings.Join(keys, ",") != strings.Join(gcpInputKeys, ",") {
 		t.Fatalf("rendered inputs %v != contract %v", keys, gcpInputKeys)
 	}
-	// The config carries no secret values — they ride their own inputs.
 	decoded, err := DecodeConfig(inputs["collector_config"])
 	if err != nil {
 		t.Fatalf("decode: %v", err)

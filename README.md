@@ -158,11 +158,18 @@ dbg collector install --target gcp --deploy-service-account projects/PROJECT/ser
 dbg collector install --target gcp --dry-run                                                        # show the config + probe the template, deploy nothing
 ```
 
-Infrastructure Manager actuates the deployment as the service account named by `--deploy-service-account`; it needs `roles/config.agent` plus permission to create the collector's instance group, service account and secrets. The template creates the collector's own service account, which under IAM database authentication is also the database user: the install prints the `gcloud … users create` and `GRANT` steps to run afterwards. Pass `--db-password` to use password authentication instead. With several databases in the project, an interactive run offers a picker; otherwise pass `--db-instance-id` (a Cloud SQL instance, or an AlloyDB `cluster` or `cluster/instance`).
+Infrastructure Manager actuates the deployment as the service account named by `--deploy-service-account`; it needs `roles/config.agent` plus permission to create the collector's instance group, service account and secrets. The project comes from `--project`, the credentials, `GOOGLE_CLOUD_PROJECT`, or gcloud's active configuration, in that order.
+
+The collector instance joins the database's VPC (or `--network`) with a private IP only. Two things follow:
+
+- **The VPC needs egress to the internet** — Cloud NAT, or an equivalent route — for the container image pull and the collector's connection to DBGorilla. Without it the deployment reports ACTIVE while the collector never starts; `dbg collector status` shows whether it connected.
+- On a custom-mode VPC the instance needs a subnetwork in the database's region. The install picks it when the VPC has exactly one there; otherwise pass `--subnetwork`.
+
+The template creates the collector's own service account, which under IAM database authentication is also the database user: the install prints the `gcloud … users create` and `GRANT` steps to run afterwards. Pass `--db-password` to use password authentication instead. With several databases in the project, an interactive run offers a picker; otherwise pass `--db-instance-id` (a Cloud SQL instance, or an AlloyDB `cluster` or `cluster/instance`).
 
 ### The Terraform template
 
-The deployment is defined by the Terraform template in [`internal/collector/terraform/collector-gce/`](internal/collector/terraform/collector-gce/), which the CLI expects at `gs://dbgorilla-collector-templates/collector/gce/v1.0/`. It is versioned like the CloudFormation template: independently of the CLI, by its input-variable contract, and a published version is never rewritten. The CLI carries no copy of its own — it deploys the directory at that address, or one you host yourself via `--template-source gs://…` — and if the address cannot be reached the install stops before creating anything. Secrets never land in instance metadata: the template stores them in Secret Manager and the instance fetches them at boot with its own service account.
+The deployment is defined by the Terraform template in [`internal/collector/terraform/collector-gce/`](internal/collector/terraform/collector-gce/), which the CLI expects at `gs://dbgorilla-collector-templates/collector/gce/v1.1/`. It is versioned like the CloudFormation template: independently of the CLI, by its input-variable contract, and a published version is never rewritten. The CLI carries no copy of its own — it deploys the directory at that address, or one you host yourself via `--template-source gs://…` — and if the address cannot be reached the install stops before creating anything. Secrets never land in instance metadata: the template stores them in Secret Manager and the instance fetches them at boot with its own service account.
 
 Not yet available for the gcp target: changing the monitored databases in place, and `dbg collector upgrade`. Both are `dbg collector uninstall` followed by a fresh install for now.
 

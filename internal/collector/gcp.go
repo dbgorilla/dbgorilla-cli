@@ -10,14 +10,9 @@ import (
 )
 
 // The gcp target: Cloud SQL (Postgres/MySQL) and AlloyDB (Postgres), monitored
-// by a collector deployed inside the customer's project. Discovery has the aws
-// target's shape — list the supported databases, auto-select a solo candidate,
-// refuse to guess between several — against the Cloud SQL Admin and AlloyDB
-// APIs instead of RDS.
+// by a collector deployed inside the customer's project.
 
-// GcpTarget describes one database the gcp collector will monitor. Provider
-// type "cloud_sql" names an instance; "alloydb" names a cluster plus its
-// PRIMARY instance (read pools are the collector's discovery job, not ours).
+// GcpTarget describes one database the gcp collector will monitor.
 type GcpTarget struct {
 	ProviderType string // "cloud_sql" | "alloydb"
 	Project      string
@@ -25,20 +20,17 @@ type GcpTarget struct {
 	InstanceID   string // cloud_sql instance id, or the alloydb PRIMARY instance id
 	ClusterID    string // alloydb only
 
-	Engine string // "postgres" | "mysql" (alloydb is always postgres)
-	// Host is what [component.connect] records: the certificate-attested DNS
-	// name for Cloud SQL when the instance has one (verbatim, trailing dot
-	// included — that is the form the certificate carries), else the private
-	// IP. For alloydb it is informational: every connection rides the
-	// collector's connector-protocol tunnel.
+	Engine string // "postgres" | "mysql"
+	// Host is the certificate-attested DNS name for Cloud SQL when the instance
+	// has one (verbatim, trailing dot included), else the private IP. For
+	// alloydb it is informational: connections ride the connector tunnel.
 	Host string
 	Port int
 
-	// Cloud SQL facts the install branches on.
-	ServerCaMode string // GOOGLE_MANAGED_INTERNAL_CA (default) | *_CAS_CA
-	IamEnabled   bool   // cloudsql.iam_authentication flag (alloydb needs no flag)
+	ServerCaMode string // Cloud SQL: GOOGLE_MANAGED_INTERNAL_CA (default) | *_CAS_CA
+	IamEnabled   bool
 
-	Network string // VPC self-link, for the deployment's network preflight
+	Network string // VPC self-link the collector instance joins
 
 	Databases  []string
 	User       string   // empty means DefaultDBUser
@@ -46,8 +38,8 @@ type GcpTarget struct {
 	Commands   []string // query-analysis commands allowed; empty means none
 }
 
-// DisplayName is what the component is called in DBGorilla: the cluster for
-// alloydb (its primary is an implementation detail), else the instance.
+// DisplayName is the component name: the cluster for alloydb, else the
+// instance.
 func (t GcpTarget) DisplayName() string {
 	if t.ProviderType == "alloydb" {
 		return t.ClusterID
@@ -55,13 +47,29 @@ func (t GcpTarget) DisplayName() string {
 	return t.InstanceID
 }
 
+// ValidGcpProviderType reports whether a --provider-type value applies to the
+// gcp target ("" means auto-detect).
+func ValidGcpProviderType(hint string) bool {
+	switch hint {
+	case "", "cloud_sql", "alloydb":
+		return true
+	}
+	return false
+}
+
 // DiscoverGcpTarget completes `into` from the control plane. `id` may be empty
 // (solo-select), a Cloud SQL instance id, or an alloydb "cluster" or
-// "cluster/instance". `providerHint` forces cloud_sql vs alloydb when both
-// carry the same id.
+// "cluster/instance". `providerHint` forces cloud_sql vs alloydb.
 func DiscoverGcpTarget(id, providerHint string, into GcpTarget) (GcpTarget, error) {
 	if into.Project == "" {
 		return into, errors.New("no project resolved for discovery; pass --project")
+	}
+	if !ValidGcpProviderType(providerHint) {
+		return into, fmt.Errorf("--provider-type %q is not a Google Cloud provider (expected cloud_sql or alloydb)", providerHint)
+	}
+	if providerHint == "cloud_sql" && strings.Contains(id, "/") {
+		return into, fmt.Errorf("--db-instance-id %q names an AlloyDB cluster/instance; "+
+			"a Cloud SQL instance id has no '/' (or pass --provider-type alloydb)", id)
 	}
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
@@ -90,19 +98,17 @@ func DiscoverGcpTarget(id, providerHint string, into GcpTarget) (GcpTarget, erro
 	return discoverCloudSQL(ctx, cfg, into, id)
 }
 
-// gcpCandidates is a listing of the supported databases: the selectable
-// choices in a stable order (Cloud SQL instances, then AlloyDB clusters), plus
-// the AlloyDB locations the listing learned, keyed by choice id, so a
-// solo-selected cluster needs no second lookup to be found again.
+// gcpCandidates is a listing of the supported databases in a stable order
+// (Cloud SQL instances, then AlloyDB clusters), plus each AlloyDB choice's
+// location so a solo-selected cluster needs no second lookup.
 type gcpCandidates struct {
 	choices   []TargetChoice
 	locations map[string]string
 }
 
-// listGcpCandidates enumerates the supported databases: Cloud SQL Postgres +
-// MySQL primaries (replicas follow their primary and are never targets), and
-// AlloyDB primary clusters as "cluster/primary". A provider hint narrows the
-// listing so a hinted install doesn't require permissions on the other API.
+// listGcpCandidates enumerates Cloud SQL Postgres/MySQL primaries and AlloyDB
+// primary instances ("cluster/primary"). A provider hint narrows the listing
+// to one API.
 func listGcpCandidates(ctx context.Context, cfg gcpConfig, project, providerHint string) (gcpCandidates, error) {
 	out := gcpCandidates{locations: map[string]string{}}
 	if providerHint == "" || providerHint == "cloud_sql" {
@@ -197,7 +203,6 @@ func getCloudSQLInstance(ctx context.Context, cfg gcpConfig, project, instance s
 	return &info, nil
 }
 
-// discoverCloudSQL fills the target from one instances.get.
 func discoverCloudSQL(ctx context.Context, cfg gcpConfig, into GcpTarget, instance string) (GcpTarget, error) {
 	info, err := getCloudSQLInstance(ctx, cfg, into.Project, instance)
 	if err != nil {
@@ -219,9 +224,6 @@ func discoverCloudSQL(ctx context.Context, cfg gcpConfig, into GcpTarget, instan
 }
 
 // mergeCloudSQLInstance projects an instances.get response into the target.
-// Pure — the field mapping is pinned by tests, because a dropped serverCaMode
-// or a trimmed DNS name produces an install that deploys cleanly and then
-// fails TLS verification.
 func mergeCloudSQLInstance(into GcpTarget, info *sqlInstanceInfo) GcpTarget {
 	into.ProviderType = "cloud_sql"
 	into.InstanceID = info.Name
@@ -234,14 +236,10 @@ func mergeCloudSQLInstance(into GcpTarget, info *sqlInstanceInfo) GcpTarget {
 		into.Engine = "mysql"
 		into.Port = 3306
 	}
-	// The certificate-attested DNS name wins, VERBATIM — the trailing dot is
-	// part of what the certificate carries. Fall back to the private IP, then
-	// any address.
+	// Host precedence: the PSA DNS name (the one that resolves over the VPC
+	// peering), any DNS name, the private IP, any IP. DNS names are kept
+	// verbatim: the certificate carries the trailing dot.
 	if into.Host == "" {
-		// An instance can list several dnsNames mappings (PSC, custom SANs).
-		// Only the PSA one resolves over the peering the collector's VPC
-		// joins, so pick it by connectionType rather than trusting list
-		// order; fall back to the first non-empty name.
 		for _, d := range info.DNSNames {
 			if d.Name != "" && d.ConnectionType == "PRIVATE_SERVICES_ACCESS" {
 				into.Host = d.Name
@@ -275,15 +273,11 @@ func mergeCloudSQLInstance(into GcpTarget, info *sqlInstanceInfo) GcpTarget {
 	}
 	into.ServerCaMode = info.Settings.IPConfiguration.ServerCaMode
 	if into.ServerCaMode == "" {
-		// An absent mode is the pre-CAS default: the per-instance internal CA.
 		into.ServerCaMode = "GOOGLE_MANAGED_INTERNAL_CA"
 	}
 	into.Network = info.Settings.IPConfiguration.PrivateNetwork
 	for _, f := range info.Settings.DatabaseFlags {
-		// Postgres spells the flag with a dot; MySQL flags cannot contain dots
-		// and use cloudsql_iam_authentication. Checking only one form makes IAM
-		// look disabled on the other engine, and the install then refuses with
-		// advice to enable a flag that doesn't exist there.
+		// Postgres spells the flag with a dot, MySQL with an underscore.
 		if (f.Name == "cloudsql.iam_authentication" || f.Name == "cloudsql_iam_authentication") &&
 			strings.EqualFold(f.Value, "on") {
 			into.IamEnabled = true
@@ -297,15 +291,12 @@ func mergeCloudSQLInstance(into GcpTarget, info *sqlInstanceInfo) GcpTarget {
 const alloydbBase = "https://alloydb.googleapis.com/v1"
 
 type alloydbClusterInfo struct {
-	Name string `json:"name"` // full resource path
-	// Network is the cluster's VPC (projects/<p>/global/networks/<n>) — the
-	// collector instance joins it, so discovery must surface it or every
-	// AlloyDB install falsely demands --network.
+	Name    string `json:"name"` // full resource path
 	Network string `json:"network"`
 }
 
 func (c alloydbClusterInfo) shortID() string  { return lastPathSegment(c.Name) }
-func (c alloydbClusterInfo) location() string { return alloydbLocation(c.Name) }
+func (c alloydbClusterInfo) location() string { return alloydbPathSegment(c.Name, "locations") }
 
 type alloydbInstanceInfo struct {
 	Name         string `json:"name"` // full resource path
@@ -314,23 +305,22 @@ type alloydbInstanceInfo struct {
 	IPAddress    string `json:"ipAddress"`
 }
 
-func (i alloydbInstanceInfo) shortID() string { return lastPathSegment(i.Name) }
+func (i alloydbInstanceInfo) shortID() string  { return lastPathSegment(i.Name) }
+func (i alloydbInstanceInfo) cluster() string  { return alloydbPathSegment(i.Name, "clusters") }
+func (i alloydbInstanceInfo) location() string { return alloydbPathSegment(i.Name, "locations") }
 
-// alloydbPrimary is one cluster's PRIMARY instance together with the location
-// the listing saw it in. Kept structured rather than flattened into the
-// "cluster/instance" id, so discovery of a solo-selected cluster does not
-// have to re-list every cluster to recover the location it just dropped.
+// alloydbPrimary is one cluster's PRIMARY instance and its location.
 type alloydbPrimary struct {
 	cluster, instance, location string
 }
 
 func (p alloydbPrimary) id() string { return p.cluster + "/" + p.instance }
 
-// alloydbLocation extracts the region from a full resource path.
-func alloydbLocation(name string) string {
+// alloydbPathSegment returns the value following `key` in a resource path.
+func alloydbPathSegment(name, key string) string {
 	parts := strings.Split(name, "/")
 	for i := 0; i+1 < len(parts); i++ {
-		if parts[i] == "locations" {
+		if parts[i] == key {
 			return parts[i+1]
 		}
 	}
@@ -347,8 +337,7 @@ type alloydbInstancesPage struct {
 	Instances []alloydbInstanceInfo `json:"instances"`
 }
 
-// listAlloyDBClusters lists every cluster across locations (the aggregate
-// `locations/-` listing).
+// listAlloyDBClusters lists every cluster across locations.
 func listAlloyDBClusters(ctx context.Context, cfg gcpConfig, project string) ([]alloydbClusterInfo, error) {
 	var out []alloydbClusterInfo
 	u := fmt.Sprintf("%s/projects/%s/locations/-/clusters", alloydbBase, url.PathEscape(project))
@@ -361,23 +350,22 @@ func listAlloyDBClusters(ctx context.Context, cfg gcpConfig, project string) ([]
 	return out, nil
 }
 
-// listAlloyDBPrimaries returns every cluster's PRIMARY instance.
+// listAlloyDBPrimaries returns every cluster's PRIMARY instance from the
+// aggregated instance listing.
 func listAlloyDBPrimaries(ctx context.Context, cfg gcpConfig, project string) ([]alloydbPrimary, error) {
-	clusters, err := listAlloyDBClusters(ctx, cfg, project)
-	if err != nil {
-		return nil, err
-	}
 	var out []alloydbPrimary
-	for _, c := range clusters {
-		instances, err := listAlloyDBInstances(ctx, cfg, project, c.location(), c.shortID())
-		if err != nil {
-			return nil, err
-		}
-		for _, inst := range instances {
+	u := fmt.Sprintf("%s/projects/%s/locations/-/clusters/-/instances", alloydbBase, url.PathEscape(project))
+	err := gcpListPages(ctx, cfg, u, func(p alloydbInstancesPage) {
+		for _, inst := range p.Instances {
 			if inst.InstanceType == "PRIMARY" {
-				out = append(out, alloydbPrimary{cluster: c.shortID(), instance: inst.shortID(), location: c.location()})
+				out = append(out, alloydbPrimary{cluster: inst.cluster(), instance: inst.shortID(), location: inst.location()})
 			}
 		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not list AlloyDB instances in project %q "+
+			"(is the AlloyDB API enabled, and does this identity hold alloydb.viewer?): %w",
+			project, err)
 	}
 	return out, nil
 }
@@ -394,8 +382,7 @@ func listAlloyDBInstances(ctx context.Context, cfg gcpConfig, project, location,
 }
 
 // discoverAlloyDB fills the target from the cluster's instance listing. `id`
-// is "cluster" (primary auto-picked) or "cluster/instance"; `location` is the
-// cluster's region when the caller already knows it, else it is looked up.
+// is "cluster" (primary auto-picked) or "cluster/instance".
 func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id, location string) (GcpTarget, error) {
 	clusterID, instanceID, _ := strings.Cut(id, "/")
 	if into.Region == "" {
@@ -415,7 +402,6 @@ func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id, loc
 		if err := gcpDo(ctx, cfg, "GET", u, nil, &cl); err == nil {
 			into.Network = cl.Network
 		}
-		// A failed read falls through to the existing --network requirement.
 	}
 	instances, err := listAlloyDBInstances(ctx, cfg, into.Project, into.Region, clusterID)
 	if err != nil {
@@ -436,8 +422,11 @@ func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id, loc
 		}
 	}
 	if primary == nil {
-		return into, fmt.Errorf("AlloyDB cluster %q has no matching PRIMARY instance — "+
-			"pass --db-instance-id as cluster/instance to name it", clusterID)
+		if instanceID != "" {
+			return into, fmt.Errorf("AlloyDB cluster %q has no instance named %q — "+
+				"check --db-instance-id (cluster/instance)", clusterID, instanceID)
+		}
+		return into, fmt.Errorf("AlloyDB cluster %q has no PRIMARY instance to monitor", clusterID)
 	}
 	if primary.InstanceType != "PRIMARY" {
 		return into, fmt.Errorf("AlloyDB instance %q is a %s — name the cluster's PRIMARY; "+
@@ -451,8 +440,6 @@ func discoverAlloyDB(ctx context.Context, cfg gcpConfig, into GcpTarget, id, loc
 	if into.Host == "" {
 		into.Host = primary.IPAddress
 	}
-	// AlloyDB IAM auth needs no database flag (validated live); the connector
-	// tunnel provides transport identity for both auth methods.
 	into.IamEnabled = true
 	return into, nil
 }
@@ -492,26 +479,13 @@ func gcpComponent(t GcpTarget) Component {
 	if auth.Method == "gcp_iam" && t.ProviderType == "alloydb" {
 		auth.Scopes = []string{"https://www.googleapis.com/auth/alloydb.login"}
 	}
-	// verify-full everywhere, with one exception: password auth on Cloud SQL's
-	// default per-instance CA, which attests no hostname — there the chain is
-	// verified against that CA (fetched by the collector at discovery). AlloyDB
-	// connections ride the collector's connector tunnel, which owns transport
-	// identity, so the connect block's mode is not the identity mechanism there.
-	//
-	// KNOWN EDGE (deliberate, review 2026-09-02): an OLDER Cloud SQL instance
-	// with IAM auth + the per-instance internal CA + no dnsNames gets an IP
-	// host and verify-full, and the hostname check can then fail after deploy.
-	// The exception is keyed on auth method rather than CA mode because token
-	// auth requires a verifying transport; the recommended paths for such
-	// instances are enabling a DNS name / CAS, or --db-password. Widening the
-	// exception to CA-mode+host-form is a follow-up decision, not an accident.
+	// verify-full, except password auth on Cloud SQL's per-instance CA, which
+	// attests no hostname.
 	sslMode := "verify-full"
 	if t.ProviderType == "cloud_sql" && auth.Method == "password" && t.ServerCaMode == "GOOGLE_MANAGED_INTERNAL_CA" {
 		sslMode = "verify-ca"
 	}
-	// ssl_mode is engine-specific and the collector parses it strictly: the
-	// MySQL engine accepts only disabled/required/verify_ca/verify_identity
-	// and refuses libpq's spellings at startup.
+	// The MySQL engine accepts only its own ssl_mode spellings.
 	if t.Engine == "mysql" {
 		switch sslMode {
 		case "verify-full":
@@ -536,12 +510,22 @@ func gcpComponent(t GcpTarget) Component {
 }
 
 // GcpConfigTOML renders the collector config for the gcp deployment. Secrets
-// stay ${ENV} references; the real values ride the deployment's Secret Manager
-// parameters, never this document.
+// stay ${ENV} references.
 func GcpConfigTOML(agentID, tenantID string, targets []GcpTarget, eps Endpoints, commandsEnabled bool) (string, error) {
 	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
 	for _, t := range targets {
 		cfg.Component = append(cfg.Component, gcpComponent(t))
 	}
 	return cfg.Render()
+}
+
+// GcpGrantStatements is the SQL a database admin runs so the collector's IAM
+// database user (registered with gcloud beforehand) can read the database.
+func GcpGrantStatements(user string, databases []string) []string {
+	u := quoteIdent(user)
+	stmts := []string{"GRANT pg_monitor TO " + u + ";"}
+	for _, db := range databases {
+		stmts = append(stmts, "GRANT CONNECT ON DATABASE "+quoteIdent(db)+" TO "+u+";")
+	}
+	return append(stmts, "GRANT pg_read_all_data TO "+u+";")
 }

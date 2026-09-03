@@ -1,20 +1,26 @@
 package collector
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/oauth2"
 )
 
-// Discovery decides what the deployed collector connects to. Every branch here
-// was reachable only against a live project before.
+// Discovery decides what the deployed collector connects to.
 
 const (
-	sqlListPath  = "/v1/projects/p/instances"
-	adbClusters  = "/v1/projects/p/locations/-/clusters"
-	adbInstances = "/v1/projects/p/locations/us-east1/clusters/orders/instances"
-	ordersJSON   = `{"clusters":[{"name":"projects/p/locations/us-east1/clusters/orders"}]}`
-	primaryJSON  = `{"instances":[
+	sqlListPath     = "/v1/projects/p/instances"
+	adbClusters     = "/v1/projects/p/locations/-/clusters"
+	adbAllInstances = "/v1/projects/p/locations/-/clusters/-/instances"
+	adbInstances    = "/v1/projects/p/locations/us-east1/clusters/orders/instances"
+	ordersJSON      = `{"clusters":[{"name":"projects/p/locations/us-east1/clusters/orders"}]}`
+	primaryJSON     = `{"instances":[
 		{"name":"projects/p/locations/us-east1/clusters/orders/instances/orders-pool","instanceType":"READ_POOL","ipAddress":"10.1.2.9"},
 		{"name":"projects/p/locations/us-east1/clusters/orders/instances/orders-primary","instanceType":"PRIMARY","ipAddress":"10.1.2.3"}
 	]}`
@@ -23,7 +29,7 @@ const (
 func TestDiscoverGcpTarget_SoloCloudSQL(t *testing.T) {
 	f := newGCPFake(t).
 		on("GET", sqlListPath, 200, sqlInstancesJSON(sqlInstanceJSON("prod-pg", "POSTGRES_16", ""))).
-		on("GET", adbClusters, 200, `{}`).
+		on("GET", adbAllInstances, 200, `{}`).
 		on("GET", sqlListPath+"/prod-pg", 200, sqlInstanceJSON("prod-pg", "POSTGRES_16", ""))
 	stubGCP(t, f)
 
@@ -43,12 +49,12 @@ func TestDiscoverGcpTarget_SoloCloudSQL(t *testing.T) {
 	}
 }
 
-// The listing already saw the cluster's location; discovery must reuse it
-// rather than list every cluster a second time to recover it.
+// The aggregated instance listing already carries the cluster's location;
+// discovery must reuse it rather than list clusters to recover it.
 func TestDiscoverGcpTarget_SoloAlloyDBReusesTheListedLocation(t *testing.T) {
 	f := newGCPFake(t).
 		on("GET", sqlListPath, 200, sqlInstancesJSON()).
-		on("GET", adbClusters, 200, ordersJSON).
+		on("GET", adbAllInstances, 200, primaryJSON).
 		on("GET", "/v1/projects/p/locations/us-east1/clusters/orders", 200,
 			`{"name":"projects/p/locations/us-east1/clusters/orders","network":"projects/p/global/networks/default"}`).
 		on("GET", adbInstances, 200, primaryJSON)
@@ -64,13 +70,12 @@ func TestDiscoverGcpTarget_SoloAlloyDBReusesTheListedLocation(t *testing.T) {
 	if got.Region != "us-east1" || got.Host != "10.1.2.3" || !got.IamEnabled || got.Engine != "postgres" {
 		t.Fatalf("facts: %+v", got)
 	}
-	// The cluster resource carries its VPC; discovery must surface it or every
-	// AlloyDB install falsely demands --network (review finding, 2026-09-02).
+	// The cluster resource carries its VPC.
 	if got.Network != "projects/p/global/networks/default" {
 		t.Fatalf("network not read off the cluster: %+v", got)
 	}
-	if n := f.called("GET", adbClusters); n != 1 {
-		t.Errorf("clusters listed %d times; the location from the first listing should be reused", n)
+	if n := f.called("GET", adbClusters); n != 0 {
+		t.Errorf("clusters listed %d times; the location from the instance listing should be reused", n)
 	}
 }
 
@@ -103,14 +108,37 @@ func TestDiscoverGcpTarget_ExplicitAlloyDBIdLooksUpTheRegionOnce(t *testing.T) {
 			t.Fatalf("err = %v, want the project hint", err)
 		}
 	})
+	t.Run("an unknown instance in a known cluster says so", func(t *testing.T) {
+		_, err := DiscoverGcpTarget("orders/nope", "", GcpTarget{Project: "p"})
+		if err == nil || !strings.Contains(err.Error(), `no instance named "nope"`) {
+			t.Fatalf("err = %v, want the missing instance named", err)
+		}
+	})
+}
+
+func TestDiscoverGcpTarget_ProviderHintIsValidated(t *testing.T) {
+	f := newGCPFake(t)
+	stubGCP(t, f)
+	for _, hint := range []string{"cloudsql", "aws_rds"} {
+		_, err := DiscoverGcpTarget("", hint, GcpTarget{Project: "p"})
+		if err == nil || !strings.Contains(err.Error(), "cloud_sql or alloydb") {
+			t.Errorf("hint %q: err = %v, want the accepted values", hint, err)
+		}
+	}
+	_, err := DiscoverGcpTarget("orders/orders-primary", "cloud_sql", GcpTarget{Project: "p"})
+	if err == nil || !strings.Contains(err.Error(), "--provider-type alloydb") {
+		t.Errorf("a cluster/instance id under a cloud_sql hint: err = %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("flag mistakes must fail before any API call, got %v", f.calls)
+	}
 }
 
 func TestDiscoverGcpTarget_AmbiguityIsTypedAndLabelled(t *testing.T) {
 	stubGCP(t, newGCPFake(t).
 		on("GET", sqlListPath, 200, sqlInstancesJSON(
 			sqlInstanceJSON("b-pg", "POSTGRES_16", ""), sqlInstanceJSON("a-my", "MYSQL_8_0", ""))).
-		on("GET", adbClusters, 200, ordersJSON).
-		on("GET", adbInstances, 200, primaryJSON))
+		on("GET", adbAllInstances, 200, primaryJSON))
 
 	_, err := DiscoverGcpTarget("", "", GcpTarget{Project: "p"})
 	var amb *AmbiguousTargetError
@@ -131,7 +159,7 @@ func TestDiscoverGcpTarget_AmbiguityIsTypedAndLabelled(t *testing.T) {
 func TestDiscoverGcpTarget_NoneFoundNamesTheFlag(t *testing.T) {
 	stubGCP(t, newGCPFake(t).
 		on("GET", sqlListPath, 200, sqlInstancesJSON()).
-		on("GET", adbClusters, 200, `{}`))
+		on("GET", adbAllInstances, 200, `{}`))
 	_, err := DiscoverGcpTarget("", "", GcpTarget{Project: "p"})
 	var amb *AmbiguousTargetError
 	if err == nil || errors.As(err, &amb) || !strings.Contains(err.Error(), "--db-instance-id") {
@@ -149,8 +177,8 @@ func TestDiscoverGcpTarget_HintSkipsTheOtherAPI(t *testing.T) {
 	if _, err := DiscoverGcpTarget("", "cloud_sql", GcpTarget{Project: "p"}); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	if f.called("GET", adbClusters) != 0 {
-		t.Error("a cloud_sql hint must not list AlloyDB clusters")
+	if f.called("GET", adbAllInstances) != 0 {
+		t.Error("a cloud_sql hint must not list AlloyDB instances")
 	}
 }
 
@@ -159,7 +187,7 @@ func TestDiscoverGcpTarget_PaginatesTheInstanceListing(t *testing.T) {
 		onSeq("GET", sqlListPath,
 			gcpFakeResp{200, sqlInstancesPageJSON("p2", sqlInstanceJSON("a-pg", "POSTGRES_16", ""))},
 			gcpFakeResp{200, sqlInstancesJSON(sqlInstanceJSON("b-pg", "POSTGRES_16", ""))}).
-		on("GET", adbClusters, 200, `{}`)
+		on("GET", adbAllInstances, 200, `{}`)
 	stubGCP(t, f)
 	_, err := DiscoverGcpTarget("", "", GcpTarget{Project: "p"})
 	var amb *AmbiguousTargetError
@@ -239,8 +267,65 @@ func TestGcpIdentity(t *testing.T) {
 }
 
 func TestGcpProject(t *testing.T) {
-	stubGCP(t, newGCPFake(t))
-	if got, err := GcpProject(); err != nil || got != "test-project" {
-		t.Fatalf("got (%q, %v)", got, err)
+	t.Run("the credentials' own project wins", func(t *testing.T) {
+		stubGCP(t, newGCPFake(t))
+		t.Setenv("GOOGLE_CLOUD_PROJECT", "from-env")
+		if got, err := GcpProject(); err != nil || got != "test-project" {
+			t.Fatalf("got (%q, %v)", got, err)
+		}
+	})
+	t.Run("then the environment", func(t *testing.T) {
+		stubGCPNoProject(t)
+		t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+		t.Setenv("CLOUDSDK_CORE_PROJECT", "from-sdk-env")
+		if got, err := GcpProject(); err != nil || got != "from-sdk-env" {
+			t.Fatalf("got (%q, %v)", got, err)
+		}
+	})
+	t.Run("then gcloud's active configuration", func(t *testing.T) {
+		stubGCPNoProject(t)
+		t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+		t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+		t.Setenv("GCLOUD_PROJECT", "")
+		dir := t.TempDir()
+		t.Setenv("CLOUDSDK_CONFIG", dir)
+		mustWrite(t, filepath.Join(dir, "active_config"), "work\n")
+		mustWrite(t, filepath.Join(dir, "configurations", "config_work"),
+			"[core]\naccount = dev@example.com\nproject = acme-prod\n[compute]\nregion = us-central1\n")
+		if got, err := GcpProject(); err != nil || got != "acme-prod" {
+			t.Fatalf("got (%q, %v)", got, err)
+		}
+	})
+	t.Run("none names the flag", func(t *testing.T) {
+		stubGCPNoProject(t)
+		t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+		t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+		t.Setenv("GCLOUD_PROJECT", "")
+		t.Setenv("CLOUDSDK_CONFIG", t.TempDir())
+		_, err := GcpProject()
+		if err == nil || !strings.Contains(err.Error(), "--project") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+// stubGCPNoProject is stubGCP with credentials that name no project (a user
+// ADC file).
+func stubGCPNoProject(t *testing.T) {
+	t.Helper()
+	orig := loadGCPConfig
+	loadGCPConfig = func(context.Context) (gcpConfig, error) {
+		return gcpConfig{http: &http.Client{Transport: newGCPFake(t)}, tokens: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "t"})}, nil
+	}
+	t.Cleanup(func() { loadGCPConfig = orig })
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -7,34 +7,33 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
 // Day-2 operations against the deployment's managed instance group and its
-// logs. The template names the group (and its instances' base name) after the
-// deployment, so these helpers address it by that name — a lookup would add a
-// permission requirement for what is a fixed naming contract, exactly like
-// LogGroupFor.
+// logs. The template names the group after the deployment.
 
 const (
 	computeBase = "https://compute.googleapis.com/compute/v1"
 	loggingBase = "https://logging.googleapis.com/v2"
 )
 
-// computeOpTimeout bounds a compute operation (resize, recreate). These finish
-// in seconds; the deploy budget would be absurd here.
-const computeOpTimeout = 2 * time.Minute
+const (
+	computeOpTimeout = 2 * time.Minute
+	// computeWaitTimeout bounds one call to the blocking /wait endpoint, which
+	// itself returns after about two minutes.
+	computeWaitTimeout = 3 * time.Minute
+)
 
-// migPath is the REGIONAL instance group manager the template creates for a
-// deployment; by the naming contract its name is the deployment name.
+// migPath is the regional instance group manager the template creates.
 func migPath(project, region, deploymentName string) string {
 	return fmt.Sprintf("%s/projects/%s/regions/%s/instanceGroupManagers/%s", computeBase,
 		url.PathEscape(project), url.PathEscape(region), url.PathEscape(deploymentName))
 }
 
-// ScaleGcpMig sets the group's target size. 0 stops the collector without
-// losing its identity or configuration; 1 resumes it — the ScaleService
-// analogue.
+// ScaleGcpMig sets the group's target size: 0 stops the collector, 1 resumes
+// it.
 func ScaleGcpMig(project, region, deploymentName string, size int) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
@@ -49,9 +48,7 @@ func ScaleGcpMig(project, region, deploymentName string, size int) error {
 	return waitComputeOperation(ctx, cfg, project, region, op.Name)
 }
 
-// RestartGcpMig recreates the group's instances — a rolling restart for a
-// size-1 group, the RestartService analogue. The recreated instance pulls the
-// same image and config; nothing about the deployment changes.
+// RestartGcpMig recreates the group's instances.
 func RestartGcpMig(project, region, deploymentName string) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
@@ -66,38 +63,43 @@ func RestartGcpMig(project, region, deploymentName string) error {
 		return fmt.Errorf("collector group %q has no instances to restart — "+
 			"is it stopped? Run: dbg collector start", deploymentName)
 	}
+	names := make([]string, 0, len(instances))
+	for _, mi := range instances {
+		names = append(names, mi.Instance)
+	}
 	u := migPath(project, region, deploymentName) + "/recreateInstances"
-	op, err := startGcpOperation(ctx, cfg, http.MethodPost, u, map[string]any{"instances": instances})
+	op, err := startGcpOperation(ctx, cfg, http.MethodPost, u, map[string]any{"instances": names})
 	if err != nil {
 		return fmt.Errorf("could not restart collector group %q: %w", deploymentName, err)
 	}
 	return waitComputeOperation(ctx, cfg, project, region, op.Name)
 }
 
-func listManagedInstances(ctx context.Context, cfg gcpConfig, project, region, deploymentName string) ([]string, error) {
+type managedInstance struct {
+	Instance string `json:"instance"` // resource URL
+	ID       string `json:"id"`       // numeric instance id, as Cloud Logging labels it
+}
+
+func listManagedInstances(ctx context.Context, cfg gcpConfig, project, region, deploymentName string) ([]managedInstance, error) {
 	var out struct {
-		ManagedInstances []struct {
-			Instance string `json:"instance"`
-		} `json:"managedInstances"`
+		ManagedInstances []managedInstance `json:"managedInstances"`
 	}
-	// Answers inline — a plain listing behind a POST, not an LRO.
 	u := migPath(project, region, deploymentName) + "/listManagedInstances"
 	if err := gcpDo(ctx, cfg, http.MethodPost, u, nil, &out); err != nil {
 		return nil, fmt.Errorf("could not list instances of collector group %q: %w", deploymentName, err)
 	}
-	instances := make([]string, 0, len(out.ManagedInstances))
+	instances := make([]managedInstance, 0, len(out.ManagedInstances))
 	for _, mi := range out.ManagedInstances {
 		if mi.Instance != "" {
-			instances = append(instances, mi.Instance)
+			instances = append(instances, mi)
 		}
 	}
-	sort.Strings(instances)
+	sort.Slice(instances, func(i, j int) bool { return instances[i].Instance < instances[j].Instance })
 	return instances, nil
 }
 
 // waitComputeOperation drives a regional compute operation to completion via
-// its blocking /wait endpoint, which returns when the operation finishes or
-// after the server's own ~2 minute cap — so this loop rarely turns twice.
+// its blocking /wait endpoint.
 func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, opName string) error {
 	if opName == "" {
 		return nil
@@ -114,7 +116,10 @@ func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, o
 				} `json:"errors"`
 			} `json:"error"`
 		}
-		if err := gcpDo(ctx, cfg, http.MethodPost, u, nil, &out); err != nil {
+		waitCtx, cancel := context.WithTimeout(ctx, computeWaitTimeout)
+		err := gcpDo(waitCtx, cfg, http.MethodPost, u, nil, &out)
+		cancel()
+		if err != nil {
 			return err
 		}
 		if out.Error != nil && len(out.Error.Errors) > 0 {
@@ -126,9 +131,6 @@ func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, o
 		if time.Now().After(deadline) {
 			return fmt.Errorf("compute operation %s did not finish in time", opName)
 		}
-		// The /wait endpoint normally blocks ~2 minutes, but it MAY return
-		// early with a non-DONE status under load; without a pause that turns
-		// this loop into a hot POST spin until the deadline.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -137,22 +139,22 @@ func waitComputeOperation(ctx context.Context, cfg gcpConfig, project, region, o
 	}
 }
 
-// TailGcpLogs prints the collector's container logs from Cloud Logging,
-// scoped to the deployment's instances — the TailLogs analogue. `follow`
-// polls every few seconds until interrupted.
-func TailGcpLogs(project, deploymentName string, follow bool) error {
+// TailGcpLogs prints the collector's container logs from Cloud Logging, scoped
+// to the group's current instances. `follow` polls until interrupted.
+func TailGcpLogs(project, region, deploymentName string, follow bool) error {
 	ctx := context.Background()
 	cfg, err := loadGCPConfig(ctx)
 	if err != nil {
 		return gcpCredsErr(err)
 	}
-	// COS containers log under resource.type="gce_instance". The group names
-	// its instances "<deployment>-<4 chars>", so anchor on that: a substring
-	// match would also pick up a deployment whose name merely starts the same
-	// way.
-	filter := fmt.Sprintf(
-		`resource.type="gce_instance" AND labels."compute.googleapis.com/resource_name"=~"^%s-[a-z0-9]{4}$"`,
-		deploymentName)
+	instances, err := listManagedInstances(ctx, cfg, project, region, deploymentName)
+	if err != nil {
+		return err
+	}
+	if len(instances) == 0 {
+		return fmt.Errorf("collector group %q has no instances — is it stopped? Run: dbg collector start", deploymentName)
+	}
+	filter := gcpLogFilter(instances)
 	cur := newLogCursor(time.Now().Add(-10 * time.Minute).UnixNano())
 	for {
 		entries, err := listLogEntries(ctx, cfg, project, filter, time.Unix(0, cur.newest).UTC())
@@ -176,6 +178,24 @@ func TailGcpLogs(project, deploymentName string, follow bool) error {
 	}
 }
 
+// gcpLogFilter matches the collector container's output on the given
+// instances. Container-Optimized OS labels container logs by numeric instance
+// id and container name.
+func gcpLogFilter(instances []managedInstance) string {
+	ids := make([]string, 0, len(instances))
+	for _, mi := range instances {
+		if mi.ID != "" {
+			ids = append(ids, fmt.Sprintf("%q", mi.ID))
+		}
+	}
+	return fmt.Sprintf(`resource.type="gce_instance" AND resource.labels.instance_id=(%s) AND jsonPayload."cos.googleapis.com/container_name"=%q`,
+		strings.Join(ids, " OR "), gcpCollectorContainerName)
+}
+
+// gcpCollectorContainerName is the container name the template's startup
+// script assigns.
+const gcpCollectorContainerName = "dbg-collector"
+
 type gcpLogEntry struct {
 	InsertID    string         `json:"insertId"`
 	Timestamp   time.Time      `json:"timestamp"`
@@ -195,8 +215,7 @@ func (e gcpLogEntry) text() string {
 }
 
 // listLogEntries reads every entry since `since` (inclusive), following the
-// page token: entries:list is paginated and a busy collector easily exceeds
-// one page — ignoring the token would silently drop everything past the first.
+// page token.
 func listLogEntries(ctx context.Context, cfg gcpConfig, project, filter string, since time.Time) ([]gcpLogEntry, error) {
 	var out []gcpLogEntry
 	body := map[string]any{

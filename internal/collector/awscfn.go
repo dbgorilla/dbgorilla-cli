@@ -33,15 +33,20 @@ const deleteTimeout = 15 * time.Minute
 // destroy a healthy in-flight deploy. Test with errors.Is.
 var ErrDeployTimeout = errors.New("timed out waiting for the stack to finish")
 
-// waitErr classifies a waiter failure. The SDK's waiters report exhaustion as a
-// plain "exceeded max wait time" error, which is indistinguishable from a
-// terminal CREATE_FAILED unless we tag it here.
+// waitErr classifies a waiter failure. The SDK reports exhaustion as a plain
+// "exceeded max wait time" error, and a poll that failed without an API
+// response (DNS, a dropped connection) as a non-APIError; neither is a
+// terminal stack failure.
 func waitErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "exceeded max wait time") {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "exceeded max wait time"):
 		return fmt.Errorf("%w: %w", ErrDeployTimeout, err)
+	case strings.Contains(msg, "expected err to be of type smithy.APIError"):
+		return fmt.Errorf("%w: lost contact while polling the stack: %w", ErrDeployUnknown, err)
 	}
 	return err
 }
@@ -100,9 +105,6 @@ func (d FargateDeploy) deploy(ctx context.Context) error {
 			}
 			// fall through to CreateStack below
 		case stackInProgress(status):
-			// Tagged ErrDeployBusy so the shared install spine's no-rollback
-			// branch holds for AWS too: DeleteStack on a CREATE_IN_PROGRESS
-			// stack CANCELS it — the opposite of "wait for it to finish".
 			return fmt.Errorf("stack %q is %s — another operation is already in progress; wait for it to finish and re-run: %w", d.StackName, status, ErrDeployBusy)
 		default:
 			// Healthy stack: update in place (a matching re-run is a no-op success).
@@ -123,12 +125,21 @@ func (d FargateDeploy) deploy(ctx context.Context) error {
 	}
 	if err := cloudformation.NewStackCreateCompleteWaiter(client).Wait(ctx,
 		&cloudformation.DescribeStacksInput{StackName: aws.String(d.StackName)}, deployTimeout); err != nil {
-		if err := waitErr(err); errors.Is(err, ErrDeployTimeout) {
-			return fmt.Errorf("stack %q is still creating after %s: %w", d.StackName, deployTimeout, err)
-		}
-		return fmt.Errorf("stack %q did not create cleanly: %w%s", d.StackName, err, stackFailureReason(ctx, client, d.StackName))
+		return stackWaitError(ctx, client, d.StackName, "create", "creating", err)
 	}
 	return nil
+}
+
+// stackWaitError shapes a create/update waiter failure by its classification.
+func stackWaitError(ctx context.Context, client *cloudformation.Client, name, verb, progressive string, err error) error {
+	err = waitErr(err)
+	switch {
+	case errors.Is(err, ErrDeployTimeout):
+		return fmt.Errorf("stack %q is still %s after %s: %w", name, progressive, deployTimeout, err)
+	case errors.Is(err, ErrDeployUnknown):
+		return fmt.Errorf("stack %q may still be %s: %w", name, progressive, err)
+	}
+	return fmt.Errorf("stack %q did not %s cleanly: %w%s", name, verb, err, stackFailureReason(ctx, client, name))
 }
 
 // cfnParams renders a param map as CloudFormation parameters (sorted for a
@@ -209,10 +220,7 @@ func updateStack(ctx context.Context, client *cloudformation.Client, name string
 	}
 	if err := cloudformation.NewStackUpdateCompleteWaiter(client).Wait(ctx,
 		&cloudformation.DescribeStacksInput{StackName: aws.String(name)}, deployTimeout); err != nil {
-		if err := waitErr(err); errors.Is(err, ErrDeployTimeout) {
-			return fmt.Errorf("stack %q is still updating after %s: %w", name, deployTimeout, err)
-		}
-		return fmt.Errorf("stack %q did not update cleanly: %w%s", name, err, stackFailureReason(ctx, client, name))
+		return stackWaitError(ctx, client, name, "update", "updating", err)
 	}
 	return nil
 }

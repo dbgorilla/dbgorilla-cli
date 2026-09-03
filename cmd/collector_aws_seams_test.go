@@ -22,6 +22,7 @@ func stubAWSOK(t *testing.T) {
 	stubAwsRegion(t, "us-east-1")
 	stubNetworkPath(t, nil, nil)
 	stubRemoteDigest(t, nil)
+	stubStackStatus(t, "", nil)
 }
 
 func stubAwsAvailable(t *testing.T, err error) {
