@@ -476,6 +476,9 @@ func gcpComponent(t GcpTarget) Component {
 	if auth.Method == "password" {
 		auth.Password = "${" + CloudDBPasswordEnv + "}"
 	}
+	if auth.Method == "gcp_iam" && t.ProviderType == "alloydb" {
+		auth.Scopes = []string{"https://www.googleapis.com/auth/alloydb.login"}
+	}
 	// verify-full everywhere, with one exception: password auth on Cloud SQL's
 	// default per-instance CA, which attests no hostname — there the chain is
 	// verified against that CA (fetched by the collector at discovery). AlloyDB

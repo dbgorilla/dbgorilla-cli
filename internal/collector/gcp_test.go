@@ -190,6 +190,21 @@ func TestGcpComponent_AlloyDBNamesClusterAndPrimary(t *testing.T) {
 	if c.Provider.Cluster != "orders" || c.Provider.Instance != "orders-primary" {
 		t.Fatalf("provider block: %+v", c.Provider)
 	}
+	// AlloyDB IAM login mints with the alloydb.login scope; the collector
+	// refuses an alloydb gcp_iam component that doesn't say so.
+	if len(c.Auth.Scopes) != 1 || c.Auth.Scopes[0] != "https://www.googleapis.com/auth/alloydb.login" {
+		t.Fatalf("alloydb gcp_iam auth must carry the alloydb.login scope, got %v", c.Auth.Scopes)
+	}
+}
+
+func TestGcpComponent_CloudSQLCarriesNoScopes(t *testing.T) {
+	c := gcpComponent(GcpTarget{
+		ProviderType: "cloud_sql", Project: "p", Region: "r", InstanceID: "i",
+		Engine: "postgres", Host: "h.", Port: 5432, AuthMethod: "gcp_iam", User: "u",
+	})
+	if len(c.Auth.Scopes) != 0 {
+		t.Fatalf("cloud_sql auth needs no extra scopes, got %v", c.Auth.Scopes)
+	}
 }
 
 // GcpConfigTOML must survive StrictParseConfig: UpdateComponents round-trips
@@ -206,6 +221,13 @@ func TestGcpConfigTOML_RoundTripsThroughTheStrictParser(t *testing.T) {
 			InstanceID: "c-primary", Engine: "postgres", Host: "10.0.0.1", Port: 5432,
 			AuthMethod: "password", User: "postgres",
 		},
+		{
+			// gcp_iam on alloydb renders the `scopes` key — it must survive
+			// the strict parser like every other rendered key.
+			ProviderType: "alloydb", Project: "p", Region: "r", ClusterID: "c2",
+			InstanceID: "c2-primary", Engine: "postgres", Host: "10.0.0.2", Port: 5432,
+			AuthMethod: "gcp_iam", User: "u",
+		},
 	}, Endpoints{}, true)
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -214,11 +236,14 @@ func TestGcpConfigTOML_RoundTripsThroughTheStrictParser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the strict parser must model every key this CLI renders: %v", err)
 	}
-	if len(parsed.Component) != 2 {
+	if len(parsed.Component) != 3 {
 		t.Fatalf("components: %+v", parsed.Component)
 	}
 	if parsed.Component[0].Provider.Project != "p" || parsed.Component[1].Provider.Cluster != "c" {
 		t.Fatalf("gcp provider keys did not round-trip: %+v", parsed.Component)
+	}
+	if s := parsed.Component[2].Auth.Scopes; len(s) != 1 || s[0] != "https://www.googleapis.com/auth/alloydb.login" {
+		t.Fatalf("the scopes key did not round-trip: %+v", parsed.Component[2].Auth)
 	}
 	if strings.Contains(rendered, "tenant123secret") || !strings.Contains(rendered, "${DBG_SERVER_SECRET}") {
 		t.Fatalf("secrets must stay env references:\n%s", rendered)

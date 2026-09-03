@@ -153,6 +153,16 @@ func cloudDeployFailed(err error, client *api.Client, agentID string, budget tim
 	// mid-CREATE (force=true) would do exactly what the message promises we
 	// won't. Nothing was created by THIS run, so only the freshly minted
 	// identity is ours to clean up.
+	// An unknown outcome is not a failure: the client lost sight of the
+	// operation (connectivity, not the server), and the deployment may be
+	// converging to healthy right now. Rolling back would destroy a working
+	// install; deprovisioning would strand it. Leave everything — identity,
+	// deployment, local state — and point at `status`.
+	if errors.Is(err, collector.ErrDeployUnknown) {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  lost sight of the %s while it was converging — nothing was rolled back", noun)))
+		return fmt.Errorf("%w\n\nWhen connectivity returns, run `dbg collector status`: "+
+			"if the %s converged, the install is complete; if it failed, re-run the install", err, noun)
+	}
 	if errors.Is(err, collector.ErrDeployBusy) {
 		fmt.Printf("Nothing to roll back on the %s; deprovisioning this run's identity...\n", noun)
 		if derr := client.DeleteCollector(agentID); derr != nil {

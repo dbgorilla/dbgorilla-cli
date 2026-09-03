@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 )
 
@@ -189,7 +188,7 @@ func DeleteGcpDeployment(project, region, name string) error {
 		// A rollback for a deployment that was never created (the failure
 		// happened before CreateDeployment) must not warn the operator to
 		// delete something from the console that does not exist.
-		if strings.Contains(err.Error(), "404") {
+		if errors.Is(err, errGcpNotFound) {
 			return nil
 		}
 		return fmt.Errorf("could not delete deployment %q: %w", name, err)
@@ -282,9 +281,8 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 		if err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+op.Name, nil, &next); err != nil {
 			pollFailures++
 			if pollFailures >= maxConsecutivePollFailures {
-				return fmt.Errorf("polling operation %s failed %d times in a row "+
-					"(the operation itself may still be converging server-side): %w",
-					op.Name, pollFailures, err)
+				return fmt.Errorf("polling operation %s failed %d times in a row: %v: %w",
+					op.Name, pollFailures, err, ErrDeployUnknown)
 			}
 			continue
 		}
@@ -298,3 +296,10 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 // no-rollback: deleting a converging deployment is never what "wait and
 // re-run" means.
 var ErrDeployBusy = errors.New("deployment busy")
+
+// ErrDeployUnknown marks a deploy whose outcome could not be observed — the
+// client lost the operation (polling kept failing), not the server. The
+// deployment may well be converging to healthy, so the install spine must
+// leave everything in place: no deployment delete, no identity deprovision,
+// state kept. `dbg collector status` picks it up once connectivity returns.
+var ErrDeployUnknown = errors.New("deploy outcome unknown")

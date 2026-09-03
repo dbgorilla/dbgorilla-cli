@@ -463,17 +463,17 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 		}
 	})
 
-	t.Run("MySQL under IAM derives the short username", func(t *testing.T) {
+	t.Run("MySQL under IAM is refused — the collector's matrix excludes it", func(t *testing.T) {
+		// Rendering mysql+cloud_sql+gcp_iam would deploy a collector that
+		// refuses its own config at startup and crash-loops; the install must
+		// refuse first, naming the way out.
 		target := completeGcpTarget()
 		target.Engine, target.Port = "mysql", 3306
-		c, deploys := setup(t, target)
+		c, _ := setup(t, target)
 		var err error
 		capture(t, func() { err = runInstallGCP(c) })
-		if err != nil {
-			t.Fatalf("runInstallGCP: %v", err)
-		}
-		if cfg := decodedConfig(t, deploys.deploy); !strings.Contains(cfg, `user = "dbg-test"`) {
-			t.Errorf("MySQL IAM user is the local part of the service account:\n%s", cfg)
+		if err == nil || !strings.Contains(err.Error(), "--db-password") {
+			t.Fatalf("err = %v", err)
 		}
 	})
 }
