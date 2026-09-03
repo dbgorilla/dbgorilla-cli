@@ -84,9 +84,12 @@ func priorCloudInstall(dryRun bool, isMine func(*collector.State) bool,
 	if s != "" {
 		return st, s, nil
 	}
+	// The install below overwrites state with the NEW agent, so the stale
+	// identity named here is unreachable by any CLI command afterwards —
+	// point at the console, not at `uninstall`.
 	fmt.Println(style.Warn(fmt.Sprintf(
 		"⚠  %s %q from the last install no longer exists — installing fresh.\n"+
-			"   Collector %s is still provisioned in DBGorilla; remove it with `dbg collector uninstall` once this finishes.",
+			"   Collector %s is still provisioned in DBGorilla; remove it from the console (this install replaces the local record).",
 		noun, name(st), st.AgentID)))
 	return nil, "", nil
 }

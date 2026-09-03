@@ -155,7 +155,8 @@ type sqlInstanceInfo struct {
 		IPAddress string `json:"ipAddress"`
 	} `json:"ipAddresses"`
 	DNSNames []struct {
-		Name string `json:"name"`
+		Name           string `json:"name"`
+		ConnectionType string `json:"connectionType"`
 	} `json:"dnsNames"`
 	Settings struct {
 		IPConfiguration struct {
@@ -236,6 +237,18 @@ func mergeCloudSQLInstance(into GcpTarget, info *sqlInstanceInfo) GcpTarget {
 	// The certificate-attested DNS name wins, VERBATIM — the trailing dot is
 	// part of what the certificate carries. Fall back to the private IP, then
 	// any address.
+	if into.Host == "" {
+		// An instance can list several dnsNames mappings (PSC, custom SANs).
+		// Only the PSA one resolves over the peering the collector's VPC
+		// joins, so pick it by connectionType rather than trusting list
+		// order; fall back to the first non-empty name.
+		for _, d := range info.DNSNames {
+			if d.Name != "" && d.ConnectionType == "PRIVATE_SERVICES_ACCESS" {
+				into.Host = d.Name
+				break
+			}
+		}
+	}
 	if into.Host == "" {
 		for _, d := range info.DNSNames {
 			if d.Name != "" {
@@ -495,6 +508,17 @@ func gcpComponent(t GcpTarget) Component {
 	sslMode := "verify-full"
 	if t.ProviderType == "cloud_sql" && auth.Method == "password" && t.ServerCaMode == "GOOGLE_MANAGED_INTERNAL_CA" {
 		sslMode = "verify-ca"
+	}
+	// ssl_mode is engine-specific and the collector parses it strictly: the
+	// MySQL engine accepts only disabled/required/verify_ca/verify_identity
+	// and refuses libpq's spellings at startup.
+	if t.Engine == "mysql" {
+		switch sslMode {
+		case "verify-full":
+			sslMode = "verify_identity"
+		case "verify-ca":
+			sslMode = "verify_ca"
+		}
 	}
 	return Component{
 		Name:     t.DisplayName(),

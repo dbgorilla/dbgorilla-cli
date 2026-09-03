@@ -463,6 +463,21 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 		}
 	})
 
+	t.Run("MySQL without the flag gets the MySQL refusal, not the Postgres flag advice", func(t *testing.T) {
+		// The flag advice would send a MySQL operator through an instance
+		// restart straight into the MySQL-IAM refusal — the dead end must be
+		// named first.
+		target := completeGcpTarget()
+		target.Engine, target.Port, target.IamEnabled = "mysql", 3306, false
+		c, _ := setup(t, target)
+		var err error
+		capture(t, func() { err = runInstallGCP(c) })
+		if err == nil || !strings.Contains(err.Error(), "--db-password") ||
+			strings.Contains(err.Error(), "cloudsql.iam_authentication") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
 	t.Run("MySQL under IAM is refused — the collector's matrix excludes it", func(t *testing.T) {
 		// Rendering mysql+cloud_sql+gcp_iam would deploy a collector that
 		// refuses its own config at startup and crash-loops; the install must

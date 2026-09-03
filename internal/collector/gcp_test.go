@@ -54,8 +54,15 @@ func TestMergeCloudSQLInstance_FieldByField(t *testing.T) {
 		DatabaseVersion: "POSTGRES_16",
 	}
 	info.DNSNames = []struct {
-		Name string `json:"name"`
-	}{{Name: "abc.def.us-central1.sql-psa.goog."}}
+		Name           string `json:"name"`
+		ConnectionType string `json:"connectionType"`
+	}{
+		// PSC listed FIRST: the PSA mapping must win by connectionType, not
+		// list order — the PSC name resolves only through a customer-created
+		// endpoint the collector's VPC doesn't have.
+		{Name: "abc.def.us-central1.sql-psc.goog.", ConnectionType: "PRIVATE_SERVICE_CONNECT"},
+		{Name: "abc.def.us-central1.sql-psa.goog.", ConnectionType: "PRIVATE_SERVICES_ACCESS"},
+	}
 	info.IPAddresses = []struct {
 		Type      string `json:"type"`
 		IPAddress string `json:"ipAddress"`
@@ -194,6 +201,30 @@ func TestGcpComponent_AlloyDBNamesClusterAndPrimary(t *testing.T) {
 	// refuses an alloydb gcp_iam component that doesn't say so.
 	if len(c.Auth.Scopes) != 1 || c.Auth.Scopes[0] != "https://www.googleapis.com/auth/alloydb.login" {
 		t.Fatalf("alloydb gcp_iam auth must carry the alloydb.login scope, got %v", c.Auth.Scopes)
+	}
+}
+
+// ssl_mode is engine-specific and the collector parses it strictly: the MySQL
+// engine refuses libpq's spellings at startup, so a mis-spelled mode is a
+// deploy that succeeds and then crash-loops.
+func TestGcpComponent_MySQLGetsMySQLSSLModeSpellings(t *testing.T) {
+	base := GcpTarget{
+		ProviderType: "cloud_sql", Project: "p", Region: "r", InstanceID: "i",
+		Engine: "mysql", Host: "h.", Port: 3306,
+		AuthMethod: "password", User: "dbg_ro",
+	}
+	if c := gcpComponent(base); c.Connect.SSLMode != "verify_identity" {
+		t.Fatalf("mysql spelling for verify-full: %q", c.Connect.SSLMode)
+	}
+	internal := base
+	internal.ServerCaMode = "GOOGLE_MANAGED_INTERNAL_CA"
+	if c := gcpComponent(internal); c.Connect.SSLMode != "verify_ca" {
+		t.Fatalf("mysql spelling for verify-ca: %q", c.Connect.SSLMode)
+	}
+	pg := base
+	pg.Engine = "postgres"
+	if c := gcpComponent(pg); c.Connect.SSLMode != "verify-full" {
+		t.Fatalf("postgres keeps libpq spellings: %q", c.Connect.SSLMode)
 	}
 }
 
