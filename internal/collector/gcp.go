@@ -494,6 +494,14 @@ func gcpComponent(t GcpTarget) Component {
 			sslMode = "verify_ca"
 		}
 	}
+	// AlloyDB is dialed directly (no connector proxy since the #111 rework)
+	// and its instance certificates attest nothing a client can verify
+	// without pinning: the collector defaults alloydb to `require`
+	// (encrypted; the VPC is the boundary) and refuses verify-* unless
+	// ca_cert pins the instance certificate. Render the accepted mode.
+	if t.ProviderType == "alloydb" {
+		sslMode = "require"
+	}
 	return Component{
 		Name:     t.DisplayName(),
 		Engine:   t.Engine,

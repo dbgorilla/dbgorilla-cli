@@ -189,6 +189,11 @@ func TestGcpComponent_AlloyDBNamesClusterAndPrimary(t *testing.T) {
 	if len(c.Auth.Scopes) != 1 || c.Auth.Scopes[0] != "https://www.googleapis.com/auth/alloydb.login" {
 		t.Fatalf("alloydb gcp_iam auth must carry the alloydb.login scope, got %v", c.Auth.Scopes)
 	}
+	// Direct dial: the collector refuses verify-* on alloydb without a
+	// ca_cert pin; `require` is its accepted default.
+	if c.Connect.SSLMode != "require" {
+		t.Fatalf("alloydb must render ssl_mode require, got %q", c.Connect.SSLMode)
+	}
 }
 
 // The MySQL engine accepts only its own ssl_mode spellings.
