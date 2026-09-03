@@ -6,10 +6,8 @@ import (
 	"testing"
 )
 
-// The Infrastructure Manager lifecycle is the part of a gcp install that can
-// destroy something: a wrong branch here re-creates over a live deployment,
-// reports success over a failed apply, or rolls back a deploy that is still
-// converging. None of it was reachable in tests before.
+// The Infrastructure Manager lifecycle: create vs update, busy refusal,
+// timeout vs failure, delete.
 
 const (
 	probePath  = "/tmpl/collector/gce/v1.0/main.tf"
@@ -62,8 +60,6 @@ func TestGcpDeploy_CreatesWhenAbsent(t *testing.T) {
 }
 
 func TestGcpDeploy_SettledDeploymentsUpdateInPlace(t *testing.T) {
-	// FAILED included: Infrastructure Manager re-applies against whatever
-	// half-converged, unlike a CloudFormation stack that must be recreated.
 	for _, state := range []string{"ACTIVE", "FAILED", "SUSPENDED"} {
 		t.Run(state, func(t *testing.T) {
 			f := newGCPFake(t).
@@ -102,8 +98,7 @@ func TestGcpDeploy_RefusesWhileAnotherOperationRuns(t *testing.T) {
 	}
 }
 
-// The probe runs on EVERY deploy, not only the dry run: an unreachable
-// template must fail here, before a deployment exists to be rolled back.
+// The probe runs on every deploy, before anything exists to roll back.
 func TestGcpDeploy_UnreachableTemplateStopsBeforeAnyMutation(t *testing.T) {
 	f := newGCPFake(t).on("GET", probePath, 404, `<Error><Code>NoSuchKey</Code></Error>`)
 	stubGCP(t, f)
@@ -139,8 +134,7 @@ func TestGcpDeploy_DryRunOnlyProbes(t *testing.T) {
 	}
 }
 
-// A timeout is NOT a failure: the caller must be able to tell it apart from a
-// terminal error, because its response is "leave it alone", not "roll back".
+// A timeout must be distinguishable from a terminal failure.
 func TestGcpDeploy_TimeoutIsTaggedNotFailed(t *testing.T) {
 	f := newGCPFake(t).
 		on("GET", probePath, 200, "# template").
@@ -232,7 +226,7 @@ func TestGcpCredentialFailuresNameTheFix(t *testing.T) {
 		"delete":   func() error { return DeleteGcpDeployment("p", "r", "d") },
 		"scale":    func() error { return ScaleGcpMig("p", "r", "d", 0) },
 		"restart":  func() error { return RestartGcpMig("p", "r", "d") },
-		"logs":     func() error { return TailGcpLogs("p", "d", false) },
+		"logs":     func() error { return TailGcpLogs("p", "r", "d", false) },
 		"discover": func() error { _, err := DiscoverGcpTarget("", "", GcpTarget{Project: "p"}); return err },
 		"identity": func() error { _, err := GcpIdentity(); return err },
 		"project":  func() error { _, err := GcpProject(); return err },

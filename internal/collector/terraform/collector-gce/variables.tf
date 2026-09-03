@@ -1,10 +1,8 @@
-# The template's input contract — one variable per CLI-rendered input
-# (gcpparams.go's gcpInputKeys). Adding, removing, or reinterpreting one of
-# these is a template-version bump; TestGcpTemplateContract pins the two
-# against each other.
+# The template's input contract: one variable per CLI-rendered input
+# (gcpInputKeys). Changing this set is a template-version bump.
 
 variable "collector_config" {
-  description = "Base64-encoded collector.toml. Contains no secrets — only $${ENV} references."
+  description = "Base64-encoded collector.toml. Contains no secrets, only $${ENV} references."
   type        = string
 }
 
@@ -21,8 +19,14 @@ variable "db_password" {
 }
 
 variable "network" {
-  description = "VPC self-link the collector instance joins."
+  description = "VPC the collector instance joins (projects/<project>/global/networks/<name>)."
   type        = string
+}
+
+variable "subnetwork" {
+  description = "Subnetwork in the region for the collector instance. Required on a custom-mode VPC; empty on an auto-mode VPC."
+  type        = string
+  default     = ""
 }
 
 variable "region" {
@@ -31,7 +35,7 @@ variable "region" {
 }
 
 variable "runtime_service_account" {
-  description = "Email of the service account this template creates for the collector VM. Its local part names the deployment's resources (the CLI's naming contract)."
+  description = "Email of the service account this template creates for the collector VM. Its local part names the deployment's resources."
   type        = string
 }
 

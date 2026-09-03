@@ -11,41 +11,53 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// GCP-path seams: same purpose as the AWS block in collector.go — every
-// operation that reaches a live Google Cloud project is substitutable, so the
-// whole `--target gcp` workflow is exercisable without a project.
+// GCP-path seams: every operation that reaches a live Google Cloud project is
+// substitutable, so the `--target gcp` workflow is testable without one.
 var (
-	gcpAvailable        = collector.GcpAvailable
-	gcpIdentity         = collector.GcpIdentity
-	gcpProject          = collector.GcpProject
-	discoverGcpTarget   = collector.DiscoverGcpTarget
-	gcpDeploymentStatus = collector.GcpDeploymentStatus
-	deleteGcpDeployment = collector.DeleteGcpDeployment
-	scaleGcpMig         = collector.ScaleGcpMig
-	restartGcpMig       = collector.RestartGcpMig
-	tailGcpLogs         = collector.TailGcpLogs
-	// A method expression (not a wrapping closure) so the production default
-	// carries no uncovered statement of its own.
-	runGcpDeploy = collector.GcpDeploy.Run
+	gcpAvailable         = collector.GcpAvailable
+	gcpIdentity          = collector.GcpIdentity
+	gcpProject           = collector.GcpProject
+	discoverGcpTarget    = collector.DiscoverGcpTarget
+	resolveGcpSubnetwork = collector.ResolveGcpSubnetwork
+	gcpDeploymentStatus  = collector.GcpDeploymentStatus
+	deleteGcpDeployment  = collector.DeleteGcpDeployment
+	scaleGcpMig          = collector.ScaleGcpMig
+	restartGcpMig        = collector.RestartGcpMig
+	tailGcpLogs          = collector.TailGcpLogs
+	runGcpDeploy         = collector.GcpDeploy.Run
 )
 
-// gcpDeploymentNameRe is the SA account_id contract the deployment name feeds
-// (6-30 chars, lowercase letter first, [a-z0-9-], no trailing dash).
-var gcpDeploymentNameRe = regexp.MustCompile(`^[a-z](?:[-a-z0-9]{4,28})[a-z0-9]$`)
+var (
+	// gcpDeploymentNameRe is the service-account account_id grammar the
+	// deployment name feeds.
+	gcpDeploymentNameRe = regexp.MustCompile(`^[a-z](?:[-a-z0-9]{4,28})[a-z0-9]$`)
+	// gcpProjectNumberRe matches a project number, which cannot stand in for
+	// the project ID in service-account emails.
+	gcpProjectNumberRe = regexp.MustCompile(`^[0-9]+$`)
+	// gcpServiceAccountRe is the resource form Infrastructure Manager expects.
+	gcpServiceAccountRe = regexp.MustCompile(`^projects/[^/]+/serviceAccounts/[^/@]+@[^/]+$`)
+)
 
 // gcpSecretInputs are the template inputs a dry run must redact.
 var gcpSecretInputs = []string{"server_secret", "db_password"}
 
+// awsOnlyFlags are refused on the gcp target rather than silently ignored.
+var awsOnlyFlags = []string{
+	"dbi-resource-id", "subnets", "security-group-id", "assign-public-ip", "stack-name",
+	"template-url", "config", "run-grant", "grant-user", "grant-password",
+}
+
 func init() {
-	installCmd.Flags().String("project", "", "GCP: project to act on (default: the credentials' project)")
+	installCmd.Flags().String("project", "", "GCP: project ID to act on (default: the credentials' project, GOOGLE_CLOUD_PROJECT, or gcloud's active configuration)")
 	installCmd.Flags().String("deployment-name", collector.DefaultGcpDeploymentName, "GCP: Infrastructure Manager deployment name")
 	installCmd.Flags().String("template-source", "", "GCP: deploy this Terraform template directory instead of the published one (must be a gs:// address)")
-	installCmd.Flags().String("deploy-service-account", "", "GCP: service account Infrastructure Manager actuates Terraform as (projects/<p>/serviceAccounts/<email>)")
-	installCmd.Flags().String("network", "", "GCP: VPC self-link for the collector instance (discovered from the database when omitted)")
+	installCmd.Flags().String("deploy-service-account", "", "GCP: service account Infrastructure Manager actuates Terraform as (projects/<project>/serviceAccounts/<email>)")
+	installCmd.Flags().String("network", "", "GCP: VPC for the collector instance, as projects/<project>/global/networks/<name> (discovered from the database when omitted). The VPC needs egress to the internet (Cloud NAT) for the image pull and the DBGorilla connection")
+	installCmd.Flags().String("subnetwork", "", "GCP: subnetwork for the collector instance (auto-selected when the VPC has exactly one in the database's region; required otherwise)")
 }
 
 // runInstallGCP deploys the collector to a Compute Engine managed instance
-// group via Infrastructure Manager, on the shared cloud install spine.
+// group via Infrastructure Manager.
 func runInstallGCP(cmd *cobra.Command) error {
 	apiURL, err := requireInstallSession(cmd)
 	if err != nil {
@@ -53,21 +65,28 @@ func runInstallGCP(cmd *cobra.Command) error {
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
-	// Flag checks first: they cost nothing, and failing them after discovery
-	// has made a round of API calls wastes the operator's time.
+	// Flag checks first: they cost nothing.
+	for _, f := range awsOnlyFlags {
+		if cmd.Flags().Changed(f) {
+			return fmt.Errorf("--%s applies to --target aws only", f)
+		}
+	}
 	deployServiceAccount, _ := cmd.Flags().GetString("deploy-service-account")
-	if deployServiceAccount == "" && !dryRun {
+	switch {
+	case deployServiceAccount == "" && !dryRun:
 		return errors.New("pass --deploy-service-account: the account Infrastructure Manager actuates Terraform as " +
 			"(it needs roles/config.agent plus permission to create the collector's instance group and service account)")
+	case deployServiceAccount != "" && !gcpServiceAccountRe.MatchString(deployServiceAccount):
+		return fmt.Errorf("--deploy-service-account %q must be of the form projects/<project>/serviceAccounts/<email>", deployServiceAccount)
 	}
 	deploymentName, _ := cmd.Flags().GetString("deployment-name")
-	// The deployment name becomes the runtime service account's account_id and
-	// the secret-id prefix, so it inherits the SA naming contract. Rejecting a
-	// bad name here costs nothing; discovering it inside Terraform costs the
-	// operator a minted identity and twenty minutes.
 	if !gcpDeploymentNameRe.MatchString(deploymentName) {
 		return fmt.Errorf("--deployment-name %q must be 6-30 chars of [a-z0-9-], starting with a letter and not ending with '-' "+
 			"(it names the collector's service account and secrets)", deploymentName)
+	}
+	providerType, _ := cmd.Flags().GetString("provider-type")
+	if !collector.ValidGcpProviderType(providerType) {
+		return fmt.Errorf("--provider-type %q is not a Google Cloud provider (expected cloud_sql or alloydb)", providerType)
 	}
 	templateSource, _ := cmd.Flags().GetString("template-source")
 	if templateSource == "" {
@@ -83,11 +102,8 @@ func runInstallGCP(cmd *cobra.Command) error {
 		return err
 	}
 	if prior != nil {
-		// In-place component updates (the aws target's runUpdateAWS) need the
-		// stored config read back off the deployment; until that lands,
-		// changing the monitored set is uninstall + install.
 		return fmt.Errorf("collector deployment %q already exists (%s). "+
-			"Run `dbg collector uninstall` first; in-place updates for the gcp target are not wired yet",
+			"Run `dbg collector uninstall` first; changing an installed gcp collector in place is not supported yet",
 			prior.DeploymentName, status)
 	}
 
@@ -105,25 +121,39 @@ func runInstallGCP(cmd *cobra.Command) error {
 			return err
 		}
 	}
+	if gcpProjectNumberRe.MatchString(project) {
+		return fmt.Errorf("project %q is a project number; pass the project ID (--project), "+
+			"which names the collector's service account", project)
+	}
 	target, err := resolveGcpTarget(cmd, project)
 	if err != nil {
 		return err
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Target database: %s (%s)", target.InstanceID, target.Host)))
 
+	if err := requireNoRuntime(dryRun,
+		func() (string, error) { return gcpDeploymentStatus(project, target.Region, deploymentName) },
+		"deployment", deploymentName, "--deployment-name"); err != nil {
+		return err
+	}
+
 	dbPassword := dbPasswordFlag(cmd)
 	if err := resolveGcpAuth(&target, dbPassword, deploymentName, project); err != nil {
 		return err
 	}
 
-	// The collector instance joins the database's VPC unless --network says
-	// otherwise; a database without a private network has nothing to join.
 	network, _ := cmd.Flags().GetString("network")
 	if network == "" {
 		network = target.Network
 	}
 	if network == "" {
 		return errors.New("could not determine the collector's VPC (the database reports no private network); pass --network")
+	}
+	subnetwork, _ := cmd.Flags().GetString("subnetwork")
+	if subnetwork == "" {
+		if subnetwork, err = resolveGcpSubnetwork(network, target.Region); err != nil {
+			return err
+		}
 	}
 
 	targets := []collector.GcpTarget{target}
@@ -136,6 +166,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 			Image:           image,
 			Targets:         targets,
 			Network:         network,
+			Subnetwork:      subnetwork,
 			Region:          target.Region,
 			DeploymentName:  deploymentName,
 			Project:         project,
@@ -171,6 +202,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 		Endpoints:       endpointsFor(creds, cmd),
 		Targets:         targets,
 		Network:         network,
+		Subnetwork:      subnetwork,
 		Region:          target.Region,
 		DeploymentName:  deploymentName,
 		Project:         project,
@@ -179,12 +211,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 		CommandsEnabled: commandsEnabled,
 	})
 	if err != nil {
-		// The identity was minted moments ago and no state exists yet —
-		// returning without deprovisioning would leave an agent invisible to
-		// both `status` and `uninstall`.
-		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
-		}
+		deprovisionOrWarn(client, creds.AgentID)
 		return err
 	}
 
@@ -208,19 +235,28 @@ func runInstallGCP(cmd *cobra.Command) error {
 		Inputs: inputs,
 	}
 	if err := withSpinner("Deploying to Compute Engine…", func() error { return runGcpDeploy(deploy) }); err != nil {
-		return cloudDeployFailed(err, client, creds.AgentID, collector.GcpDeployTimeout(), "deployment", deploymentName,
-			func() error { return deleteGcpDeployment(project, target.Region, deploymentName) },
+		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.GcpDeployTimeout(), "deployment", deploymentName,
+			func() error {
+				return withSpinner("Deleting the deployment…", func() error {
+					return deleteGcpDeployment(project, target.Region, deploymentName)
+				})
+			},
 			"   Watch it with: dbg collector status\n")
+		if kept {
+			printGcpGrantGuidance(target, deploymentName, project)
+		}
+		return derr
 	}
 
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector deploying to Compute Engine (deployment %s).", deploymentName)))
 	printGcpGrantGuidance(target, deploymentName, project)
+	fmt.Println("\nConfirm it connected with: dbg collector status")
 	return nil
 }
 
 // resolveGcpTarget picks and completes the database target. An ambiguous
-// project becomes a picker on a real terminal; otherwise the typed error's
-// candidate list is surfaced — never guessed from.
+// project becomes a picker on a real terminal; otherwise the candidates are
+// listed in the error.
 func resolveGcpTarget(cmd *cobra.Command, project string) (collector.GcpTarget, error) {
 	id, _ := cmd.Flags().GetString("db-instance-id")
 	providerType, _ := cmd.Flags().GetString("provider-type")
@@ -233,7 +269,7 @@ func resolveGcpTarget(cmd *cobra.Command, project string) (collector.GcpTarget, 
 	target, err := discoverGcpTarget(id, providerType, seed)
 	var amb *collector.AmbiguousTargetError
 	if errors.As(err, &amb) && interactiveSelectable(cmd) {
-		choice, perr := pickTarget(amb)
+		choice, perr := pickTarget(amb, "")
 		if perr != nil {
 			return collector.GcpTarget{}, perr
 		}
@@ -243,21 +279,12 @@ func resolveGcpTarget(cmd *cobra.Command, project string) (collector.GcpTarget, 
 }
 
 // resolveGcpAuth settles the target's auth: --db-password forces password
-// auth (as the --db-user, else the collector's default user); otherwise IAM
-// when the database supports it (AlloyDB always does; Cloud SQL needs its
-// flag on), as the runtime service account's database identity.
+// auth; otherwise IAM as the runtime service account's database identity.
 func resolveGcpAuth(target *collector.GcpTarget, dbPassword, deploymentName, project string) error {
 	if dbPassword != "" {
 		target.AuthMethod = "password"
 		return nil
 	}
-	// The collector's support matrix deliberately excludes mysql + cloud_sql +
-	// gcp_iam until its MySQL dial is live-proven against the PSA endpoint;
-	// rendering that combination installs a collector that refuses its own
-	// config at startup. Refuse here instead, where the operator can act — and
-	// BEFORE the IAM-enabled check: telling a MySQL operator to enable the
-	// (Postgres-spelled) flag would send them through an instance restart into
-	// this same refusal.
 	if target.Engine == "mysql" && target.ProviderType == "cloud_sql" {
 		return fmt.Errorf("the collector does not support IAM database authentication for "+
 			"Cloud SQL MySQL yet — pass --db-password to use password auth for %q",
@@ -279,8 +306,8 @@ func resolveGcpAuth(target *collector.GcpTarget, dbPassword, deploymentName, pro
 }
 
 // printGcpGrantGuidance names the two grant steps IAM auth needs: registering
-// the collector's service account as a database user (an API call, not SQL),
-// and the in-database read grants.
+// the collector's service account as a database user, and the in-database
+// read grants.
 func printGcpGrantGuidance(target collector.GcpTarget, deploymentName, project string) {
 	if target.AuthMethod != "gcp_iam" {
 		return
@@ -288,11 +315,8 @@ func printGcpGrantGuidance(target collector.GcpTarget, deploymentName, project s
 	sa := collector.GcpRuntimeServiceAccountFor(deploymentName, project)
 	fmt.Println("\nGrant the collector database access:")
 	if target.ProviderType == "alloydb" {
-		// AlloyDB registers the LITERAL username given (unlike Cloud SQL, whose
-		// API strips the .gserviceaccount.com suffix server-side), and the
-		// collector logs in as the trimmed form — so the trimmed form is what
-		// must be registered, or step 2's grants land on a user that never
-		// matches the login.
+		// AlloyDB registers the literal username given; the collector logs in
+		// as the trimmed form.
 		fmt.Printf("  1. Register the service account as a database user:\n"+
 			"     gcloud alloydb users create %s --cluster=%s --region=%s --type=IAM_BASED\n",
 			target.User, target.ClusterID, target.Region)
@@ -302,7 +326,7 @@ func printGcpGrantGuidance(target collector.GcpTarget, deploymentName, project s
 			sa, target.InstanceID)
 	}
 	fmt.Printf("  2. Connect as an admin and grant read access to %q:\n", target.User)
-	for _, stmt := range collector.GrantStatements(target.User, target.Databases) {
+	for _, stmt := range collector.GcpGrantStatements(target.User, target.Databases) {
 		fmt.Printf("     %s\n", stmt)
 	}
 }

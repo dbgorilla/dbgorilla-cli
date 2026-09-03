@@ -17,11 +17,8 @@ const (
 const componentEngine = "postgres"
 
 // commandCatalog is the ordered set of commands each engine supports; it is the
-// single source of truth for engine clamping and the interactive picker.
-//
-// MySQL (a Cloud SQL engine) has no entry: the collector's MySQL query-analysis
-// support is not modelled here yet, so a MySQL component gets no commands and,
-// on its own, leaves analysis off.
+// single source of truth for engine clamping and the interactive picker. MySQL
+// has no entry, so a MySQL component gets no commands.
 var commandCatalog = map[string][]string{
 	"postgres": {CmdExecuteQuery, CmdExplain},
 }

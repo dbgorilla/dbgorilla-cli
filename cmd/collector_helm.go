@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
 	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
@@ -153,23 +152,16 @@ func runHelmValues(cmd *cobra.Command, _ []string) error {
 	}
 
 	if !dryRun && existing == nil {
-		if _, err := requireAPIURL(cmd); err != nil {
-			return err
-		}
-		if _, err := requireLogin(); err != nil {
-			return err
-		}
-		if st, _ := collector.LoadState(); st != nil {
-			return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
-				st.AgentID)
-		}
-		client := newAPIClient(cmd)
-		supported, err := client.CollectorSupported()
+		apiURL, err := requireInstallSession(cmd)
 		if err != nil {
 			return err
 		}
-		if !supported {
-			return api.ErrCollectorUnsupported
+		if err := requireNoInstall(); err != nil {
+			return err
+		}
+		client, err := requireCollectorSupport(cmd, apiURL)
+		if err != nil {
+			return err
 		}
 		fmt.Println(style.Info("Provisioning collector identity..."))
 		creds, err := client.ProvisionCollector()

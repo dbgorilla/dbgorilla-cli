@@ -1,24 +1,22 @@
 # The DBGorilla collector on Google Cloud: a single-instance regional managed
 # instance group running the collector container on Container-Optimized OS,
-# deployed by Infrastructure Manager (or plain Terraform — nothing here is
-# IM-specific).
+# deployed by Infrastructure Manager (or plain Terraform).
 #
-# template-version: v1.0
+# template-version: v1.1
 #
-# This file is published, never embedded in the CLI: what a customer reviews
-# at the published address is exactly what their project deploys. Secrets
-# arrive as sensitive input variables and are stored in Secret Manager; the
-# instance fetches them at boot with its own service account, so they never
-# appear in instance metadata (which any project viewer can read). Be aware
-# that Infrastructure Manager itself retains input values on the deployment
-# resource and in its Terraform state, so they are also readable by principals
-# holding config.* read roles in the project — passing Secret Manager
-# REFERENCES instead of values is the planned hardening.
+# This file is published, never embedded in the CLI. Secrets arrive as
+# sensitive input variables and are stored in Secret Manager; the instance
+# fetches them at boot with its own service account, so they never appear in
+# instance metadata. Infrastructure Manager retains input values on the
+# deployment resource and in its Terraform state, readable by principals
+# holding config.* read roles.
 #
-# Naming contract with the CLI (do not change without a version bump): the
-# deployment's resources — the service account, the secrets, the MIG — are all
-# named by the local part of var.runtime_service_account, which the CLI sets
-# to the Infrastructure Manager deployment name.
+# Naming contract with the CLI (a change is a version bump): every resource is
+# named by the local part of var.runtime_service_account, which the CLI sets to
+# the deployment name.
+#
+# The instance has no public IP. Image pulls and the collector's connection to
+# DBGorilla need egress from the VPC (Cloud NAT, or an equivalent route).
 
 terraform {
   required_providers {
@@ -30,8 +28,6 @@ terraform {
 }
 
 locals {
-  # The CLI names the runtime service account "<deployment>@<project>.iam…",
-  # so its local part IS the deployment name.
   name    = split("@", var.runtime_service_account)[0]
   project = split(".", split("@", var.runtime_service_account)[1])[0]
 }
@@ -48,21 +44,16 @@ resource "google_service_account" "collector" {
   display_name = "DBGorilla collector"
 }
 
-# Read-only monitoring roles plus the connect roles both database services
-# gate their traffic on. Log writing lets the container's output reach Cloud
-# Logging for `dbg collector logs`.
+# Read-only monitoring roles, the connect and IAM-login roles of both database
+# services, and log writing for `dbg collector logs`.
 resource "google_project_iam_member" "collector" {
   for_each = toset([
     "roles/monitoring.viewer",
     "roles/cloudsql.viewer",
     "roles/cloudsql.client",
-    # cloudsql.client alone does NOT permit IAM database login; instanceUser
-    # carries cloudsql.instances.login (verified live: without it the server
-    # rejects with "Cloud SQL IAM service account authentication failed").
     "roles/cloudsql.instanceUser",
     "roles/alloydb.viewer",
     "roles/alloydb.client",
-    # The AlloyDB analogue of instanceUser, required for IAM auth there.
     "roles/alloydb.databaseUser",
     "roles/logging.logWriter",
   ])
@@ -111,34 +102,39 @@ resource "google_secret_manager_secret_iam_member" "db_password" {
 
 # --- the instance -----------------------------------------------------------
 
-# Boot flow: fetch both secrets with the VM's own token, then run the
-# collector container with them in its environment. The config arrives
-# base64-encoded in metadata (it holds no secrets) and is materialized to a
-# file the container reads.
+# Boot: fetch both secrets with the VM's own token (retrying while IAM
+# bindings propagate), materialize the config from metadata, run the
+# container. Secrets reach docker by variable name, never on a command line.
 locals {
   startup_script = <<-EOT
     #!/bin/bash
     set -euo pipefail
-    token=$(curl -s -H "Metadata-Flavor: Google" \
-      "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
-    fetch_secret() {
-      # The bearer token rides curl's stdin (-H @-), not its argv — argv is
-      # world-readable via /proc/*/cmdline.
-      printf 'Authorization: Bearer %s' "$token" | curl -s -H @- \
+    retry() {
+      local attempts=$1
+      shift
+      for ((i = 1; i <= attempts; i++)); do
+        "$@" && return 0
+        sleep 10
+      done
+      return 1
+    }
+    metadata() {
+      curl -sf -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/$1"
+    }
+    access_token() {
+      metadata instance/service-accounts/default/token \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+    }
+    secret() {
+      printf 'Authorization: Bearer %s' "$(access_token)" | curl -sf -H @- \
         "https://secretmanager.googleapis.com/v1/projects/${local.project}/secrets/$1/versions/latest:access" \
         | python3 -c 'import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)["payload"]["data"]).decode())'
     }
-    # Assigned before export (export VAR=$(...) would swallow the exit status
-    # under set -e) and passed to docker by NAME (-e VAR, no value): a value on
-    # the command line would sit in the docker client's argv.
-    DBG_SERVER_SECRET=$(fetch_secret "${local.name}-server-secret")
-    DBG_DB_PASSWORD=$(fetch_secret "${local.name}-db-password")
+    DBG_SERVER_SECRET=$(retry 30 secret "${local.name}-server-secret")
+    DBG_DB_PASSWORD=$(retry 30 secret "${local.name}-db-password")
     export DBG_SERVER_SECRET DBG_DB_PASSWORD
     mkdir -p /var/lib/dbgorilla
-    curl -s -H "Metadata-Flavor: Google" \
-      "http://metadata.google.internal/computeMetadata/v1/instance/attributes/collector-config" \
-      | base64 -d > /var/lib/dbgorilla/collector.toml
+    retry 30 metadata instance/attributes/collector-config | base64 -d > /var/lib/dbgorilla/collector.toml
     docker run -d --name dbg-collector --restart=always --network=host \
       -v /var/lib/dbgorilla/collector.toml:/etc/dbgorilla/collector.toml:ro \
       -e DBG_SERVER_SECRET \
@@ -160,10 +156,8 @@ resource "google_compute_instance_template" "collector" {
   }
 
   network_interface {
-    network = var.network
-    # Private-IP only: database access is over PSA/PSC, and egress to Google
-    # APIs rides Private Google Access. Public IPs are commonly banned by org
-    # policy (constraints/compute.vmExternalIpAccess).
+    network    = var.network
+    subnetwork = var.subnetwork == "" ? null : var.subnetwork
   }
 
   service_account {
@@ -172,10 +166,10 @@ resource "google_compute_instance_template" "collector" {
   }
 
   metadata = {
-    startup-script   = local.startup_script
-    collector-config = var.collector_config
-    # COS: keep the OS current between instance recreations.
-    cos-update-strategy = "update_enabled"
+    startup-script          = local.startup_script
+    collector-config        = var.collector_config
+    google-logging-enabled  = "true"
+    cos-update-strategy     = "update_enabled"
   }
 
   lifecycle {
@@ -184,7 +178,6 @@ resource "google_compute_instance_template" "collector" {
 }
 
 resource "google_compute_region_instance_group_manager" "collector" {
-  # GcpMigFor's naming contract: the MIG carries the deployment name.
   name               = local.name
   region             = var.region
   base_instance_name = local.name
@@ -195,12 +188,21 @@ resource "google_compute_region_instance_group_manager" "collector" {
   }
 
   update_policy {
-    type                    = "PROACTIVE"
-    minimal_action          = "REPLACE"
-    max_surge_fixed         = 0
-    max_unavailable_fixed   = 3
-    replacement_method      = "RECREATE"
+    type                  = "PROACTIVE"
+    minimal_action        = "REPLACE"
+    max_surge_fixed       = 0
+    max_unavailable_fixed = 3
+    replacement_method    = "RECREATE"
   }
+
+  # The instance reads its secrets at boot; do not start it before it may.
+  depends_on = [
+    google_project_iam_member.collector,
+    google_secret_manager_secret_version.server_secret,
+    google_secret_manager_secret_version.db_password,
+    google_secret_manager_secret_iam_member.server_secret,
+    google_secret_manager_secret_iam_member.db_password,
+  ]
 }
 
 output "instance_group" {

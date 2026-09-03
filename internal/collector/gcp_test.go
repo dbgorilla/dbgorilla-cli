@@ -9,9 +9,8 @@ import (
 
 // --- solo-target selection ---------------------------------------------------
 
-// The gcp listing feeds the shared selector: Cloud SQL instances first, then
-// AlloyDB clusters, each tagged with its provider type so a pick discovers the
-// right way.
+// Cloud SQL instances first, then AlloyDB clusters, each tagged with its
+// provider type.
 func TestListGcpCandidates_OrderAndKinds(t *testing.T) {
 	stubGCP(t, newGCPFake(t).
 		on("GET", "/v1/projects/p/instances", 200, sqlInstancesJSON(
@@ -19,10 +18,11 @@ func TestListGcpCandidates_OrderAndKinds(t *testing.T) {
 			sqlInstanceJSON("alpha-my", "MYSQL_8_0", ""),
 			sqlInstanceJSON("replica", "POSTGRES_16", "zeta-pg"), // replicas are never targets
 			sqlInstanceJSON("legacy-sqlserver", "SQLSERVER_2019_STANDARD", ""))).
-		on("GET", "/v1/projects/p/locations/-/clusters", 200,
-			`{"clusters":[{"name":"projects/p/locations/us-east1/clusters/orders"}]}`).
-		on("GET", "/v1/projects/p/locations/us-east1/clusters/orders/instances", 200,
-			`{"instances":[{"name":"projects/p/locations/us-east1/clusters/orders/instances/orders-primary","instanceType":"PRIMARY","ipAddress":"10.1.2.3"}]}`))
+		on("GET", "/v1/projects/p/locations/-/clusters/-/instances", 200,
+			`{"instances":[
+				{"name":"projects/p/locations/us-east1/clusters/orders/instances/orders-pool","instanceType":"READ_POOL","ipAddress":"10.1.2.9"},
+				{"name":"projects/p/locations/us-east1/clusters/orders/instances/orders-primary","instanceType":"PRIMARY","ipAddress":"10.1.2.3"}
+			]}`))
 	cfg, _ := loadGCPConfig(context.Background())
 	got, err := listGcpCandidates(context.Background(), cfg, "p", "")
 	if err != nil {
@@ -36,8 +36,6 @@ func TestListGcpCandidates_OrderAndKinds(t *testing.T) {
 	if !reflect.DeepEqual(got.choices, want) {
 		t.Fatalf("choices:\n got  %+v\n want %+v", got.choices, want)
 	}
-	// The location rides along with the AlloyDB choice, so discovery of a
-	// solo-selected cluster needs no second listing to find it again.
 	if got.locations["orders/orders-primary"] != "us-east1" {
 		t.Fatalf("locations: %v", got.locations)
 	}
@@ -45,8 +43,6 @@ func TestListGcpCandidates_OrderAndKinds(t *testing.T) {
 
 // --- Cloud SQL field mapping -------------------------------------------------
 
-// A dropped serverCaMode or a trimmed DNS name produces an install that deploys
-// cleanly and then fails TLS verification — these pins are the regression net.
 func TestMergeCloudSQLInstance_FieldByField(t *testing.T) {
 	info := &sqlInstanceInfo{
 		Name:            "prod-pg",
@@ -57,9 +53,7 @@ func TestMergeCloudSQLInstance_FieldByField(t *testing.T) {
 		Name           string `json:"name"`
 		ConnectionType string `json:"connectionType"`
 	}{
-		// PSC listed FIRST: the PSA mapping must win by connectionType, not
-		// list order — the PSC name resolves only through a customer-created
-		// endpoint the collector's VPC doesn't have.
+		// PSC listed first: the PSA mapping must win by connectionType.
 		{Name: "abc.def.us-central1.sql-psc.goog.", ConnectionType: "PRIVATE_SERVICE_CONNECT"},
 		{Name: "abc.def.us-central1.sql-psa.goog.", ConnectionType: "PRIVATE_SERVICES_ACCESS"},
 	}
@@ -81,9 +75,7 @@ func TestMergeCloudSQLInstance_FieldByField(t *testing.T) {
 	if got.Engine != "postgres" || got.Port != 5432 {
 		t.Fatalf("engine: %+v", got)
 	}
-	// The DNS name is what the server certificate attests — VERBATIM, trailing
-	// dot included. Trimming it broke live verify-full against Go's literal
-	// x509 hostname matching.
+	// The DNS name is what the certificate attests, trailing dot included.
 	if got.Host != "abc.def.us-central1.sql-psa.goog." {
 		t.Fatalf("host must be the verbatim DNS name, got %q", got.Host)
 	}
@@ -108,9 +100,6 @@ func TestMergeCloudSQLInstance_FallsBackToPrivateIPAndDefaultsTheCA(t *testing.T
 	if got.Host != "10.0.0.9" {
 		t.Fatalf("private IP must beat the public one, got %q", got.Host)
 	}
-	// An absent serverCaMode is the pre-CAS default: the per-instance internal
-	// CA. Reading it as anything else silently accepts token auth on a CA that
-	// cannot attest a hostname.
 	if got.ServerCaMode != "GOOGLE_MANAGED_INTERNAL_CA" {
 		t.Fatalf("absent CA mode must read as the internal CA, got %q", got.ServerCaMode)
 	}
@@ -197,16 +186,12 @@ func TestGcpComponent_AlloyDBNamesClusterAndPrimary(t *testing.T) {
 	if c.Provider.Cluster != "orders" || c.Provider.Instance != "orders-primary" {
 		t.Fatalf("provider block: %+v", c.Provider)
 	}
-	// AlloyDB IAM login mints with the alloydb.login scope; the collector
-	// refuses an alloydb gcp_iam component that doesn't say so.
 	if len(c.Auth.Scopes) != 1 || c.Auth.Scopes[0] != "https://www.googleapis.com/auth/alloydb.login" {
 		t.Fatalf("alloydb gcp_iam auth must carry the alloydb.login scope, got %v", c.Auth.Scopes)
 	}
 }
 
-// ssl_mode is engine-specific and the collector parses it strictly: the MySQL
-// engine refuses libpq's spellings at startup, so a mis-spelled mode is a
-// deploy that succeeds and then crash-loops.
+// The MySQL engine accepts only its own ssl_mode spellings.
 func TestGcpComponent_MySQLGetsMySQLSSLModeSpellings(t *testing.T) {
 	base := GcpTarget{
 		ProviderType: "cloud_sql", Project: "p", Region: "r", InstanceID: "i",
@@ -238,9 +223,7 @@ func TestGcpComponent_CloudSQLCarriesNoScopes(t *testing.T) {
 	}
 }
 
-// GcpConfigTOML must survive StrictParseConfig: UpdateComponents round-trips
-// the stored config through the strict parser, so any key the Config model
-// does not carry would turn every later update into a refusal.
+// Every key this CLI renders must survive StrictParseConfig.
 func TestGcpConfigTOML_RoundTripsThroughTheStrictParser(t *testing.T) {
 	rendered, err := GcpConfigTOML("agent123", "tenant123", []GcpTarget{
 		{
@@ -253,8 +236,6 @@ func TestGcpConfigTOML_RoundTripsThroughTheStrictParser(t *testing.T) {
 			AuthMethod: "password", User: "postgres",
 		},
 		{
-			// gcp_iam on alloydb renders the `scopes` key — it must survive
-			// the strict parser like every other rendered key.
 			ProviderType: "alloydb", Project: "p", Region: "r", ClusterID: "c2",
 			InstanceID: "c2-primary", Engine: "postgres", Host: "10.0.0.2", Port: 5432,
 			AuthMethod: "gcp_iam", User: "u",
@@ -281,10 +262,7 @@ func TestGcpConfigTOML_RoundTripsThroughTheStrictParser(t *testing.T) {
 	}
 }
 
-// MySQL spells the IAM flag with underscores (flags cannot contain dots on
-// MySQL); checking only the Postgres dot form made IAM look disabled on every
-// MySQL instance and the install refused with advice to enable a flag that
-// doesn't exist there. Review finding, 2026-09-02.
+// MySQL spells the IAM flag with underscores.
 func TestMergeCloudSQLInstance_MySQLIamFlagUnderscoreForm(t *testing.T) {
 	var info sqlInstanceInfo
 	info.Name = "prod-my"
@@ -301,5 +279,24 @@ func TestMergeCloudSQLInstance_MySQLIamFlagUnderscoreForm(t *testing.T) {
 	}
 	if !got.IamEnabled {
 		t.Fatalf("underscore-form IAM flag not detected: %+v", got)
+	}
+}
+
+// The GCP grant script has no CREATE USER (gcloud registers the user) and no
+// rds_iam (an RDS role); either would abort a paste run as one transaction.
+func TestGcpGrantStatements(t *testing.T) {
+	got := GcpGrantStatements("collector@p.iam", []string{"app"})
+	want := []string{
+		`GRANT pg_monitor TO "collector@p.iam";`,
+		`GRANT CONNECT ON DATABASE "app" TO "collector@p.iam";`,
+		`GRANT pg_read_all_data TO "collector@p.iam";`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GcpGrantStatements:\n got  %q\n want %q", got, want)
+	}
+	for _, s := range got {
+		if strings.Contains(s, "rds_iam") || strings.Contains(s, "CREATE USER") {
+			t.Fatalf("RDS-only statement in the GCP script: %s", s)
+		}
 	}
 }
