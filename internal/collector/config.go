@@ -141,6 +141,10 @@ type Auth struct {
 	Method   string `toml:"method"`
 	User     string `toml:"user"`
 	Password string `toml:"password,omitempty"`
+	// Scopes are extra OAuth token scopes the auth method must mint with.
+	// AlloyDB IAM login requires alloydb.login; the collector refuses an
+	// alloydb gcp_iam component without it.
+	Scopes []string `toml:"scopes,omitempty"`
 }
 
 // Connect is [component.connect].

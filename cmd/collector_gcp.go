@@ -250,6 +250,15 @@ func resolveGcpAuth(target *collector.GcpTarget, dbPassword, deploymentName, pro
 			"turn on the cloudsql.iam_authentication flag, or pass --db-password for password auth",
 			target.InstanceID)
 	}
+	// The collector's support matrix deliberately excludes mysql + cloud_sql +
+	// gcp_iam until its MySQL dial is live-proven against the PSA endpoint;
+	// rendering that combination installs a collector that refuses its own
+	// config at startup. Refuse here instead, where the operator can act.
+	if target.Engine == "mysql" && target.ProviderType == "cloud_sql" {
+		return fmt.Errorf("the collector does not support IAM database authentication for "+
+			"Cloud SQL MySQL yet — pass --db-password to use password auth for %q",
+			target.InstanceID)
+	}
 	target.AuthMethod = "gcp_iam"
 	sa := collector.GcpRuntimeServiceAccountFor(deploymentName, project)
 	target.User = collector.GcpDatabaseUserFor(sa, target.Engine)
