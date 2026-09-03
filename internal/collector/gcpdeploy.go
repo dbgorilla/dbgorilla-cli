@@ -30,6 +30,10 @@ var (
 	gcpDeployTimeout = 30 * time.Minute
 	gcpDeleteTimeout = 15 * time.Minute
 	gcpPollInterval  = 5 * time.Second
+	// gcpPollRequestTimeout bounds each poll GET. Without it a blackholed
+	// connection (NAT/proxy silently dropping an established flow) blocks the
+	// wait loop forever and the budget deadline is never consulted.
+	gcpPollRequestTimeout = 30 * time.Second
 )
 
 // GcpDeploy describes one Infrastructure Manager deployment of the collector.
@@ -278,7 +282,10 @@ func waitGcpOperation(ctx context.Context, cfg gcpConfig, op *gcpOperation, budg
 		case <-time.After(gcpPollInterval):
 		}
 		var next gcpOperation
-		if err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+op.Name, nil, &next); err != nil {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, gcpPollRequestTimeout)
+		err := gcpDo(pollCtx, cfg, http.MethodGet, infraManagerBase+"/"+op.Name, nil, &next)
+		cancelPoll()
+		if err != nil {
 			pollFailures++
 			if pollFailures >= maxConsecutivePollFailures {
 				return fmt.Errorf("polling operation %s failed %d times in a row: %v: %w",

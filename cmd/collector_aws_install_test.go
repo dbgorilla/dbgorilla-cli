@@ -297,8 +297,10 @@ func TestRunInstallAWS_VanishedStackInstallsFresh(t *testing.T) {
 	if deploys.count != 1 {
 		t.Errorf("want a fresh deploy, got %d", deploys.count)
 	}
-	// The old identity is still provisioned server-side; the user has to be told.
-	if !strings.Contains(out, "old-agent") || !strings.Contains(out, "uninstall") {
+	// The old identity is still provisioned server-side; the user has to be
+	// told — and pointed at the console, since the install overwrites the
+	// local record `uninstall` would need.
+	if !strings.Contains(out, "old-agent") || !strings.Contains(out, "console") {
 		t.Errorf("output should name the orphaned collector and how to remove it, got: %s", out)
 	}
 }

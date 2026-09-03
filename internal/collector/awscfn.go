@@ -100,7 +100,10 @@ func (d FargateDeploy) deploy(ctx context.Context) error {
 			}
 			// fall through to CreateStack below
 		case stackInProgress(status):
-			return fmt.Errorf("stack %q is %s — another operation is already in progress; wait for it to finish and re-run", d.StackName, status)
+			// Tagged ErrDeployBusy so the shared install spine's no-rollback
+			// branch holds for AWS too: DeleteStack on a CREATE_IN_PROGRESS
+			// stack CANCELS it — the opposite of "wait for it to finish".
+			return fmt.Errorf("stack %q is %s — another operation is already in progress; wait for it to finish and re-run: %w", d.StackName, status, ErrDeployBusy)
 		default:
 			// Healthy stack: update in place (a matching re-run is a no-op success).
 			if err := updateStack(ctx, client, d.StackName, tmpl, params); err != nil && !errors.Is(err, errNoStackUpdates) {

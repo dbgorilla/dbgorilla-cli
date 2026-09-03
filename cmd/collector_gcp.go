@@ -179,6 +179,12 @@ func runInstallGCP(cmd *cobra.Command) error {
 		CommandsEnabled: commandsEnabled,
 	})
 	if err != nil {
+		// The identity was minted moments ago and no state exists yet —
+		// returning without deprovisioning would leave an agent invisible to
+		// both `status` and `uninstall`.
+		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
+		}
 		return err
 	}
 
@@ -245,19 +251,26 @@ func resolveGcpAuth(target *collector.GcpTarget, dbPassword, deploymentName, pro
 		target.AuthMethod = "password"
 		return nil
 	}
+	// The collector's support matrix deliberately excludes mysql + cloud_sql +
+	// gcp_iam until its MySQL dial is live-proven against the PSA endpoint;
+	// rendering that combination installs a collector that refuses its own
+	// config at startup. Refuse here instead, where the operator can act — and
+	// BEFORE the IAM-enabled check: telling a MySQL operator to enable the
+	// (Postgres-spelled) flag would send them through an instance restart into
+	// this same refusal.
+	if target.Engine == "mysql" && target.ProviderType == "cloud_sql" {
+		return fmt.Errorf("the collector does not support IAM database authentication for "+
+			"Cloud SQL MySQL yet — pass --db-password to use password auth for %q",
+			target.InstanceID)
+	}
 	if !target.IamEnabled {
 		return fmt.Errorf("Cloud SQL instance %q does not have IAM database authentication enabled — "+
 			"turn on the cloudsql.iam_authentication flag, or pass --db-password for password auth",
 			target.InstanceID)
 	}
-	// The collector's support matrix deliberately excludes mysql + cloud_sql +
-	// gcp_iam until its MySQL dial is live-proven against the PSA endpoint;
-	// rendering that combination installs a collector that refuses its own
-	// config at startup. Refuse here instead, where the operator can act.
-	if target.Engine == "mysql" && target.ProviderType == "cloud_sql" {
-		return fmt.Errorf("the collector does not support IAM database authentication for "+
-			"Cloud SQL MySQL yet — pass --db-password to use password auth for %q",
-			target.InstanceID)
+	if target.User != "" {
+		fmt.Println(style.Warn("⚠  --db-user only applies to password auth — IAM auth derives the " +
+			"database user from the runtime service account; ignoring it"))
 	}
 	target.AuthMethod = "gcp_iam"
 	sa := collector.GcpRuntimeServiceAccountFor(deploymentName, project)

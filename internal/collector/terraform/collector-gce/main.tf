@@ -123,20 +123,26 @@ locals {
       "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
       | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
     fetch_secret() {
-      curl -s -H "Authorization: Bearer $token" \
+      # The bearer token rides curl's stdin (-H @-), not its argv — argv is
+      # world-readable via /proc/*/cmdline.
+      printf 'Authorization: Bearer %s' "$token" | curl -s -H @- \
         "https://secretmanager.googleapis.com/v1/projects/${local.project}/secrets/$1/versions/latest:access" \
         | python3 -c 'import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)["payload"]["data"]).decode())'
     }
+    # Assigned before export (export VAR=$(...) would swallow the exit status
+    # under set -e) and passed to docker by NAME (-e VAR, no value): a value on
+    # the command line would sit in the docker client's argv.
     DBG_SERVER_SECRET=$(fetch_secret "${local.name}-server-secret")
     DBG_DB_PASSWORD=$(fetch_secret "${local.name}-db-password")
+    export DBG_SERVER_SECRET DBG_DB_PASSWORD
     mkdir -p /var/lib/dbgorilla
     curl -s -H "Metadata-Flavor: Google" \
       "http://metadata.google.internal/computeMetadata/v1/instance/attributes/collector-config" \
       | base64 -d > /var/lib/dbgorilla/collector.toml
     docker run -d --name dbg-collector --restart=always --network=host \
       -v /var/lib/dbgorilla/collector.toml:/etc/dbgorilla/collector.toml:ro \
-      -e DBG_SERVER_SECRET="$DBG_SERVER_SECRET" \
-      -e DBG_DB_PASSWORD="$DBG_DB_PASSWORD" \
+      -e DBG_SERVER_SECRET \
+      -e DBG_DB_PASSWORD \
       "${var.collector_image}" --config-file /etc/dbgorilla/collector.toml
   EOT
 }

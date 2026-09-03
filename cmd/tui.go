@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"os"
 
@@ -84,10 +85,16 @@ func withSpinner(title string, action func() error) error {
 		return action()
 	}
 	var err error
-	_ = spinner.New().
+	// Run's own error is a Ctrl-C interrupt: the action goroutine was
+	// abandoned mid-flight, so its (still nil) err must never read as success
+	// — callers sequence destructive steps behind this return, and an
+	// uninstall interrupted here once printed "deleted" for a live deployment.
+	if rerr := spinner.New().
 		Title(" " + title).
 		Style(lipgloss.NewStyle()). // default text color, not huh's red accent
 		Action(func() { err = action() }).
-		Run()
+		Run(); rerr != nil {
+		return fmt.Errorf("interrupted — the last step may or may not have completed; check with `dbg collector status`: %w", rerr)
+	}
 	return err
 }
