@@ -611,6 +611,20 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 		}
 	})
 
+	t.Run("IAM on the internal per-instance CA is refused with the ways out", func(t *testing.T) {
+		// The collector refuses this by name at discovery; the install must
+		// refuse first, where the operator can act.
+		target := completeGcpTarget()
+		target.ServerCaMode = "GOOGLE_MANAGED_INTERNAL_CA"
+		c, _ := setup(t, target)
+		var err error
+		capture(t, func() { err = runInstallGCP(c) })
+		if err == nil || !strings.Contains(err.Error(), "GOOGLE_MANAGED_CAS_CA") ||
+			!strings.Contains(err.Error(), "--db-password") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
 	t.Run("MySQL without the flag gets the MySQL refusal, not the Postgres flag advice", func(t *testing.T) {
 		target := completeGcpTarget()
 		target.Engine, target.Port, target.IamEnabled = "mysql", 3306, false
