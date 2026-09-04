@@ -26,6 +26,7 @@ func stubGCPOK(t *testing.T) {
 	stubGcpProject(t, "acme-prod", nil)
 	stubGcpDeploymentStatus(t, "", nil)
 	stubResolveGcpSubnetwork(t, "", nil)
+	stubGcpSubnetworkPGA(t, true, nil)
 	stubRemoteDigest(t, nil)
 }
 
@@ -34,6 +35,15 @@ func stubResolveGcpSubnetwork(t *testing.T, subnetwork string, err error) {
 	orig := resolveGcpSubnetwork
 	resolveGcpSubnetwork = func(string, string) (string, error) { return subnetwork, err }
 	t.Cleanup(func() { resolveGcpSubnetwork = orig })
+}
+
+func stubGcpSubnetworkPGA(t *testing.T, enabled bool, err error) {
+	t.Helper()
+	orig := gcpSubnetworkPGA
+	gcpSubnetworkPGA = func(_, subnetwork, _ string) (bool, string, error) {
+		return enabled, subnetwork, err
+	}
+	t.Cleanup(func() { gcpSubnetworkPGA = orig })
 }
 
 func stubGcpAvailable(t *testing.T, err error) *int {
@@ -655,6 +665,38 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 			t.Errorf("MySQL IAM user is the local part of the service account:\n%s", cfg)
 		}
 	})
+}
+
+// The PGA preflight warns — and only warns — when the subnetwork cannot reach
+// Google APIs privately: a Cloud NAT may still provide the egress, so the
+// deploy proceeds, but the operator gets the enable command by name instead
+// of an opaque boot timeout.
+func TestRunInstallGCP_WarnsWhenPrivateGoogleAccessIsOff(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubGCPOK(t)
+	stubGcpSubnetworkPGA(t, false, nil)
+	stubGcpDiscover(t, completeGcpTarget(), nil)
+	deploys := stubGcpDeploy(t, nil)
+	srv := installServer(t, "agent-gcp")
+	defer srv.Close()
+
+	c := gcpCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "yes", "true")
+
+	var err error
+	out := capture(t, func() { err = runInstallGCP(c) })
+	if err != nil {
+		t.Fatalf("runInstallGCP: %v\n%s", err, out)
+	}
+	if deploys.count != 1 {
+		t.Fatal("the PGA warning must not block the deploy")
+	}
+	if !strings.Contains(out, "Private Google Access OFF") ||
+		!strings.Contains(out, "--enable-private-ip-google-access") {
+		t.Errorf("expected the PGA warning with the enable command, got:\n%s", out)
+	}
 }
 
 // The query-analysis flags apply to gcp exactly as to aws.

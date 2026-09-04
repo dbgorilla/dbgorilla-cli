@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
@@ -19,6 +20,7 @@ var (
 	gcpProject           = collector.GcpProject
 	discoverGcpTarget    = collector.DiscoverGcpTarget
 	resolveGcpSubnetwork = collector.ResolveGcpSubnetwork
+	gcpSubnetworkPGA     = collector.SubnetworkPrivateGoogleAccess
 	gcpDeploymentStatus  = collector.GcpDeploymentStatus
 	deleteGcpDeployment  = collector.DeleteGcpDeployment
 	scaleGcpMig          = collector.ScaleGcpMig
@@ -155,6 +157,17 @@ func runInstallGCP(cmd *cobra.Command) error {
 			return err
 		}
 	}
+	// Preflight, not a gate: without Private Google Access the instance's boot
+	// script cannot fetch its secrets or pull the image, and the failure is an
+	// opaque startup timeout the CLI never sees. A Cloud NAT also provides the
+	// egress, so an off flag only warns.
+	if pga, subnetPath, perr := gcpSubnetworkPGA(network, subnetwork, target.Region); perr == nil && !pga {
+		fmt.Println(style.Warn(fmt.Sprintf(
+			"⚠  subnetwork %s has Private Google Access OFF — without it (or a Cloud NAT) the "+
+				"instance cannot reach Secret Manager or the registry at boot. Enable it with:\n"+
+				"   gcloud compute networks subnets update %s --region=%s --enable-private-ip-google-access",
+			subnetPath, lastPathSegmentOf(subnetPath), target.Region)))
+	}
 
 	targets := []collector.GcpTarget{target}
 	commandsEnabled := resolveCommands(cmd, targets, gcpTargetLabel)
@@ -252,6 +265,15 @@ func runInstallGCP(cmd *cobra.Command) error {
 	printGcpGrantGuidance(target, deploymentName, project)
 	fmt.Println("\nConfirm it connected with: dbg collector status")
 	return nil
+}
+
+// lastPathSegmentOf trims a resource path to its final name segment, for
+// messages that quote a runnable gcloud command.
+func lastPathSegmentOf(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 // resolveGcpTarget picks and completes the database target. An ambiguous

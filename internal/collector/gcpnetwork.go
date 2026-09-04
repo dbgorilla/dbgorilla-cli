@@ -70,3 +70,36 @@ func ResolveGcpSubnetwork(network, region string) (string, error) {
 	return "", fmt.Errorf("VPC %q has several subnetworks in %s (%s); pass --subnetwork to choose one",
 		network, region, strings.Join(names, ", "))
 }
+
+// SubnetworkPrivateGoogleAccess reports whether the subnetwork the collector
+// instance will join has Private Google Access enabled, and the subnetwork
+// path it checked. The instance has no external address, so without PGA (or a
+// Cloud NAT) its boot script cannot reach Secret Manager or the registry —
+// the failure is an opaque startup-script timeout the CLI never sees.
+// `subnetwork` may be empty (an auto-mode VPC): the auto subnet in `region`
+// carries the network's name. Best-effort — a lookup error is the caller's to
+// ignore, since this is a preflight, not a gate.
+func SubnetworkPrivateGoogleAccess(network, subnetwork, region string) (bool, string, error) {
+	ctx := context.Background()
+	cfg, err := loadGCPConfig(ctx)
+	if err != nil {
+		return false, "", gcpCredsErr(err)
+	}
+	path := subnetwork
+	if path == "" {
+		project := alloydbPathSegment(network, "projects")
+		name := lastPathSegment(network)
+		if project == "" || name == "" {
+			return false, "", fmt.Errorf("network %q is not a projects/<project>/global/networks/<name> path", network)
+		}
+		path = fmt.Sprintf("projects/%s/regions/%s/subnetworks/%s",
+			url.PathEscape(project), url.PathEscape(region), url.PathEscape(name))
+	}
+	var sub struct {
+		PrivateIPGoogleAccess bool `json:"privateIpGoogleAccess"`
+	}
+	if err := gcpDo(ctx, cfg, http.MethodGet, computeBase+"/"+path, nil, &sub); err != nil {
+		return false, path, err
+	}
+	return sub.PrivateIPGoogleAccess, path, nil
+}

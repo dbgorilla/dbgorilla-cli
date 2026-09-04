@@ -183,6 +183,13 @@ resource "google_compute_region_instance_group_manager" "collector" {
   base_instance_name = local.name
   target_size        = 1
 
+  # A zonal capacity stockout must not brick the deploy. The default EVEN
+  # shape pins the single instance to its assigned zone and recreates it there
+  # forever (observed live 2026-09-03: us-central1-f out of e2-small, the
+  # group never converged and no CLI lever could move it). ANY lets a recreate
+  # land in whichever zone has capacity.
+  distribution_policy_target_shape = "ANY"
+
   version {
     instance_template = google_compute_instance_template.collector.id
   }
