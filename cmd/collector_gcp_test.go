@@ -223,7 +223,7 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 			t.Errorf("config missing %s:\n%s", want, cfg)
 		}
 	}
-	if strings.Contains(cfg, "sek") || d.Inputs["server_secret"] != "sek" {
+	if strings.Contains(cfg, "sek") || d.Secrets["server_secret"] != "sek" {
 		t.Error("the server secret rides its own input, never the config")
 	}
 	if !strings.Contains(d.Inputs["collector_image"], "@sha256:") {
@@ -596,7 +596,7 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 				t.Errorf("config missing %s:\n%s", want, cfg)
 			}
 		}
-		if deploys.deploy.Inputs["db_password"] != "s3cret" || strings.Contains(cfg, "s3cret") {
+		if deploys.deploy.Secrets["db_password"] != "s3cret" || strings.Contains(cfg, "s3cret") {
 			t.Error("the password rides its own input, never the config")
 		}
 		if strings.Contains(out, "Grant the collector") {

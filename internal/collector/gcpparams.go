@@ -13,18 +13,23 @@ const DefaultGcpDeploymentName = "dbgorilla-collector"
 // metadata (the per-value limit is 256KiB).
 const gceMetadataConfigLimit = 245760
 
-// gcpInputKeys is the template's input-variable contract; TestGcpTemplateContract
-// pins it against variables.tf.
+// gcpInputKeys and GcpSecretInputKeys together are the template's
+// input-variable contract; TestGcpTemplateContract pins their union against
+// variables.tf. They are split because the two maps GcpDeployInputs returns
+// must never mix: the non-secret map is printable (dry runs), the secret map
+// is merged into the request only at send time.
 var gcpInputKeys = []string{
 	"collector_config",
 	"collector_image",
-	"db_password",
 	"network",
 	"region",
 	"runtime_service_account",
-	"server_secret",
 	"subnetwork",
 }
+
+// GcpSecretInputKeys are the template inputs that carry credentials. A dry
+// run prints their presence, never their values.
+var GcpSecretInputKeys = []string{"db_password", "server_secret"}
 
 // GcpRuntimeServiceAccountFor is the service account the template creates for
 // the collector VM. The IAM database user derives from it before it exists.
@@ -64,24 +69,31 @@ type GcpStackInput struct {
 	CommandsEnabled bool
 }
 
-// GcpDeployInputs renders the template's input variables.
-func GcpDeployInputs(in GcpStackInput) (map[string]string, error) {
+// GcpDeployInputs renders the template's input variables as two maps: the
+// printable inputs, and the secrets. Secrets are kept out of the first map by
+// construction — a dry run prints it wholesale, and a map that ever held a
+// credential can't be proven clean by inspection (or by a taint analysis) —
+// so the only place the two meet is the deploy request body.
+func GcpDeployInputs(in GcpStackInput) (inputs, secrets map[string]string, err error) {
 	configTOML, err := GcpConfigTOML(in.AgentID, in.TenantID, in.Targets, in.Endpoints, in.CommandsEnabled)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	encoded, err := encodeConfigLimited(configTOML, gceMetadataConfigLimit, "a GCE metadata value")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return map[string]string{
+	inputs = map[string]string{
 		"collector_config":        encoded,
 		"collector_image":         in.Image,
-		"db_password":             in.DBPassword,
 		"network":                 in.Network,
 		"region":                  in.Region,
 		"runtime_service_account": GcpRuntimeServiceAccountFor(in.DeploymentName, in.Project),
-		"server_secret":           in.ServerSecret,
 		"subnetwork":              in.Subnetwork,
-	}, nil
+	}
+	secrets = map[string]string{
+		"db_password":   in.DBPassword,
+		"server_secret": in.ServerSecret,
+	}
+	return inputs, secrets, nil
 }
