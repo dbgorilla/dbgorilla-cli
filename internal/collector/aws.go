@@ -114,11 +114,11 @@ func checkEngine(engine, id string) error {
 // Discovered fields fill only what the AwsTarget leaves unset — explicit wins.
 func DiscoverAwsTarget(id, providerHint string, into AwsTarget) (AwsTarget, error) {
 	if id == "" {
-		soloID, kind, err := soloTarget()
+		choice, err := soloTarget()
 		if err != nil {
 			return into, err
 		}
-		id, providerHint = soloID, kind
+		id, providerHint = choice.ID, choice.ProviderType
 	}
 
 	switch providerHint {
@@ -328,90 +328,39 @@ func mergeCluster(into AwsTarget, c *rdsCluster, subnets []string) AwsTarget {
 }
 
 // soloTarget auto-selects the single monitorable database — a Postgres RDS
-// instance or an Aurora cluster — returning its id and provider kind. Errors on
-// none or more than one (never guesses; the caller passes --db-instance-id to
-// disambiguate).
-func soloTarget() (id, kind string, err error) {
+// instance or an Aurora cluster. Errors on none or more than one (never
+// guesses; the caller passes --db-instance-id to disambiguate). Candidates are
+// listed in a stable order: RDS instances first, then Aurora clusters.
+func soloTarget() (TargetChoice, error) {
 	ctx := context.Background()
 	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
-		return "", "", err
+		return TargetChoice{}, err
 	}
 	client := rds.NewFromConfig(cfg)
 
 	instOut, err := client.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{})
 	if err != nil {
-		return "", "", fmt.Errorf("could not list RDS instances (check AWS permissions): %w", err)
+		return TargetChoice{}, fmt.Errorf("could not list RDS instances (check AWS permissions): %w", err)
 	}
-	var instances []string
+	var choices []TargetChoice
 	for _, in := range instOut.DBInstances {
 		if strings.HasPrefix(aws.ToString(in.Engine), "postgres") {
-			instances = append(instances, aws.ToString(in.DBInstanceIdentifier))
+			choices = append(choices, TargetChoice{ID: aws.ToString(in.DBInstanceIdentifier), ProviderType: "aws_rds"})
 		}
 	}
 
 	clOut, err := client.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{})
 	if err != nil {
-		return "", "", fmt.Errorf("could not list Aurora clusters: %w", err)
+		return TargetChoice{}, fmt.Errorf("could not list Aurora clusters: %w", err)
 	}
-	var clusters []string
 	for _, cl := range clOut.DBClusters {
 		if aws.ToString(cl.Engine) == "aurora-postgresql" {
-			clusters = append(clusters, aws.ToString(cl.DBClusterIdentifier))
+			choices = append(choices, TargetChoice{ID: aws.ToString(cl.DBClusterIdentifier), ProviderType: "aws_aurora"})
 		}
 	}
-	return selectSolo(instances, clusters)
-}
-
-// TargetChoice is one candidate database the auto-selector found: its id and
-// which provider (aws_rds / aws_aurora) it belongs to.
-type TargetChoice struct {
-	ID           string
-	ProviderType string
-}
-
-// AmbiguousTargetError is returned when auto-selection finds more than one
-// monitorable database. It carries the candidates so an interactive caller can
-// offer a picker; a non-interactive caller just surfaces Error() and the user
-// re-runs with --db-instance-id. Kept a distinct type so the command layer can
-// errors.As it without string-matching.
-type AmbiguousTargetError struct {
-	Instances []string // RDS Postgres instance ids
-	Clusters  []string // Aurora Postgres cluster ids
-}
-
-func (e *AmbiguousTargetError) Error() string {
-	return fmt.Sprintf("found multiple databases (RDS %v, Aurora %v); pass --db-instance-id to choose one",
-		e.Instances, e.Clusters)
-}
-
-// Candidates returns the choices in a stable order (RDS instances first, then
-// Aurora clusters), for display in a picker.
-func (e *AmbiguousTargetError) Candidates() []TargetChoice {
-	cs := make([]TargetChoice, 0, len(e.Instances)+len(e.Clusters))
-	for _, id := range e.Instances {
-		cs = append(cs, TargetChoice{ID: id, ProviderType: "aws_rds"})
-	}
-	for _, id := range e.Clusters {
-		cs = append(cs, TargetChoice{ID: id, ProviderType: "aws_aurora"})
-	}
-	return cs
-}
-
-// selectSolo picks the single instance-or-cluster from the two id lists, tagging
-// its provider kind. Returns an *AmbiguousTargetError on more than one (so an
-// interactive caller can prompt) and a plain error on none. Pure, for testability.
-func selectSolo(instances, clusters []string) (id, kind string, err error) {
-	switch total := len(instances) + len(clusters); {
-	case total == 0:
-		return "", "", fmt.Errorf("no PostgreSQL RDS instances or Aurora clusters found in this region; pass --db-instance-id")
-	case total > 1:
-		return "", "", &AmbiguousTargetError{Instances: instances, Clusters: clusters}
-	case len(instances) == 1:
-		return instances[0], "aws_rds", nil
-	default:
-		return clusters[0], "aws_aurora", nil
-	}
+	return selectSolo(choices, errors.New(
+		"no PostgreSQL RDS instances or Aurora clusters found in this region; pass --db-instance-id"))
 }
 
 // describeInstance reads one RDS instance's details.
@@ -488,18 +437,7 @@ const maxConfigParamBytes = 4096
 // awsConfigTOML renders the collector's TOML config for the Fargate target: the
 // [dbgorilla] identity block plus one [[component]] per monitored database.
 func awsConfigTOML(agentID, tenantID, region string, targets []AwsTarget, eps Endpoints, commandsEnabled bool) (string, error) {
-	cfg := Config{
-		Dbgorilla: Dbgorilla{
-			AgentID:      agentID,
-			TenantID:     tenantID,
-			Secret:       "${" + SecretEnv + "}",
-			OpampBaseURL: eps.OpampBaseURL,
-			OtlpBaseURL:  eps.OtlpBaseURL,
-			AuthBaseURL:  eps.AuthBaseURL,
-		},
-		Topology: Topology{Interval: "60s"},
-		Commands: Commands{Enabled: commandsEnabled},
-	}
+	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
 	for _, t := range targets {
 		cfg.Component = append(cfg.Component, awsComponent(t, region))
 	}
@@ -524,7 +462,8 @@ func awsComponent(t AwsTarget, region string) Component {
 	auth := Auth{Method: "iam", User: orDefault(t.User, DefaultDBUser)}
 	if t.AuthMethod == "password" {
 		auth.Method = "password"
-		auth.Password = "${" + AwsDBPasswordEnv + "}"
+		auth.Password = "${" + CloudDBPasswordEnv + "}"
+
 	}
 	// No ca_cert: the collector image trusts the Amazon RDS roots system-wide
 	// (0.3.2+), so verification works the same under password auth as under IAM.
@@ -566,29 +505,34 @@ type AwsStackInput struct {
 }
 
 // AwsStackParams renders the CloudFormation parameter set for the collector
-// stack. The monitored databases ride in two of them — the base64 config and
-// the matching rds-db:connect grants — which is what keeps the template static
-// and publishable.
-func AwsStackParams(in AwsStackInput) (map[string]string, error) {
+// stack as two maps: the printable parameters, and the secrets. The monitored
+// databases ride in two of the former — the base64 config and the matching
+// rds-db:connect grants — which is what keeps the template static and
+// publishable. Secrets are kept out of the printable map by construction
+// (a dry run prints it wholesale); the two meet only in the stack request.
+func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err error) {
 	configTOML, err := awsConfigTOML(in.AgentID, in.TenantID, in.Region, in.Targets, in.Endpoints, in.CommandsEnabled)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	encoded, err := EncodeConfig(configTOML)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	arns := rdsConnectParam(in.Targets, in.Region, in.AccountID)
-	return map[string]string{
+	params = map[string]string{
 		configParamKey:     encoded,
 		rdsConnectParamKey: strings.Join(arns, ","),
-		"ServerSecret":     in.ServerSecret,
-		"DbPassword":       in.DBPassword,
 		"CollectorImage":   in.Image,
 		"Subnets":          strings.Join(in.Subnets, ","),
 		"SecurityGroupId":  in.SecurityGroup,
 		"AssignPublicIp":   in.AssignPublicIP,
-	}, nil
+	}
+	secrets = map[string]string{
+		"ServerSecret": in.ServerSecret,
+		"DbPassword":   in.DBPassword,
+	}
+	return params, secrets, nil
 }
 
 // CompactConfig strips whole-line comments and blank lines from a collector
@@ -622,12 +566,18 @@ func CompactConfig(configTOML string) string {
 // limit. Single-line, unpadded-safe standard encoding, matching the template's
 // AllowedPattern.
 func EncodeConfig(configTOML string) (string, error) {
+	return encodeConfigLimited(configTOML, maxConfigParamBytes, "a CloudFormation parameter")
+}
+
+// encodeConfigLimited base64-encodes the config against a target's own limit,
+// naming the carrier in the error.
+func encodeConfigLimited(configTOML string, limit int, carrier string) (string, error) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(configTOML))
-	if len(encoded) > maxConfigParamBytes {
+	if len(encoded) > limit {
 		return "", fmt.Errorf(
-			"collector config is too large for a CloudFormation parameter: %d bytes encoded, limit is %d. "+
+			"collector config is too large for %s: %d bytes encoded, limit is %d. "+
 				"Monitor fewer databases per collector, or split them across two installs",
-			len(encoded), maxConfigParamBytes)
+			carrier, len(encoded), limit)
 	}
 	return encoded, nil
 }
@@ -751,7 +701,10 @@ func quoteIdent(s string) string {
 type FargateDeploy struct {
 	StackName string
 	Params    map[string]string
-	DryRun    bool // validate the template without creating/updating anything
+	// Secrets are the credential parameters, kept apart from Params so nothing
+	// that prints Params can ever print them; they merge only in the request.
+	Secrets map[string]string
+	DryRun  bool // validate the template without creating/updating anything
 	// TemplateURL overrides the published template this deploy uses. Empty means
 	// the version-pinned default. Either way it must be reachable — there is no
 	// local copy to fall back to.

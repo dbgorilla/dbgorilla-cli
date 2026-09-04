@@ -6,23 +6,23 @@ import (
 	"testing"
 )
 
-func TestAwsCommandsFor(t *testing.T) {
+func TestCommandsFor(t *testing.T) {
 	all := []string{CmdExecuteQuery, CmdExplain}
 
 	// Empty request -> all supported, in catalog order.
-	if got := AwsCommandsFor(nil); !reflect.DeepEqual(got, all) {
+	if got := CommandsFor("postgres", nil); !reflect.DeepEqual(got, all) {
 		t.Errorf("empty request = %v, want all %v", got, all)
 	}
 	// A subset is preserved but reordered to catalog order and de-duped.
-	if got := AwsCommandsFor([]string{"explain", "explain", "execute_query"}); !reflect.DeepEqual(got, all) {
+	if got := CommandsFor("postgres", []string{"explain", "explain", "execute_query"}); !reflect.DeepEqual(got, all) {
 		t.Errorf("subset = %v, want catalog-ordered %v", got, all)
 	}
 	// Unknown commands are dropped (engine clamping).
-	if got := AwsCommandsFor([]string{"explain", "drop_table"}); !reflect.DeepEqual(got, []string{CmdExplain}) {
+	if got := CommandsFor("postgres", []string{"explain", "drop_table"}); !reflect.DeepEqual(got, []string{CmdExplain}) {
 		t.Errorf("clamp = %v, want [explain]", got)
 	}
 	// Whitespace around a value is tolerated.
-	if got := AwsCommandsFor([]string{" execute_query "}); !reflect.DeepEqual(got, []string{CmdExecuteQuery}) {
+	if got := CommandsFor("postgres", []string{" execute_query "}); !reflect.DeepEqual(got, []string{CmdExecuteQuery}) {
 		t.Errorf("trim = %v, want [execute_query]", got)
 	}
 }

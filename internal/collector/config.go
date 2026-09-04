@@ -25,11 +25,11 @@ const (
 	SecretEnv     = "DBG_SERVER_SECRET"
 	DBPasswordEnv = "COLLECTOR_DB_PASSWORD"
 
-	// AwsDBPasswordEnv is the password reference for the aws target. It differs
-	// from DBPasswordEnv because the Fargate task definition names the variable
-	// itself (fed from Secrets Manager), while the docker target names it in the
-	// env-file it writes.
-	AwsDBPasswordEnv = "DBG_DB_PASSWORD"
+	// CloudDBPasswordEnv is the password reference for the cloud targets (aws,
+	// gcp). It differs from DBPasswordEnv because the deployment names the
+	// variable itself (fed from Secrets Manager / Secret Manager), while the
+	// docker target names it in the env-file it writes.
+	CloudDBPasswordEnv = "DBG_DB_PASSWORD"
 
 	// DockerHostInternal is the hostname that resolves to the Docker host from
 	// inside a container (native on Docker Desktop; on Linux we add an
@@ -72,8 +72,10 @@ type Component struct {
 
 // Provider is [component.provider]. self_hosted carries no extra fields; the
 // aws_rds / aws_aurora providers add the region and the instance or cluster id
-// (exactly one of the two); cnpg adds the Kubernetes namespace and
-// CloudNativePG Cluster name.
+// (exactly one of the two, per the collector's provider contract); the
+// cloud_sql / alloydb providers add the GCP project + region and the instance
+// (cloud_sql) or cluster + primary instance (alloydb); cnpg adds the
+// Kubernetes namespace and CloudNativePG Cluster name.
 type Provider struct {
 	Type       string `toml:"type"`
 	Region     string `toml:"region,omitempty"`
@@ -81,8 +83,13 @@ type Provider struct {
 	ClusterID  string `toml:"cluster_id,omitempty"`
 	RoleArn    string `toml:"role_arn,omitempty"`
 
-	// cnpg. Namespace + Cluster are the whole of the component's identity: the
-	// collector keys it as cnpg:{namespace}/{cluster}, deliberately excluding the
+	// gcp (cloud_sql / alloydb): the collector's own keys, which differ from the
+	// AWS spellings above. alloydb pairs Instance with the shared Cluster.
+	Project  string `toml:"project,omitempty"`
+	Instance string `toml:"instance,omitempty"`
+
+	// cnpg (Namespace + the shared Cluster below); they are the whole of the
+	// component's identity: the collector keys it as cnpg:{namespace}/{cluster}, deliberately excluding the
 	// instance so a failover -- the event the operator exists to handle -- does
 	// not re-key the component and detach its history.
 	Namespace string `toml:"namespace,omitempty"`
@@ -133,6 +140,9 @@ type Auth struct {
 	Method   string `toml:"method"`
 	User     string `toml:"user"`
 	Password string `toml:"password,omitempty"`
+	// Scopes are extra OAuth token scopes the auth method mints with (AlloyDB
+	// IAM login needs alloydb.login).
+	Scopes []string `toml:"scopes,omitempty"`
 }
 
 // Connect is [component.connect].
@@ -197,34 +207,24 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 	if sslMode == "" {
 		sslMode = "verify-full"
 	}
-	return Config{
-		Dbgorilla: Dbgorilla{
-			AgentID:      agentID,
-			TenantID:     tenantID,
-			Secret:       "${" + SecretEnv + "}",
-			OpampBaseURL: eps.OpampBaseURL,
-			OtlpBaseURL:  eps.OtlpBaseURL,
-			AuthBaseURL:  eps.AuthBaseURL,
+	cfg := baseConfig(agentID, tenantID, eps, false)
+	cfg.Component = []Component{{
+		Name:     target.Name,
+		Engine:   "postgres",
+		Provider: Provider{Type: "self_hosted"},
+		Auth: Auth{
+			Method:   "password",
+			User:     target.User,
+			Password: "${" + DBPasswordEnv + "}",
 		},
-		Component: []Component{{
-			Name:     target.Name,
-			Engine:   "postgres",
-			Provider: Provider{Type: "self_hosted"},
-			Auth: Auth{
-				Method:   "password",
-				User:     target.User,
-				Password: "${" + DBPasswordEnv + "}",
-			},
-			Connect: Connect{
-				Host:      connectHost,
-				Port:      target.Port,
-				Databases: target.Databases,
-				SSLMode:   sslMode,
-			},
-		}},
-		Topology: Topology{Interval: "60s"},
-		Commands: Commands{Enabled: false},
-	}
+		Connect: Connect{
+			Host:      connectHost,
+			Port:      target.Port,
+			Databases: target.Databases,
+			SSLMode:   sslMode,
+		},
+	}}
+	return cfg
 }
 
 // Render serializes the Config to collector.toml text.

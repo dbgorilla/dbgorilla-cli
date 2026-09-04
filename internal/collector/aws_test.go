@@ -11,29 +11,36 @@ import (
 )
 
 func TestSelectSolo(t *testing.T) {
+	rds := func(id string) TargetChoice { return TargetChoice{ID: id, ProviderType: "aws_rds"} }
+	aurora := func(id string) TargetChoice { return TargetChoice{ID: id, ProviderType: "aws_aurora"} }
 	tests := []struct {
 		name             string
-		instances        []string
-		clusters         []string
+		choices          []TargetChoice
 		wantID, wantKind string
 		wantErr          bool
 	}{
-		{"one instance", []string{"prod-pg"}, nil, "prod-pg", "aws_rds", false},
-		{"one cluster", nil, []string{"prod-aurora"}, "prod-aurora", "aws_aurora", false},
-		{"none", nil, nil, "", "", true},
-		{"two instances", []string{"a", "b"}, nil, "", "", true},
-		{"instance + cluster is ambiguous", []string{"a"}, []string{"b"}, "", "", true},
+		{"one instance", []TargetChoice{rds("prod-pg")}, "prod-pg", "aws_rds", false},
+		{"one cluster", []TargetChoice{aurora("prod-aurora")}, "prod-aurora", "aws_aurora", false},
+		{"none", nil, "", "", true},
+		{"two instances", []TargetChoice{rds("a"), rds("b")}, "", "", true},
+		{"instance + cluster is ambiguous", []TargetChoice{rds("a"), aurora("b")}, "", "", true},
 	}
+	none := errors.New("none found; pass --db-instance-id")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id, kind, err := selectSolo(tt.instances, tt.clusters)
+			got, err := selectSolo(tt.choices, none)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}
-			if id != tt.wantID || kind != tt.wantKind {
-				t.Errorf("got (%q, %q), want (%q, %q)", id, kind, tt.wantID, tt.wantKind)
+			if got.ID != tt.wantID || got.ProviderType != tt.wantKind {
+				t.Errorf("got (%q, %q), want (%q, %q)", got.ID, got.ProviderType, tt.wantID, tt.wantKind)
 			}
 		})
+	}
+	// The zero case is the caller's own error, verbatim: it names what was
+	// searched, which the shared selector cannot know.
+	if _, err := selectSolo(nil, none); !errors.Is(err, none) {
+		t.Errorf("no candidates should return the caller's error, got %v", err)
 	}
 }
 
@@ -61,22 +68,21 @@ func TestGrantStatements(t *testing.T) {
 }
 
 func TestSelectSolo_AmbiguousCarriesCandidates(t *testing.T) {
-	_, _, err := selectSolo([]string{"pg-a", "pg-b"}, []string{"aur-c"})
-	var amb *AmbiguousTargetError
-	if !errors.As(err, &amb) {
-		t.Fatalf("ambiguous selection should return *AmbiguousTargetError, got %T", err)
-	}
-	got := amb.Candidates()
 	want := []TargetChoice{
 		{ID: "pg-a", ProviderType: "aws_rds"},
 		{ID: "pg-b", ProviderType: "aws_rds"},
 		{ID: "aur-c", ProviderType: "aws_aurora"}, // Aurora after RDS
 	}
-	if !reflect.DeepEqual(got, want) {
+	_, err := selectSolo(want, errors.New("none"))
+	var amb *AmbiguousTargetError
+	if !errors.As(err, &amb) {
+		t.Fatalf("ambiguous selection should return *AmbiguousTargetError, got %T", err)
+	}
+	if got := amb.Candidates(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Candidates()\n got  %+v\n want %+v", got, want)
 	}
 	// The zero case stays a plain error, not the ambiguous type.
-	if _, _, e := selectSolo(nil, nil); errors.As(e, &amb) {
+	if _, e := selectSolo(nil, errors.New("none")); errors.As(e, &amb) {
 		t.Error("no-databases case should not be an AmbiguousTargetError")
 	}
 }
@@ -323,7 +329,8 @@ func TestPasswordAuth_ReferencesSecretAndSkipsIAM(t *testing.T) {
 		t.Errorf("want password auth, got %q", auth.Method)
 	}
 	// The password is a reference, never the literal.
-	if auth.Password != "${"+AwsDBPasswordEnv+"}" {
+	if auth.Password != "${"+CloudDBPasswordEnv+"}" {
+
 		t.Errorf("password must be a ${VAR} reference, got %q", auth.Password)
 	}
 
@@ -469,7 +476,7 @@ func TestEncodeConfigRejectsOversizeConfig(t *testing.T) {
 }
 
 func TestAwsStackParams_CarriesDatabasesAsParameters(t *testing.T) {
-	params, err := AwsStackParams(AwsStackInput{
+	params, secrets, err := AwsStackParams(AwsStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:abc",
 		Region: "us-east-2", AccountID: "111122223333", Targets: multiTargets,
 		Subnets: []string{"subnet-1", "subnet-2"}, SecurityGroup: "sg-1",
@@ -478,11 +485,18 @@ func TestAwsStackParams_CarriesDatabasesAsParameters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every template parameter the CLI is responsible for must be present.
+	// Every template parameter the CLI is responsible for must be present —
+	// credentials in the secrets map, everything else in the printable one,
+	// never both.
 	for _, k := range fargateParamKeys {
-		if _, ok := params[k]; !ok {
-			t.Errorf("missing stack parameter %q", k)
+		_, inParams := params[k]
+		_, inSecrets := secrets[k]
+		if inParams == inSecrets {
+			t.Errorf("stack parameter %q: in params=%v, in secrets=%v — want exactly one", k, inParams, inSecrets)
 		}
+	}
+	if secrets["ServerSecret"] != "s3cret" {
+		t.Error("the server secret must ride the secrets map")
 	}
 	if params["Subnets"] != "subnet-1,subnet-2" {
 		t.Errorf("subnets should be comma-joined, got %q", params["Subnets"])
@@ -508,7 +522,7 @@ func TestAwsStackParams_AllPasswordAuthStillSendsAGrantList(t *testing.T) {
 		Host: "legacy.rds.amazonaws.com", Port: 5432, User: "readonly",
 		Databases: []string{"app"}, ProviderType: "aws_rds", AuthMethod: "password",
 	}
-	params, err := AwsStackParams(AwsStackInput{
+	params, _, err := AwsStackParams(AwsStackInput{
 		AgentID: "a", TenantID: "t", Image: "img", Region: "us-east-2",
 		AccountID: "111122223333", Targets: []AwsTarget{pw},
 		Subnets: []string{"subnet-1"}, SecurityGroup: "sg-1", DBPassword: "pw",

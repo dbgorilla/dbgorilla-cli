@@ -209,7 +209,7 @@ func TestResolveAwsTargets_AmbiguityBecomesAPicker(t *testing.T) {
 	isolate(t)
 	asTerminal(t, "1\n0\n") // pick the first, then confirm
 
-	amb := &collector.AmbiguousTargetError{Instances: []string{"prod-db", "staging-db"}}
+	amb := &collector.AmbiguousTargetError{Choices: []collector.TargetChoice{{ID: "prod-db", ProviderType: "aws_rds"}, {ID: "staging-db", ProviderType: "aws_rds"}}}
 	calls := 0
 	orig := discoverAwsTarget
 	discoverAwsTarget = func(id, provider string, into collector.AwsTarget) (collector.AwsTarget, error) {
@@ -263,16 +263,17 @@ func TestDiscoverChoices_FailureNamesTheCandidate(t *testing.T) {
 // pickTarget is the plain numbered list (not the huh picker) used by the
 // single-database path.
 func TestPickTarget(t *testing.T) {
-	amb := &collector.AmbiguousTargetError{
-		Instances: []string{"prod-db", "staging-db"},
-		Clusters:  []string{"analytics"},
-	}
+	amb := &collector.AmbiguousTargetError{Choices: []collector.TargetChoice{
+		{ID: "prod-db", ProviderType: "aws_rds"},
+		{ID: "staging-db", ProviderType: "aws_rds"},
+		{ID: "analytics", ProviderType: "aws_aurora"},
+	}}
 
 	t.Run("a valid number selects that candidate", func(t *testing.T) {
 		setStdin(t, "3\n")
 		var got collector.TargetChoice
 		var err error
-		out := capture(t, func() { got, err = pickTarget(amb) })
+		out := capture(t, func() { got, err = pickTarget(amb, "") })
 		if err != nil {
 			t.Fatalf("pickTarget: %v", err)
 		}
@@ -288,7 +289,7 @@ func TestPickTarget(t *testing.T) {
 		setStdin(t, "\n")
 		var got collector.TargetChoice
 		var err error
-		capture(t, func() { got, err = pickTarget(amb) })
+		capture(t, func() { got, err = pickTarget(amb, "") })
 		if err != nil {
 			t.Fatalf("pickTarget: %v", err)
 		}
@@ -302,7 +303,7 @@ func TestPickTarget(t *testing.T) {
 		t.Run("rejects "+strings.TrimSpace(in), func(t *testing.T) {
 			setStdin(t, in)
 			var err error
-			capture(t, func() { _, err = pickTarget(amb) })
+			capture(t, func() { _, err = pickTarget(amb, "") })
 			if err == nil {
 				t.Fatalf("%q must not select a database", in)
 			}

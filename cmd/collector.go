@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -96,11 +95,11 @@ func init() {
 	installCmd.Flags().String("ca-cert", "", "Path to a PEM CA bundle to trust (for private/internal-CA deployments)")
 	installCmd.Flags().Bool("force", false, "Provision even if the database preflight reports failures")
 
-	// --target selects where the collector runs; 'aws' uses the flags below
-	// (all auto-discovered from the RDS instance when omitted).
-	installCmd.Flags().String("target", "docker", "Deploy target: 'docker' (local) or 'aws' (Fargate)")
-	installCmd.Flags().String("db-instance-id", "", "AWS: RDS instance id or Aurora cluster id (auto-selected if exactly one Postgres DB)")
-	installCmd.Flags().String("provider-type", "", "AWS: force aws_rds or aws_aurora (auto-detected if omitted)")
+	// --target selects where the collector runs; the cloud targets use the
+	// flags below (auto-discovered from the database when omitted).
+	installCmd.Flags().String("target", "docker", "Deploy target: 'docker' (local), 'aws' (Fargate), or 'gcp' (Compute Engine)")
+	installCmd.Flags().String("db-instance-id", "", "AWS/GCP: RDS instance or Aurora cluster id; Cloud SQL instance or AlloyDB cluster[/instance] (auto-selected if exactly one)")
+	installCmd.Flags().String("provider-type", "", "AWS/GCP: force aws_rds, aws_aurora, cloud_sql or alloydb (auto-detected if omitted)")
 	installCmd.Flags().String("dbi-resource-id", "", "AWS: RDS DbiResourceId (discovered; scopes rds-db:connect)")
 	installCmd.Flags().String("subnets", "", "AWS: comma-separated subnet IDs (discovered from the RDS instance)")
 	installCmd.Flags().String("security-group-id", "", "AWS: security group for the collector task (discovered)")
@@ -108,8 +107,8 @@ func init() {
 	installCmd.Flags().String("stack-name", collector.DefaultStackName, "AWS: CloudFormation stack name")
 	installCmd.Flags().String("template-url", "", "AWS: deploy this CloudFormation template instead of the published one (must be an S3 URL)")
 	installCmd.Flags().String("config", "", "AWS: TOML file with [[database]] entries to monitor several databases from one collector (supersedes the single --db-* flags)")
-	installCmd.Flags().Bool("enable-commands", true, "AWS: set false to forbid the collector issuing any query-analysis queries (a hard off; otherwise the per-database checklist / --commands decides)")
-	installCmd.Flags().String("commands", "", "AWS: comma-separated query-analysis commands to allow per database (execute_query, explain). Empty + interactive prompts a per-database checklist; empty + non-interactive allows all; --commands=\"\" turns analysis off")
+	installCmd.Flags().Bool("enable-commands", true, "AWS/GCP: set false to forbid the collector issuing any query-analysis queries (a hard off; otherwise the per-database checklist / --commands decides)")
+	installCmd.Flags().String("commands", "", "AWS/GCP: comma-separated query-analysis commands to allow per database (execute_query, explain). Empty + interactive prompts a per-database checklist; empty + non-interactive allows all; --commands=\"\" turns analysis off")
 	installCmd.Flags().Bool("run-grant", false, "AWS: run the IAM grant automatically against each database, needing an admin DB login reachable from here (prompted when interactive; otherwise the SQL is printed)")
 	installCmd.Flags().String("grant-user", "postgres", "AWS: admin database user for --run-grant")
 	installCmd.Flags().String("grant-password", "", "AWS: admin database password for --run-grant (prompted without echo if omitted)")
@@ -153,8 +152,10 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return runInstallLocal(cmd)
 	case "aws", "fargate":
 		return runInstallAWS(cmd)
+	case "gcp":
+		return runInstallGCP(cmd)
 	default:
-		return fmt.Errorf("unknown --target %q (expected 'docker' or 'aws')", target)
+		return fmt.Errorf("unknown --target %q (expected 'docker', 'aws', or 'gcp')", target)
 	}
 }
 
@@ -163,18 +164,12 @@ func runInstallLocal(cmd *cobra.Command) error {
 		return dryRunInstall(cmd)
 	}
 
-	apiURL, err := requireAPIURL(cmd)
+	apiURL, err := requireInstallSession(cmd)
 	if err != nil {
 		return err
 	}
-	if _, err := requireLogin(); err != nil {
+	if err := requireNoInstall(); err != nil {
 		return err
-	}
-
-	// Refuse to clobber an existing install.
-	if st, _ := collector.LoadState(); st != nil {
-		return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
-			st.AgentID)
 	}
 
 	// Environment preflight: Docker must be usable before we mint anything.
@@ -182,15 +177,9 @@ func runInstallLocal(cmd *cobra.Command) error {
 		return err
 	}
 
-	client := newAPIClient(cmd)
-
-	// Capability gate: the managed collector only exists on main-based backends.
-	supported, err := client.CollectorSupported()
+	client, err := requireCollectorSupport(cmd, apiURL)
 	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
-	}
-	if !supported {
-		return api.ErrCollectorUnsupported
+		return err
 	}
 
 	// Gather the database target.
@@ -352,11 +341,8 @@ func runInstallLocal(cmd *cobra.Command) error {
 // shares the local target's auth + provisioning, but resolves an RDS target
 // (IAM auth, no password) and deploys a stack instead of running Docker.
 func runInstallAWS(cmd *cobra.Command) error {
-	apiURL, err := requireAPIURL(cmd)
+	apiURL, err := requireInstallSession(cmd)
 	if err != nil {
-		return err
-	}
-	if _, err := requireLogin(); err != nil {
 		return err
 	}
 
@@ -365,47 +351,22 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// in place (no re-mint, no teardown). A local Docker collector still blocks
 	// (can't reconcile it here). Dry-run always takes the fresh path below.
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	if st, _ := collector.LoadState(); st != nil && !dryRun {
-		if !st.IsAWS() {
-			return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
-				st.AgentID)
-		}
-		// Local state records a stack that may no longer be there: deleted from
-		// the console, or left behind by an uninstall that removed the stack but
-		// could not deprovision the identity (an expired login, say). Updating a
-		// stack that is gone fails deep in the SDK with a raw DescribeStacks
-		// error, so check first and install fresh instead.
-		status, err := stackStatus(st.StackName, st.Region)
-		if err != nil {
-			return err
-		}
-		if status != "" {
-			return runUpdateAWS(cmd, st)
-		}
-		fmt.Println(style.Warn(fmt.Sprintf(
-			"⚠  stack %q from the last install no longer exists — installing fresh.\n"+
-				"   Collector %s is still provisioned in DBGorilla; remove it with `dbg collector uninstall` once this finishes.",
-			st.StackName, st.AgentID)))
-	}
-
-	// Preflight: reuse the caller's own AWS CLI credentials; no keys pass
-	// through this tool (the ticket's "auto-detect local AWS credentials").
-	if err := awsAvailable(); err != nil {
-		return err
-	}
-	identity, err := awsIdentity()
+	prior, _, err := priorCloudInstall(dryRun, (*collector.State).IsAWS,
+		func(st *collector.State) (string, error) { return stackStatus(st.StackName, st.Region) },
+		"stack", func(st *collector.State) string { return st.StackName })
 	if err != nil {
 		return err
 	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ AWS identity: %s", identity)))
-
-	client := newAPIClient(cmd)
-	supported, err := client.CollectorSupported()
-	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
+	if prior != nil {
+		return runUpdateAWS(cmd, prior)
 	}
-	if !supported {
-		return api.ErrCollectorUnsupported
+
+	if err := printCloudIdentity("AWS", awsAvailable, awsIdentity); err != nil {
+		return err
+	}
+	client, err := requireCollectorSupport(cmd, apiURL)
+	if err != nil {
+		return err
 	}
 
 	targets, err := resolveAwsTargets(cmd)
@@ -414,7 +375,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	}
 	// Settle each database's auth: --db-password forces password auth; otherwise
 	// IAM when it's enabled; otherwise (interactive) offer a password fallback.
-	dbPassword := awsDBPassword(cmd)
+	dbPassword := dbPasswordFlag(cmd)
 	if err := resolveAwsAuth(cmd, targets, &dbPassword, dryRun); err != nil {
 		return err
 	}
@@ -437,19 +398,24 @@ func runInstallAWS(cmd *cobra.Command) error {
 
 	stackName, _ := cmd.Flags().GetString("stack-name")
 	assignIP, _ := cmd.Flags().GetString("assign-public-ip")
-	commandsEnabled := resolveCommands(cmd, targets)
+	commandsEnabled := resolveCommands(cmd, targets, awsTargetLabel)
 	region := awsRegion()
 	accountID, err := awsAccountID()
 	if err != nil {
 		return err
 	}
 	templateURL, _ := cmd.Flags().GetString("template-url")
+	if err := requireNoRuntime(dryRun,
+		func() (string, error) { return stackStatus(stackName, region) },
+		"stack", stackName, "--stack-name"); err != nil {
+		return err
+	}
 
 	// Dry run: validate the template without minting an identity or creating
 	// anything. Placeholder identity keeps the template shape valid.
-	if dry, _ := cmd.Flags().GetBool("dry-run"); dry {
+	if dryRun {
 		image, _ := resolveImage(cmd, nil)
-		params, err := collector.AwsStackParams(collector.AwsStackInput{
+		params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:           image,
 			Region:          region,
@@ -465,9 +431,18 @@ func runInstallAWS(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Printf("\nDry run — validating the template for stack %q (%d database(s), no identity minted):\n", stackName, len(targets))
-		printAwsParams(params)
+		printDeployParams(params, nil, "CollectorConfig")
+		// Secrets never enter the printed map; only their presence is shown,
+		// derived as a boolean so no code path prints a credential.
+		for _, k := range awsSecretParams {
+			v := "(not set)"
+			if secrets[k] != "" {
+				v = "<redacted>"
+			}
+			fmt.Printf("    %s = %s\n", k, v)
+		}
 		return runFargateDeploy(collector.FargateDeploy{
-			StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL,
+			StackName: stackName, Params: params, Secrets: secrets, DryRun: true, TemplateURL: templateURL,
 		})
 	}
 
@@ -478,23 +453,11 @@ func runInstallAWS(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	// Pin to a digest before it reaches CloudFormation. ECS re-pulls whenever a
-	// task starts, so an unresolved tag means the collector's version can change
-	// on a restart nobody asked for -- and the stack parameter never changing
-	// means an upgrade has nothing to act on. Resolved over the registry's HTTP
-	// API, since the AWS installer may have no container runtime.
 	image, imageSource := resolveImage(cmd, creds)
-	if pinned, perr := pinImageRemote(image); perr == nil {
-		image = pinned
-	} else {
-		fmt.Println(style.Warn(fmt.Sprintf(
-			"⚠  could not resolve %s to a fixed version (%v).\n"+
-				"   Deploying the tag as-is: the collector may change version when its task restarts.",
-			image, perr)))
-	}
+	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
-	params, err := collector.AwsStackParams(collector.AwsStackInput{
+	params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 		AgentID:         creds.AgentID,
 		TenantID:        creds.TenantID,
 		Image:           image,
@@ -510,13 +473,11 @@ func runInstallAWS(cmd *cobra.Command) error {
 		DBPassword:      dbPassword,
 	})
 	if err != nil {
+		deprovisionOrWarn(client, creds.AgentID)
 		return err
 	}
 
-	// Save state BEFORE the (slow) deploy so an interrupted install leaves a
-	// tracked collector that status/uninstall can find and clean — not an
-	// orphaned stack + identity.
-	if serr := collector.SaveState(&collector.State{
+	saveStateOrWarn(&collector.State{
 		AgentID:    creds.AgentID,
 		TenantID:   creds.TenantID,
 		Domain:     creds.Domain,
@@ -526,32 +487,19 @@ func runInstallAWS(cmd *cobra.Command) error {
 		StackName:  stackName,
 		Region:     region,
 		CreatedAt:  time.Now().UTC(),
-	}); serr != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not save local state: %v", serr)))
-	}
+	})
 
 	fmt.Printf("Deploying to Fargate (stack %q, %d database(s))...\n", stackName, len(targets))
-	deploy := collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}
+	deploy := collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
-		// A timeout is not a failure — the stack is still converging, and the
-		// rollback below would deprovision the identity and delete a deploy
-		// that is on its way to healthy. Leave it alone and hand over.
-		if errors.Is(err, collector.ErrDeployTimeout) {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The stack was NOT rolled back — "+
-				"it is most likely still converging.", collector.DeployTimeout())))
-			fmt.Printf("   Watch it with: dbg collector status\n"+
-				"   If it ends up failed, remove it with: dbg collector uninstall --stack-name %s\n", stackName)
-			return nil
+		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
+			func() error { return deleteStack(stackName, region) },
+			"   Watch it with: dbg collector status\n"+
+				"   If it ends up failed, remove it with: dbg collector uninstall\n")
+		if kept {
+			applyGrants(cmd, targets)
 		}
-		fmt.Println("Deploy failed; rolling back the provisioned identity and stack...")
-		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
-		}
-		if serr := deleteStack(stackName, region); serr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v (delete it from the console)", stackName, serr)))
-		}
-		_ = collector.RemoveState()
-		return fmt.Errorf("%w\n\nRolled back. Fix the issue above and re-run", err)
+		return derr
 	}
 
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector deploying to Fargate (stack %s).", stackName)))
@@ -576,14 +524,14 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 	// password-auth database, or that rotates an existing password, has to reach
 	// the stack's DbPassword parameter — reusing the previous value would leave
 	// ${DBG_DB_PASSWORD} unresolved in the collector's config.
-	dbPassword := awsDBPassword(cmd)
+	dbPassword := dbPasswordFlag(cmd)
 	if err := resolveAwsAuth(cmd, targets, &dbPassword, false); err != nil {
 		return err
 	}
 	// Re-apply per-component query-analysis commands (the component env is
 	// rebuilt on update). The global on/off gate is preserved by UpdateComponents
 	// via UsePreviousValue, so it stays whatever the install set.
-	resolveCommands(cmd, targets)
+	resolveCommands(cmd, targets, awsTargetLabel)
 	fmt.Printf("Updating collector %s in place to monitor %d database(s)...\n", st.AgentID, len(targets))
 	if err := withSpinner("Updating collector…", func() error {
 		return updateComponents(st.StackName, st.Region, targets, dbPassword)
@@ -699,7 +647,7 @@ func resolveAwsTargets(cmd *cobra.Command) ([]collector.AwsTarget, error) {
 	// let the user check off one or more — the interactive multi-database path.
 	if get("db-instance-id") == "" && interactiveSelectable(cmd) {
 		seed := collector.AwsTarget{User: get("db-user"), SSLMode: get("ssl-mode"), ProviderType: get("provider-type")}
-		if awsDBPassword(cmd) != "" {
+		if dbPasswordFlag(cmd) != "" {
 			seed.AuthMethod = "password"
 		}
 		one, err := discoverAwsTarget("", seed.ProviderType, seed)
@@ -733,7 +681,7 @@ func pickTargets(amb *collector.AmbiguousTargetError) ([]collector.TargetChoice,
 	opts := make([]huh.Option[string], 0, len(cands))
 	for _, c := range cands {
 		byID[c.ID] = c
-		opts = append(opts, huh.NewOption(fmt.Sprintf("%s (%s)", c.ID, providerLabel(c.ProviderType)), c.ID))
+		opts = append(opts, huh.NewOption(fmt.Sprintf("%s (%s)", c.ID, collector.ProviderLabel(c.ProviderType)), c.ID))
 	}
 	var picked []string
 	ms := huh.NewMultiSelect[string]().
@@ -877,7 +825,7 @@ func resolveAwsTarget(cmd *cobra.Command) (collector.AwsTarget, error) {
 		SecurityGroup: get("security-group-id"),
 	}
 	// A --db-password opts this database into password auth instead of IAM.
-	if awsDBPassword(cmd) != "" {
+	if dbPasswordFlag(cmd) != "" {
 		t.AuthMethod = "password"
 	}
 	if t.Complete() {
@@ -895,7 +843,7 @@ func resolveAwsTarget(cmd *cobra.Command) (collector.AwsTarget, error) {
 	// old behavior: surface the error and ask for --db-instance-id.
 	var amb *collector.AmbiguousTargetError
 	if errors.As(err, &amb) && interactiveSelectable(cmd) {
-		choice, perr := pickTarget(amb)
+		choice, perr := pickTarget(amb, ", or --config to monitor several")
 		if perr != nil {
 			return collector.AwsTarget{}, perr
 		}
@@ -914,35 +862,20 @@ func interactiveSelectable(cmd *cobra.Command) bool {
 }
 
 // pickTarget prints the ambiguous candidates and reads the user's choice.
-func pickTarget(amb *collector.AmbiguousTargetError) (collector.TargetChoice, error) {
+// moreHint names any further way out, appended to the --db-instance-id hint.
+func pickTarget(amb *collector.AmbiguousTargetError, moreHint string) (collector.TargetChoice, error) {
 	cands := amb.Candidates()
-	fmt.Println("Multiple databases found in this region. Select one to monitor:")
+	fmt.Println("Multiple databases found. Select one to monitor:")
 	for i, c := range cands {
-		fmt.Printf("  [%d] %s (%s)\n", i+1, c.ID, providerLabel(c.ProviderType))
+		fmt.Printf("  [%d] %s (%s)\n", i+1, c.ID, collector.ProviderLabel(c.ProviderType))
 	}
-	fmt.Println("  (or re-run with --db-instance-id, or --config to monitor several)")
+	fmt.Printf("  (or re-run with --db-instance-id%s)\n", moreHint)
 	choice := prompt("Enter a number", "1")
 	n, err := strconv.Atoi(strings.TrimSpace(choice))
 	if err != nil || n < 1 || n > len(cands) {
 		return collector.TargetChoice{}, fmt.Errorf("invalid selection %q; re-run with --db-instance-id", choice)
 	}
 	return cands[n-1], nil
-}
-
-func providerLabel(providerType string) string {
-	if providerType == "aws_aurora" {
-		return "Aurora"
-	}
-	return "RDS"
-}
-
-// awsDBPassword returns the DB password for AWS password auth (flag or env),
-// without prompting — password auth is opt-in on the AWS path (empty = IAM).
-func awsDBPassword(cmd *cobra.Command) string {
-	if p, _ := cmd.Flags().GetString("db-password"); p != "" {
-		return p
-	}
-	return os.Getenv(collector.DBPasswordEnv)
 }
 
 // resolveAwsAuth prints each target and settles its auth. Password auth is used
@@ -974,25 +907,6 @@ func resolveAwsAuth(cmd *cobra.Command, targets []collector.AwsTarget, dbPasswor
 	return nil
 }
 
-// resolveCommands reads the query-analysis flags and hands the precedence to
-// collector.ResolveCommands, supplying the interactive checklist when this is a
-// real terminal. The policy lives there; this is the flag-and-prompt half.
-func resolveCommands(cmd *cobra.Command, targets []collector.AwsTarget) bool {
-	req := collector.CommandRequest{
-		ForcedOff: commandsForcedOff(cmd),
-		Explicit:  cmd.Flags().Changed("commands"),
-	}
-	if req.Explicit {
-		v, _ := cmd.Flags().GetString("commands")
-		req.Commands = splitCSV(v)
-	}
-	var prompt func(collector.AwsTarget) []string
-	if interactiveSelectable(cmd) && !req.Explicit {
-		prompt = promptCommands
-	}
-	return collector.ResolveCommands(targets, req, prompt)
-}
-
 // commandsForcedOff reports an explicit hard "no query analysis" — for policies
 // that forbid the collector issuing any queries: --enable-commands=false, or
 // --commands="" (an explicitly empty list). Absent either, analysis is offered
@@ -1011,22 +925,26 @@ func commandsForcedOff(cmd *cobra.Command) bool {
 
 // promptCommands shows a per-database checklist of the engine's query-analysis
 // commands, all pre-selected. On error/cancel it falls back to allowing all.
-func promptCommands(t collector.AwsTarget) []string {
-	catalog := collector.AwsCommandCatalog()
+// An engine with no catalog has nothing to ask about.
+func promptCommands(engine, label string) []string {
+	catalog := collector.CommandCatalog(engine)
+	if len(catalog) == 0 {
+		return nil
+	}
 	opts := make([]huh.Option[string], 0, len(catalog))
 	for _, c := range catalog {
 		opts = append(opts, huh.NewOption(commandLabel(c), c).Selected(true))
 	}
 	picked := append([]string(nil), catalog...) // default: all
 	ms := huh.NewMultiSelect[string]().
-		Title(fmt.Sprintf("Query-analysis commands for %s", orUnknown(t.Name))).
+		Title(fmt.Sprintf("Query-analysis commands for %s", label)).
 		Description("space toggles · enter confirms · none = off for this database").
 		Options(opts...).
 		Value(&picked)
 	if err := runForm(ms); err != nil {
 		return catalog
 	}
-	return collector.AwsCommandsFor(picked)
+	return collector.CommandsFor(engine, picked)
 }
 
 // commandLabel is the human-facing description of a command in the picker.
@@ -1060,35 +978,8 @@ func promptPasswordOptional(label string) string {
 	return strings.TrimSpace(v)
 }
 
-// printAwsParams prints deploy parameters for dry-run, redacting the secret and
-// decoding the config so the dry run shows the TOML that would be deployed
-// rather than an opaque blob.
-func printAwsParams(params map[string]string) {
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		v := params[k]
-		switch k {
-		case "ServerSecret", "DbPassword":
-			if v != "" {
-				v = "<redacted>"
-			}
-		case "CollectorConfig":
-			decoded, err := collector.DecodeConfig(v)
-			if err == nil {
-				fmt.Printf("    %s =\n", k)
-				for _, line := range strings.Split(strings.TrimRight(decoded, "\n"), "\n") {
-					fmt.Printf("      %s\n", line)
-				}
-				continue
-			}
-		}
-		fmt.Printf("    %s = %s\n", k, v)
-	}
-}
+// awsSecretParams are the stack parameters a dry run must redact.
+var awsSecretParams = []string{"ServerSecret", "DbPassword"}
 
 func splitCSV(s string) []string {
 	var out []string
@@ -1166,6 +1057,9 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	if st.IsAWS() {
 		return awsStatus(cmd, st)
 	}
+	if st.IsGCP() {
+		return gcpStatus(cmd, st)
+	}
 	if st.IsHelm() {
 		return helmStatus(cmd, st)
 	}
@@ -1219,22 +1113,9 @@ func printConnectionStatus(cmd *cobra.Command, agentID string) {
 // awsStatus reports an AWS-deployed collector's CloudFormation stack status
 // plus its control-plane connection.
 func awsStatus(cmd *cobra.Command, st *collector.State) error {
-	fmt.Printf("Agent:      %s\n", st.AgentID)
-	fmt.Printf("Tenant:     %s\n", st.TenantID)
-	fmt.Printf("Target:     aws — %s\n", st.TargetName)
-	fmt.Printf("Image:      %s\n", st.Image)
-	fmt.Printf("Stack:      %s\n", st.StackName)
-	status, err := stackStatus(st.StackName, st.Region)
-	switch {
-	case err != nil:
-		fmt.Println(style.Warn(fmt.Sprintf("Deploy:     status unknown (%v)", err)))
-	case status == "":
-		fmt.Println(style.Warn("Deploy:     stack not found"))
-	default:
-		fmt.Println(style.Success(fmt.Sprintf("Deploy:     %s", status)))
-	}
-	printConnectionStatus(cmd, st.AgentID)
-	return nil
+	return cloudStatus(cmd, st, "Stack", st.StackName, func() (string, error) {
+		return stackStatus(st.StackName, st.Region)
+	})
 }
 
 // helmStatus reports an in-cluster (Helm) collector. There is no container to
@@ -1416,6 +1297,9 @@ var logsCmd = &cobra.Command{
 		if st.IsAWS() {
 			return collector.TailLogs(collector.LogGroupFor(st.StackName), st.Region, follow)
 		}
+		if st.IsGCP() {
+			return tailGcpLogs(st.Project, st.Region, st.DeploymentName, follow)
+		}
 		tail, _ := cmd.Flags().GetString("tail")
 		return dockerRunner(st).Logs(follow, tail)
 	},
@@ -1431,6 +1315,10 @@ var startCmd = &cobra.Command{
 		}
 		if st.IsAWS() {
 			if err := collector.ScaleService(st.StackName, st.Region, 1); err != nil {
+				return err
+			}
+		} else if st.IsGCP() {
+			if err := scaleGcpMig(st.Project, st.Region, st.DeploymentName, 1); err != nil {
 				return err
 			}
 		} else if err := dockerRunner(st).Start(); err != nil {
@@ -1453,6 +1341,10 @@ var stopCmd = &cobra.Command{
 			if err := collector.ScaleService(st.StackName, st.Region, 0); err != nil {
 				return err
 			}
+		} else if st.IsGCP() {
+			if err := scaleGcpMig(st.Project, st.Region, st.DeploymentName, 0); err != nil {
+				return err
+			}
 		} else if err := dockerRunner(st).Stop(); err != nil {
 			return err
 		}
@@ -1471,6 +1363,10 @@ var restartCmd = &cobra.Command{
 		}
 		if st.IsAWS() {
 			if err := collector.RestartService(st.StackName, st.Region); err != nil {
+				return err
+			}
+		} else if st.IsGCP() {
+			if err := restartGcpMig(st.Project, st.Region, st.DeploymentName); err != nil {
 				return err
 			}
 		} else if err := dockerRunner(st).Restart(); err != nil {
@@ -1497,6 +1393,10 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	// --image override, else the version this CLI ships as current. (Resolving a
 	// deployment-blessed version without re-provisioning isn't wired yet.)
 	image, _ := resolveImage(cmd, nil)
+
+	if st.IsGCP() {
+		return errors.New("upgrade is not supported for the gcp target yet; run `dbg collector uninstall` and re-install with --image")
+	}
 
 	// Resolve the tag to a digest BEFORE deciding whether to act. The default
 	// is a moving tag, and a tag cannot be compared against what is running --
@@ -1614,10 +1514,8 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		return errors.New("aborted")
 	}
 
-	// Remove the runtime — an AWS CloudFormation stack, a local container, or
-	// (for an in-cluster release) nothing, because this CLI has no cluster
-	// credentials. Deprovisioning the identity below still applies: that is ours
-	// to do and leaving it minted is what orphans a collector.
+	// Remove the runtime (an in-cluster release is the operator's to remove);
+	// the identity is deprovisioned below either way.
 	if st.IsHelm() {
 		fmt.Println(style.Warn("⚠  This collector runs in your cluster and this CLI cannot remove it. Run:"))
 		fmt.Printf("     helm uninstall %s --namespace %s\n",
@@ -1625,9 +1523,23 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		fmt.Println("   Its identity is deprovisioned below either way, so the release will stop being accepted.")
 	} else if st.IsAWS() {
 		if err := deleteStack(st.StackName, st.Region); err != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v", st.StackName, err)))
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  %v", err)))
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Stack %s deletion started", st.StackName)))
+		}
+	} else if st.IsGCP() {
+		// Infrastructure Manager answers only once the resources are destroyed.
+		err := withSpinner("Deleting the deployment…", func() error {
+			return deleteGcpDeployment(st.Project, st.Region, st.DeploymentName)
+		})
+		if errors.Is(err, errInterrupted) {
+			return fmt.Errorf("%w: the deployment may still be deleting and the identity was NOT deprovisioned. "+
+				"Check `dbg collector status`, then run `dbg collector uninstall` again", err)
+		}
+		if err != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  %v (delete deployment %s from the console)", err, st.DeploymentName)))
+		} else {
+			fmt.Println(style.Success(fmt.Sprintf("✓ Deployment %s deleted", st.DeploymentName)))
 		}
 	} else {
 		runner := collector.Runner{Name: st.ContainerName}
