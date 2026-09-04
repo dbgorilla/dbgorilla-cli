@@ -88,7 +88,14 @@ func (d FargateDeploy) deploy(ctx context.Context) error {
 		return nil
 	}
 
-	params := cfnParams(d.Params)
+	merged := make(map[string]string, len(d.Params)+len(d.Secrets))
+	for k, v := range d.Params {
+		merged[k] = v
+	}
+	for k, v := range d.Secrets {
+		merged[k] = v
+	}
+	params := cfnParams(merged)
 	exists, status, err := stackState(ctx, client, d.StackName)
 	if err != nil {
 		return err

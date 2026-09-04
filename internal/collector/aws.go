@@ -505,29 +505,34 @@ type AwsStackInput struct {
 }
 
 // AwsStackParams renders the CloudFormation parameter set for the collector
-// stack. The monitored databases ride in two of them — the base64 config and
-// the matching rds-db:connect grants — which is what keeps the template static
-// and publishable.
-func AwsStackParams(in AwsStackInput) (map[string]string, error) {
+// stack as two maps: the printable parameters, and the secrets. The monitored
+// databases ride in two of the former — the base64 config and the matching
+// rds-db:connect grants — which is what keeps the template static and
+// publishable. Secrets are kept out of the printable map by construction
+// (a dry run prints it wholesale); the two meet only in the stack request.
+func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err error) {
 	configTOML, err := awsConfigTOML(in.AgentID, in.TenantID, in.Region, in.Targets, in.Endpoints, in.CommandsEnabled)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	encoded, err := EncodeConfig(configTOML)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	arns := rdsConnectParam(in.Targets, in.Region, in.AccountID)
-	return map[string]string{
+	params = map[string]string{
 		configParamKey:     encoded,
 		rdsConnectParamKey: strings.Join(arns, ","),
-		"ServerSecret":     in.ServerSecret,
-		"DbPassword":       in.DBPassword,
 		"CollectorImage":   in.Image,
 		"Subnets":          strings.Join(in.Subnets, ","),
 		"SecurityGroupId":  in.SecurityGroup,
 		"AssignPublicIp":   in.AssignPublicIP,
-	}, nil
+	}
+	secrets = map[string]string{
+		"ServerSecret": in.ServerSecret,
+		"DbPassword":   in.DBPassword,
+	}
+	return params, secrets, nil
 }
 
 // CompactConfig strips whole-line comments and blank lines from a collector
@@ -696,7 +701,10 @@ func quoteIdent(s string) string {
 type FargateDeploy struct {
 	StackName string
 	Params    map[string]string
-	DryRun    bool // validate the template without creating/updating anything
+	// Secrets are the credential parameters, kept apart from Params so nothing
+	// that prints Params can ever print them; they merge only in the request.
+	Secrets map[string]string
+	DryRun  bool // validate the template without creating/updating anything
 	// TemplateURL overrides the published template this deploy uses. Empty means
 	// the version-pinned default. Either way it must be reachable — there is no
 	// local copy to fall back to.

@@ -415,7 +415,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// anything. Placeholder identity keeps the template shape valid.
 	if dryRun {
 		image, _ := resolveImage(cmd, nil)
-		params, err := collector.AwsStackParams(collector.AwsStackInput{
+		params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:           image,
 			Region:          region,
@@ -431,9 +431,18 @@ func runInstallAWS(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Printf("\nDry run — validating the template for stack %q (%d database(s), no identity minted):\n", stackName, len(targets))
-		printDeployParams(params, awsSecretParams, "CollectorConfig")
+		printDeployParams(params, nil, "CollectorConfig")
+		// Secrets never enter the printed map; only their presence is shown,
+		// derived as a boolean so no code path prints a credential.
+		for _, k := range awsSecretParams {
+			v := "(not set)"
+			if secrets[k] != "" {
+				v = "<redacted>"
+			}
+			fmt.Printf("    %s = %s\n", k, v)
+		}
 		return runFargateDeploy(collector.FargateDeploy{
-			StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL,
+			StackName: stackName, Params: params, Secrets: secrets, DryRun: true, TemplateURL: templateURL,
 		})
 	}
 
@@ -448,7 +457,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
-	params, err := collector.AwsStackParams(collector.AwsStackInput{
+	params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 		AgentID:         creds.AgentID,
 		TenantID:        creds.TenantID,
 		Image:           image,
@@ -481,7 +490,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	})
 
 	fmt.Printf("Deploying to Fargate (stack %q, %d database(s))...\n", stackName, len(targets))
-	deploy := collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}
+	deploy := collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
 		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
 			func() error { return deleteStack(stackName, region) },

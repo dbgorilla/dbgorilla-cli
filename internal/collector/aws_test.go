@@ -476,7 +476,7 @@ func TestEncodeConfigRejectsOversizeConfig(t *testing.T) {
 }
 
 func TestAwsStackParams_CarriesDatabasesAsParameters(t *testing.T) {
-	params, err := AwsStackParams(AwsStackInput{
+	params, secrets, err := AwsStackParams(AwsStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:abc",
 		Region: "us-east-2", AccountID: "111122223333", Targets: multiTargets,
 		Subnets: []string{"subnet-1", "subnet-2"}, SecurityGroup: "sg-1",
@@ -485,11 +485,18 @@ func TestAwsStackParams_CarriesDatabasesAsParameters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every template parameter the CLI is responsible for must be present.
+	// Every template parameter the CLI is responsible for must be present —
+	// credentials in the secrets map, everything else in the printable one,
+	// never both.
 	for _, k := range fargateParamKeys {
-		if _, ok := params[k]; !ok {
-			t.Errorf("missing stack parameter %q", k)
+		_, inParams := params[k]
+		_, inSecrets := secrets[k]
+		if inParams == inSecrets {
+			t.Errorf("stack parameter %q: in params=%v, in secrets=%v — want exactly one", k, inParams, inSecrets)
 		}
+	}
+	if secrets["ServerSecret"] != "s3cret" {
+		t.Error("the server secret must ride the secrets map")
 	}
 	if params["Subnets"] != "subnet-1,subnet-2" {
 		t.Errorf("subnets should be comma-joined, got %q", params["Subnets"])
@@ -515,7 +522,7 @@ func TestAwsStackParams_AllPasswordAuthStillSendsAGrantList(t *testing.T) {
 		Host: "legacy.rds.amazonaws.com", Port: 5432, User: "readonly",
 		Databases: []string{"app"}, ProviderType: "aws_rds", AuthMethod: "password",
 	}
-	params, err := AwsStackParams(AwsStackInput{
+	params, _, err := AwsStackParams(AwsStackInput{
 		AgentID: "a", TenantID: "t", Image: "img", Region: "us-east-2",
 		AccountID: "111122223333", Targets: []AwsTarget{pw},
 		Subnets: []string{"subnet-1"}, SecurityGroup: "sg-1", DBPassword: "pw",
