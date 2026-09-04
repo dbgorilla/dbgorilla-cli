@@ -144,9 +144,10 @@ func TestGcpComponent_CloudSQLIamAuth(t *testing.T) {
 	}
 }
 
-func TestGcpComponent_PasswordOnInternalCAConnectsAtVerifyCA(t *testing.T) {
-	// The default per-instance CA attests no hostname; password auth on it
-	// verifies the chain against that CA instead of failing verify-full.
+func TestGcpComponent_PasswordOnInternalCAConnectsAtRequire(t *testing.T) {
+	// The default per-instance CA attests no hostname and the collector no
+	// longer fetches it at discovery — an unpinned verify-ca is refused on
+	// every provider, so `require` is the mode this hosting gets.
 	c := gcpComponent(GcpTarget{
 		ProviderType: "cloud_sql",
 		Project:      "p",
@@ -159,8 +160,8 @@ func TestGcpComponent_PasswordOnInternalCAConnectsAtVerifyCA(t *testing.T) {
 		AuthMethod:   "password",
 		User:         "dbg_readonly",
 	})
-	if c.Connect.SSLMode != "verify-ca" {
-		t.Fatalf("expected verify-ca on the internal CA, got %q", c.Connect.SSLMode)
+	if c.Connect.SSLMode != "require" {
+		t.Fatalf("expected require on the internal CA, got %q", c.Connect.SSLMode)
 	}
 	if c.Auth.Password != "${"+CloudDBPasswordEnv+"}" {
 		t.Fatalf("password must be an env reference, got %q", c.Auth.Password)
@@ -208,8 +209,8 @@ func TestGcpComponent_MySQLGetsMySQLSSLModeSpellings(t *testing.T) {
 	}
 	internal := base
 	internal.ServerCaMode = "GOOGLE_MANAGED_INTERNAL_CA"
-	if c := gcpComponent(internal); c.Connect.SSLMode != "verify_ca" {
-		t.Fatalf("mysql spelling for verify-ca: %q", c.Connect.SSLMode)
+	if c := gcpComponent(internal); c.Connect.SSLMode != "required" {
+		t.Fatalf("mysql spelling for require on the internal CA: %q", c.Connect.SSLMode)
 	}
 	pg := base
 	pg.Engine = "postgres"

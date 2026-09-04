@@ -295,6 +295,15 @@ func resolveGcpAuth(target *collector.GcpTarget, dbPassword, deploymentName, pro
 			"turn on the cloudsql.iam_authentication flag, or pass --db-password for password auth",
 			target.InstanceID)
 	}
+	// The collector refuses IAM on the default per-instance server CA by name
+	// (a minted token needs a verifiable transport, and that CA attests no
+	// hostname). Refuse here, at install time, with the same ways out.
+	if target.ProviderType == "cloud_sql" && target.ServerCaMode == "GOOGLE_MANAGED_INTERNAL_CA" {
+		return fmt.Errorf("Cloud SQL instance %q uses the default per-instance server CA, which "+
+			"IAM auth cannot verify — migrate it with `--server-ca-mode=GOOGLE_MANAGED_CAS_CA` "+
+			"(one-way), or pass --db-password for password auth",
+			target.InstanceID)
+	}
 	if target.User != "" {
 		fmt.Println(style.Warn("⚠  --db-user only applies to password auth — IAM auth derives the " +
 			"database user from the runtime service account; ignoring it"))

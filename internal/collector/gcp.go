@@ -480,10 +480,15 @@ func gcpComponent(t GcpTarget) Component {
 		auth.Scopes = []string{"https://www.googleapis.com/auth/alloydb.login"}
 	}
 	// verify-full, except password auth on Cloud SQL's per-instance CA, which
-	// attests no hostname.
+	// attests no hostname AND publishes no CA the collector could verify a
+	// chain against without a pin: the reworked collector refuses an unpinned
+	// verify-ca on every provider (it would chain to the platform store with
+	// no name check), and it no longer fetches the per-instance CA at
+	// discovery — `require` (encrypted, unverified) is its documented mode
+	// for this hosting.
 	sslMode := "verify-full"
 	if t.ProviderType == "cloud_sql" && auth.Method == "password" && t.ServerCaMode == "GOOGLE_MANAGED_INTERNAL_CA" {
-		sslMode = "verify-ca"
+		sslMode = "require"
 	}
 	// The MySQL engine accepts only its own ssl_mode spellings.
 	if t.Engine == "mysql" {
@@ -492,6 +497,8 @@ func gcpComponent(t GcpTarget) Component {
 			sslMode = "verify_identity"
 		case "verify-ca":
 			sslMode = "verify_ca"
+		case "require":
+			sslMode = "required"
 		}
 	}
 	// AlloyDB is dialed directly (no connector proxy since the #111 rework)
