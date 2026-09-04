@@ -40,9 +40,6 @@ var (
 	gcpServiceAccountRe = regexp.MustCompile(`^projects/[^/]+/serviceAccounts/[^/@]+@[^/]+$`)
 )
 
-// gcpSecretInputs are the template inputs a dry run must redact.
-var gcpSecretInputs = []string{"server_secret", "db_password"}
-
 // awsOnlyFlags are refused on the gcp target rather than silently ignored.
 var awsOnlyFlags = []string{
 	"dbi-resource-id", "subnets", "security-group-id", "assign-public-ip", "stack-name",
@@ -174,7 +171,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 
 	if dryRun {
 		image, _ := resolveImage(cmd, nil)
-		inputs, err := collector.GcpDeployInputs(collector.GcpStackInput{
+		inputs, secrets, err := collector.GcpDeployInputs(collector.GcpStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:           image,
 			Targets:         targets,
@@ -190,7 +187,16 @@ func runInstallGCP(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Printf("\nDry run — probing the template for deployment %q (no identity minted):\n", deploymentName)
-		printDeployParams(inputs, gcpSecretInputs, "collector_config")
+		printDeployParams(inputs, nil, "collector_config")
+		// Secrets never enter the printed map; only their presence is shown,
+		// derived as a boolean so no code path prints a credential.
+		for _, k := range collector.GcpSecretInputKeys {
+			v := "(not set)"
+			if secrets[k] != "" {
+				v = "<redacted>"
+			}
+			fmt.Printf("    %s = %s\n", k, v)
+		}
 		return runGcpDeploy(collector.GcpDeploy{
 			Project: project, Region: target.Region, DeploymentName: deploymentName,
 			TemplateSource: templateSource, DryRun: true,
@@ -208,7 +214,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 	image = pinImageOrWarn(image, "instance")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
-	inputs, err := collector.GcpDeployInputs(collector.GcpStackInput{
+	inputs, secrets, err := collector.GcpDeployInputs(collector.GcpStackInput{
 		AgentID:         creds.AgentID,
 		TenantID:        creds.TenantID,
 		Image:           image,
@@ -245,7 +251,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 	deploy := collector.GcpDeploy{
 		Project: project, Region: target.Region, DeploymentName: deploymentName,
 		TemplateSource: templateSource, ServiceAccount: deployServiceAccount,
-		Inputs: inputs,
+		Inputs: inputs, Secrets: secrets,
 	}
 	if err := withSpinner("Deploying to Compute Engine…", func() error { return runGcpDeploy(deploy) }); err != nil {
 		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.GcpDeployTimeout(), "deployment", deploymentName,

@@ -36,9 +36,11 @@ func TestGcpTemplateContract_VariablesMatchInputKeys(t *testing.T) {
 		declared = append(declared, string(m[1]))
 	}
 	sort.Strings(declared)
-	if strings.Join(declared, ",") != strings.Join(gcpInputKeys, ",") {
+	contract := append(append([]string{}, gcpInputKeys...), GcpSecretInputKeys...)
+	sort.Strings(contract)
+	if strings.Join(declared, ",") != strings.Join(contract, ",") {
 		t.Fatalf("template variables %v != the CLI's input keys %v — bump the template contract",
-			declared, gcpInputKeys)
+			declared, contract)
 	}
 }
 
@@ -80,7 +82,7 @@ func TestGcpTemplateContract_RuntimePins(t *testing.T) {
 }
 
 func TestGcpDeployInputs_RendersTheFullContract(t *testing.T) {
-	inputs, err := GcpDeployInputs(GcpStackInput{
+	inputs, secrets, err := GcpDeployInputs(GcpStackInput{
 		AgentID: "agent123", TenantID: "tenant123",
 		Image: "example.registry/collector@sha256:abc",
 		Targets: []GcpTarget{{
@@ -105,6 +107,18 @@ func TestGcpDeployInputs_RendersTheFullContract(t *testing.T) {
 	sort.Strings(keys)
 	if strings.Join(keys, ",") != strings.Join(gcpInputKeys, ",") {
 		t.Fatalf("rendered inputs %v != contract %v", keys, gcpInputKeys)
+	}
+	// Secrets live in their own map, never beside the printable inputs.
+	var skeys []string
+	for k := range secrets {
+		skeys = append(skeys, k)
+	}
+	sort.Strings(skeys)
+	if strings.Join(skeys, ",") != strings.Join(GcpSecretInputKeys, ",") {
+		t.Fatalf("rendered secrets %v != contract %v", skeys, GcpSecretInputKeys)
+	}
+	if secrets["server_secret"] != "secret123" {
+		t.Fatal("the server secret must ride the secrets map")
 	}
 	decoded, err := DecodeConfig(inputs["collector_config"])
 	if err != nil {

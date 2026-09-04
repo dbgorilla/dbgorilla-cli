@@ -22,7 +22,8 @@ func testDeploy() GcpDeploy {
 		Project: "p", Region: "us-central1", DeploymentName: "dbg",
 		TemplateSource: "gs://tmpl/collector/gce/v1.0",
 		ServiceAccount: "projects/p/serviceAccounts/deployer@p.iam.gserviceaccount.com",
-		Inputs:         map[string]string{"collector_image": "img@sha256:abc", "server_secret": "s3"},
+		Inputs:         map[string]string{"collector_image": "img@sha256:abc"},
+		Secrets:        map[string]string{"server_secret": "s3"},
 	}
 }
 
