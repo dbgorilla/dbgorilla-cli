@@ -285,15 +285,18 @@ func resolveGcpAuth(target *collector.GcpTarget, dbPassword, deploymentName, pro
 		target.AuthMethod = "password"
 		return nil
 	}
-	if target.Engine == "mysql" && target.ProviderType == "cloud_sql" {
-		return fmt.Errorf("the collector does not support IAM database authentication for "+
-			"Cloud SQL MySQL yet — pass --db-password to use password auth for %q",
-			target.InstanceID)
-	}
+	// mysql + cloud_sql + gcp_iam is supported since the collector registered
+	// the triples (live-tested 2026-09-04); the CLI's earlier refusal went
+	// with the gate. The flag is spelled per engine — dots are illegal in
+	// MySQL flag names.
 	if !target.IamEnabled {
+		flag := "cloudsql.iam_authentication"
+		if target.Engine == "mysql" {
+			flag = "cloudsql_iam_authentication"
+		}
 		return fmt.Errorf("Cloud SQL instance %q does not have IAM database authentication enabled — "+
-			"turn on the cloudsql.iam_authentication flag, or pass --db-password for password auth",
-			target.InstanceID)
+			"turn on the %s flag, or pass --db-password for password auth",
+			target.InstanceID, flag)
 	}
 	// The collector refuses IAM on the default per-instance server CA by name
 	// (a minted token needs a verifiable transport, and that CA attests no

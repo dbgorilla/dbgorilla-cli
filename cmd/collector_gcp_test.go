@@ -625,26 +625,34 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 		}
 	})
 
-	t.Run("MySQL without the flag gets the MySQL refusal, not the Postgres flag advice", func(t *testing.T) {
+	t.Run("MySQL without the flag is told the MySQL spelling of the flag", func(t *testing.T) {
+		// Dots are illegal in MySQL flag names; the Postgres spelling would
+		// send the operator to a flag that cannot exist.
 		target := completeGcpTarget()
 		target.Engine, target.Port, target.IamEnabled = "mysql", 3306, false
 		c, _ := setup(t, target)
 		var err error
 		capture(t, func() { err = runInstallGCP(c) })
-		if err == nil || !strings.Contains(err.Error(), "--db-password") ||
+		if err == nil || !strings.Contains(err.Error(), "cloudsql_iam_authentication") ||
 			strings.Contains(err.Error(), "cloudsql.iam_authentication") {
 			t.Fatalf("err = %v", err)
 		}
 	})
 
-	t.Run("MySQL under IAM is refused", func(t *testing.T) {
+	t.Run("MySQL under IAM derives the short username", func(t *testing.T) {
+		// mysql+cloud_sql+gcp_iam is a supported triple since the collector
+		// registered it (live-tested 2026-09-04): the install proceeds and the
+		// IAM user is the local part of the service account.
 		target := completeGcpTarget()
 		target.Engine, target.Port = "mysql", 3306
-		c, _ := setup(t, target)
+		c, deploys := setup(t, target)
 		var err error
 		capture(t, func() { err = runInstallGCP(c) })
-		if err == nil || !strings.Contains(err.Error(), "--db-password") {
-			t.Fatalf("err = %v", err)
+		if err != nil {
+			t.Fatalf("runInstallGCP: %v", err)
+		}
+		if cfg := decodedConfig(t, deploys.deploy); !strings.Contains(cfg, `user = "dbg-test"`) {
+			t.Errorf("MySQL IAM user is the local part of the service account:\n%s", cfg)
 		}
 	})
 }
