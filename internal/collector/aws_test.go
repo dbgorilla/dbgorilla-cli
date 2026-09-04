@@ -494,6 +494,9 @@ func TestAwsStackParams_CarriesDatabasesAsParameters(t *testing.T) {
 			t.Errorf("stack parameter %q: inParams=%v inSecrets=%v (want exactly one)", k, inParams, inSecrets)
 		}
 	}
+	if secrets["ServerSecret"] != "s3cret" {
+		t.Error("the server secret must ride the secrets map")
+	}
 	if params["Subnets"] != "subnet-1,subnet-2" {
 		t.Errorf("subnets should be comma-joined, got %q", params["Subnets"])
 	}
