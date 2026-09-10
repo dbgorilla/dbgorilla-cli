@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.6.0
+
+### Added
+
+- `dbg collector install --provider instaclustr --cluster-id <id>` monitors a
+  NetApp Instaclustr managed PostgreSQL cluster. The install discovers the
+  cluster through the Instaclustr Cluster Management API, creates a read-only
+  `dbgorilla_monitor` role via the cluster's default user (no superuser, no
+  support ticket), allowlists this machine's public IP on the cluster
+  firewall, and runs the collector locally in Docker. The database *source*
+  (`--provider`) is independent of the deploy substrate (`--target`); other
+  targets for this source come later.
+
+- Two Instaclustr API keys with two fates: the provisioning key
+  (`--instaclustr-api-key` / `INSTACLUSTR_PROVISIONING_API_KEY`) does the
+  setup from your machine and is never stored; the read-only key
+  (`--instaclustr-readonly-key` / `INSTACLUSTR_READONLY_API_KEY`) is the only
+  one the collector keeps, for node discovery.
+
+- `dbg collector refresh-firewall` re-allowlists the collector's current
+  public IP on the Instaclustr cluster firewall and retires the stale rule
+  this CLI created for the previous IP — never a rule it does not own. The
+  fix for the "my ISP changed my address and the collector went quiet" day-2
+  case.
+
 ## v0.5.3
 
 ### Added

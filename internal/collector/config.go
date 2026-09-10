@@ -31,6 +31,13 @@ const (
 	// env-file it writes.
 	AwsDBPasswordEnv = "DBG_DB_PASSWORD"
 
+	// InstaclustrAPIKeyEnv is the env reference the instaclustr provider block
+	// uses for the collector's READ-ONLY Instaclustr API key (node discovery).
+	// The literal key rides the env-file, never the config, mirroring the
+	// database password. The writable provisioning key never reaches either —
+	// the install uses it transiently and discards it.
+	InstaclustrAPIKeyEnv = "INSTACLUSTR_API_KEY"
+
 	// DockerHostInternal is the hostname that resolves to the Docker host from
 	// inside a container (native on Docker Desktop; on Linux we add an
 	// --add-host mapping to host-gateway).
@@ -90,6 +97,16 @@ type Provider struct {
 
 	Kubernetes *KubernetesConfig `toml:"kubernetes,omitempty"`
 	Metrics    *MetricsConfig    `toml:"metrics,omitempty"`
+
+	// instaclustr. ClusterID (above) is the identity; CloudProvider/Region use
+	// Instaclustr's own spellings (AWS_VPC, US_EAST_1) and are UI context. The
+	// APIKey is always an env reference (${INSTACLUSTR_API_KEY}) to a READ-ONLY
+	// provisioning key — discovery is one GET, and the writable key can read
+	// database passwords, so it never belongs in a collector's configuration.
+	CloudProvider       string `toml:"provider,omitempty"`
+	APIUsername         string `toml:"api_username,omitempty"`
+	APIKey              string `toml:"api_key,omitempty"`
+	UsePrivateAddresses bool   `toml:"use_private_addresses,omitempty"`
 }
 
 // KubernetesConfig is [component.provider.kubernetes]. Mode decides what happens

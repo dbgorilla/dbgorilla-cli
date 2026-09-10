@@ -25,6 +25,11 @@ func isolate(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("HOME", home)
 	t.Setenv("DBGORILLA_API_URL", "")
+	// A developer's ambient Instaclustr credentials must never leak into (or
+	// satisfy) the resolve paths under test.
+	t.Setenv("INSTACLUSTR_USERNAME", "")
+	t.Setenv("INSTACLUSTR_PROVISIONING_API_KEY", "")
+	t.Setenv("INSTACLUSTR_READONLY_API_KEY", "")
 	// Empty PATH: any accidental real-binary lookup fails fast + deterministically.
 	t.Setenv("PATH", t.TempDir())
 	return home

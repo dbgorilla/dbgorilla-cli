@@ -149,6 +149,26 @@ The template takes no injected values, so you can deploy it from the console wit
 
 Secrets never go in the config: reference them as `${DBG_SERVER_SECRET}` and `${DBG_DB_PASSWORD}` and supply the real values through the `ServerSecret` / `DbPassword` parameters, which the stack stores in Secrets Manager.
 
+## Collector for NetApp Instaclustr
+
+`dbg collector install --provider instaclustr --cluster-id <id>` monitors a NetApp Instaclustr managed PostgreSQL cluster. The database *source* is independent of where the collector runs; today the collector runs locally in Docker (the default `--target`).
+
+```sh
+dbg collector install --provider instaclustr --cluster-id <id>
+dbg collector refresh-firewall     # re-allowlist after this machine's IP changes
+```
+
+The install discovers the cluster through the Instaclustr Cluster Management API, creates a read-only `dbgorilla_monitor` role (`pg_monitor` + `pg_read_all_data` — the cluster's default user can do this itself, no support ticket), adds this machine's public IP to the cluster's firewall allowlist, and starts the collector.
+
+Two Instaclustr API keys with two fates (create both in the Instaclustr console under Account Settings → API Keys):
+
+- a **provisioning key** does the setup from your machine — discovery, the firewall rule, the role — and is never stored;
+- a **read-only provisioning key** is the only one the collector keeps, for node discovery.
+
+Flags or env vars supply them: `--instaclustr-user`/`INSTACLUSTR_USERNAME`, `--instaclustr-api-key`/`INSTACLUSTR_PROVISIONING_API_KEY`, `--instaclustr-readonly-key`/`INSTACLUSTR_READONLY_API_KEY`. See [`examples/collector-instaclustr.toml`](examples/collector-instaclustr.toml) for the config the install renders.
+
+The firewall allows *IP addresses*, so the collector host wants a stable public IP; when it changes anyway, `dbg collector refresh-firewall` re-allowlists the current one and retires the stale rule the CLI created (never one it didn't).
+
 ## Centralized Claude allowlist
 
 If your org uses a managed Claude allowlist (Team / Enterprise tier on app.claude.com), `dbg setup-ide` may be blocked by policy. Run:

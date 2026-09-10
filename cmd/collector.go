@@ -136,7 +136,10 @@ your dev environment to DBGorilla.
   dbg collector status      Show the collector's state and connection
   dbg collector logs        Tail the collector's logs
   dbg collector stop/start  Pause or resume without losing the identity
-  dbg collector uninstall   Stop the collector and deprovision its identity`,
+  dbg collector uninstall   Stop the collector and deprovision its identity
+
+For NetApp Instaclustr sources (--provider instaclustr):
+  dbg collector refresh-firewall  Re-allowlist this machine's current IP`,
 }
 
 // --- install --------------------------------------------------------------
@@ -148,6 +151,16 @@ var installCmd = &cobra.Command{
 }
 
 func runInstall(cmd *cobra.Command, _ []string) error {
+	// A managed-platform *source* (--provider) is orthogonal to the deploy
+	// substrate (--target) and takes its own path before the target dispatch.
+	// An unknown value must not silently fall through to the docker prompts.
+	switch provider, _ := cmd.Flags().GetString("provider"); {
+	case provider == "":
+	case instaclustrSource(cmd):
+		return runInstallInstaclustr(cmd)
+	default:
+		return fmt.Errorf("unknown --provider %q (expected 'instaclustr'; for RDS vs Aurora use --provider-type with --target aws)", provider)
+	}
 	switch target, _ := cmd.Flags().GetString("target"); target {
 	case "", "docker", "local":
 		return runInstallLocal(cmd)
@@ -1635,6 +1648,18 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove container: %v", err)))
 		} else {
 			fmt.Println(style.Success("✓ Container removed"))
+		}
+	}
+
+	// An Instaclustr install's firewall rule needs the provisioning key this
+	// CLI deliberately never stores, so removal is the user's step — but a
+	// silent orphan (the machine's IP allowlisted forever) is not acceptable.
+	if st.InstaclustrClusterID != "" {
+		fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows this machine's IP."))
+		if st.FirewallRuleID != "" {
+			fmt.Printf("   Remove rule %s on the cluster's Firewall Rules page (or via the API).\n", st.FirewallRuleID)
+		} else {
+			fmt.Println("   Review the cluster's Firewall Rules page and remove the entry if no longer wanted.")
 		}
 	}
 
