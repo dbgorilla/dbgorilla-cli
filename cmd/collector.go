@@ -514,7 +514,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	deploy := collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
 		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
-			func() error { return deleteStack(stackName, region) },
+			func() error { return deleteStack(stackName, region) }, nil,
 			"   Watch it with: dbg collector status\n"+
 				"   If it ends up failed, remove it with: dbg collector uninstall\n")
 		if kept {

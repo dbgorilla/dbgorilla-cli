@@ -227,11 +227,36 @@ func TestDiscoverGcpTarget_NeedsAProject(t *testing.T) {
 }
 
 func TestDiscoverGcpTarget_ListFailureNamesTheAPI(t *testing.T) {
-	stubGCP(t, newGCPFake(t).on("GET", sqlListPath, 403,
-		`{"error":{"code":403,"message":"Cloud SQL Admin API has not been used in project p","status":"PERMISSION_DENIED"}}`))
+	// Both APIs failing: the hint-less path tolerates one broken listing but
+	// must not read two as an empty project — both messages surface.
+	stubGCP(t, newGCPFake(t).
+		on("GET", sqlListPath, 403,
+			`{"error":{"code":403,"message":"Cloud SQL Admin API has not been used in project p","status":"PERMISSION_DENIED"}}`).
+		on("GET", adbAllInstances, 403,
+			`{"error":{"code":403,"message":"AlloyDB API has not been used in project p","status":"PERMISSION_DENIED"}}`))
 	_, err := DiscoverGcpTarget("", "", GcpTarget{Project: "p"})
 	if err == nil || !strings.Contains(err.Error(), "Cloud SQL Admin API") || !strings.Contains(err.Error(), "cloudsql.viewer") {
 		t.Fatalf("err = %v, want the API's message plus the role hint", err)
+	}
+	if !strings.Contains(err.Error(), "AlloyDB API") {
+		t.Fatalf("err = %v, want both listings' failures", err)
+	}
+}
+
+func TestDiscoverGcpTarget_OneDisabledAPIDoesNotHideTheOther(t *testing.T) {
+	// The AlloyDB API is off by default, so a Cloud SQL-only project must
+	// still auto-detect without --provider-type.
+	stubGCP(t, newGCPFake(t).
+		on("GET", sqlListPath, 200, sqlInstancesJSON(sqlInstanceJSON("prod-pg", "POSTGRES_16", ""))).
+		on("GET", adbAllInstances, 403,
+			`{"error":{"code":403,"message":"AlloyDB API has not been used in project p","status":"PERMISSION_DENIED"}}`).
+		on("GET", sqlListPath+"/prod-pg", 200, sqlInstanceJSON("prod-pg", "POSTGRES_16", "")))
+	got, err := DiscoverGcpTarget("", "", GcpTarget{Project: "p"})
+	if err != nil {
+		t.Fatalf("a disabled AlloyDB API must not block Cloud SQL discovery: %v", err)
+	}
+	if got.InstanceID != "prod-pg" || got.ProviderType != "cloud_sql" {
+		t.Fatalf("target = %+v", got)
 	}
 }
 

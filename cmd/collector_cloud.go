@@ -158,10 +158,13 @@ func deprovisionOrWarn(client *api.Client, agentID string) {
 // cloudDeployFailed handles a deploy error and reports whether the runtime was
 // left in place. A timeout, an unobserved outcome, or an interrupt leaves
 // everything (runtime, identity, state) for `status` to pick up. A busy
-// refusal created nothing, so only this run's identity is deprovisioned.
+// refusal created no runtime, so this run's identity is deprovisioned and
+// cleanupPrepared (nil when there is nothing) removes what the run staged
+// before deploying — the gcp installs write Secret Manager secrets first, and
+// RemoveState below deletes the only record uninstall could find them by.
 // Anything else rolls back both the identity and the runtime.
 func cloudDeployFailed(err error, client *api.Client, agentID string, budget time.Duration,
-	noun, name string, deleteRuntime func() error, watchHint string,
+	noun, name string, deleteRuntime func() error, cleanupPrepared func(), watchHint string,
 ) (kept bool, result error) {
 	switch {
 	case errors.Is(err, collector.ErrDeployTimeout):
@@ -178,7 +181,10 @@ func cloudDeployFailed(err error, client *api.Client, agentID string, budget tim
 		return true, fmt.Errorf("%w\n\nWhen connectivity returns, run `dbg collector status`: "+
 			"if the %s converged, the install is complete; if it failed, run `dbg collector uninstall` and re-run the install", err, noun)
 	case errors.Is(err, collector.ErrDeployBusy):
-		fmt.Printf("Nothing to roll back on the %s; deprovisioning this run's identity...\n", noun)
+		fmt.Printf("No %s to roll back; deprovisioning this run's identity...\n", noun)
+		if cleanupPrepared != nil {
+			cleanupPrepared()
+		}
 		deprovisionOrWarn(client, agentID)
 		_ = collector.RemoveState()
 		return false, fmt.Errorf("%w\n\nWait for it to finish, then re-run", err)

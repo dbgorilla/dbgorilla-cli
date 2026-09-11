@@ -45,9 +45,12 @@
   only that subnetwork, so it never collides with one the VPC already has.
   The deployment's new `egress_ip` output is the address on the allowlist,
   and `refresh-firewall` reads it the way it reads the AWS stack's
-  `EgressIP`. GCE template v1.2 adds the optional `instaclustr_api_key`
-  secret variable (injected as `INSTACLUSTR_API_KEY`) and the stable-egress
-  resources.
+  `EgressIP`. GCE template v1.3 adds the stable-egress
+  resources, gates the Cloud SQL/AlloyDB project roles behind
+  `database_roles` (off for Instaclustr), and drops the secret input
+  variables entirely: the CLI writes `<deployment>-server-secret`,
+  `-db-password` and `-instaclustr-api-key` to Secret Manager itself, so no
+  credential reaches Infrastructure Manager's input values or state.
 
 ## v0.5.3
 

@@ -268,6 +268,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 				deleteGcpSecretsOrWarn(project, deploymentName)
 				return nil
 			},
+			func() { deleteGcpSecretsOrWarn(project, deploymentName) },
 			"   Watch it with: dbg collector status\n")
 		if kept {
 			printGcpGrantGuidance(target, deploymentName, project)

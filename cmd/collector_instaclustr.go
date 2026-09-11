@@ -754,7 +754,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		// stack that is most likely still converging server-side;
 		// cloudDeployFailed keeps those and rolls back only real failures.
 		_, derr := cloudDeployFailed(err, in.client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
-			func() error { return deleteStack(stackName, region) },
+			func() error { return deleteStack(stackName, region) }, nil,
 			"   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` once it is up "+
 				"(the EgressIP output appears only once the stack completes, so the firewall entry waits for it).\n")
 		removeOperatorRule()
@@ -802,6 +802,14 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	if st, _ := collector.LoadState(); st != nil && !dryRun {
 		return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
 			st.AgentID)
+	}
+	// Refused rather than silently ignored (the cloudsql gcp path's rule): an
+	// aws command re-run with --target gcp must not keep flags this path
+	// never reads. --vpc-id is the aws instaclustr stable-egress flag.
+	for _, f := range append([]string{"vpc-id"}, awsOnlyFlags...) {
+		if cmd.Flags().Changed(f) {
+			return fmt.Errorf("--%s applies to --target aws only", f)
+		}
 	}
 	if err := printCloudIdentity("Google Cloud", gcpAvailable, gcpIdentity); err != nil {
 		return err
@@ -1016,6 +1024,7 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 				deleteGcpSecretsOrWarn(project, deploymentName)
 				return nil
 			},
+			func() { deleteGcpSecretsOrWarn(project, deploymentName) },
 			"   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` once it is up "+
 				"(the egress_ip output appears only once the deployment completes, so the firewall entry waits for it).\n")
 		removeOperatorRule()
