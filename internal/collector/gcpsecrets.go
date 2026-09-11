@@ -23,19 +23,23 @@ const secretManagerBase = "https://secretmanager.googleapis.com/v1"
 // gcpSecretSuffixes are the template's secret naming contract (a change is a
 // template-version bump): each secret is "<deployment-name>-<suffix>", and the
 // boot script fetches all three unconditionally.
-var gcpSecretSuffixes = []string{"server-secret", "db-password", "instaclustr-api-key"}
+var gcpSecretSuffixes = []string{"server-secret", "db-password", "instaclustr-api-key", "prometheus-api-key"}
 
 // gcpSecretPlaceholder stands in for an absent credential (IAM-auth installs
 // have no db password; cloud_sql installs no Instaclustr key), so the boot
 // script never needs to know which credentials this install carries.
 const gcpSecretPlaceholder = "unused"
 
-// GcpSecretValues carries the three collector credentials. Empty fields are
+// GcpSecretValues carries the four collector credentials. Empty fields are
 // written as the placeholder.
 type GcpSecretValues struct {
 	ServerSecret   string
 	DBPassword     string
 	InstaclustrKey string
+	// PrometheusKey is the dedicated low-privilege key for the
+	// platform-metrics scrape — a separate Instaclustr key kind (the
+	// provisioning keys 401 on monitoring surfaces).
+	PrometheusKey string
 }
 
 func (v GcpSecretValues) bySuffix() map[string]string {
@@ -43,6 +47,7 @@ func (v GcpSecretValues) bySuffix() map[string]string {
 		"server-secret":       v.ServerSecret,
 		"db-password":         v.DBPassword,
 		"instaclustr-api-key": v.InstaclustrKey,
+		"prometheus-api-key":  v.PrometheusKey,
 	}
 }
 

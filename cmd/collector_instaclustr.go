@@ -34,6 +34,7 @@ const (
 	instaclustrUserEnv         = "INSTACLUSTR_USERNAME"
 	instaclustrProvisioningEnv = "INSTACLUSTR_PROVISIONING_API_KEY"
 	instaclustrReadOnlyEnv     = "INSTACLUSTR_READONLY_API_KEY"
+	instaclustrPrometheusEnv   = "INSTACLUSTR_PROMETHEUS_API_KEY"
 )
 
 // Test seams, one var per side effect (the aws seams' pattern).
@@ -53,6 +54,7 @@ func init() {
 	installCmd.Flags().String("instaclustr-user", "", "Instaclustr console username (or "+instaclustrUserEnv+")")
 	installCmd.Flags().String("instaclustr-api-key", "", "Instaclustr provisioning API key, used for setup on this machine only (or "+instaclustrProvisioningEnv+")")
 	installCmd.Flags().String("instaclustr-readonly-key", "", "Instaclustr READ-ONLY provisioning API key the collector keeps for discovery (or "+instaclustrReadOnlyEnv+")")
+	installCmd.Flags().String("instaclustr-prometheus-key", "", "Instaclustr PROMETHEUS API key the collector keeps for the platform-metrics scrape — a separate key kind; optional, omit to skip platform metrics (or "+instaclustrPrometheusEnv+")")
 	installCmd.Flags().Bool("use-private-addresses", false, "Dial the cluster's private node addresses (VPC-peered collectors)")
 	installCmd.Flags().String("allow-ip", "", "Public IP the firewall should allow for the collector (default: this machine's, auto-detected)")
 	installCmd.Flags().Bool("stable-egress", true, "With --provider instaclustr on a cloud target: route the collector's egress through a NAT with a reserved static IP so the firewall rule stays valid (aws: NAT gateway + Elastic IP, ~USD 35-40/month plus data processing; gcp: Cloud NAT + static address, ~USD 3-5/month plus data processing)")
@@ -202,7 +204,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, caCert, in.setupCreds.Username, in.usePrivate, collector.DBPasswordEnv)
+	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, caCert, in.setupCreds.Username, in.usePrivate, collector.DBPasswordEnv, in.prometheusKey != "")
 	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, comp, endpointsFor(creds, cmd))
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -219,7 +221,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	return finishDockerInstall(cmd, in.client, creds, rendered, monitorPassword, caCert,
 		func(envPath string) error {
-			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey)
+			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey, in.prometheusKey)
 		},
 		state, rollbackRule,
 		"  dbg collector status              # check connection\n"+
@@ -234,12 +236,15 @@ type instaclustrInstall struct {
 	setupCreds collector.InstaclustrCreds
 	// readOnlyKey stays empty on a dry run — nothing renders or ships it.
 	readOnlyKey string
-	client      *api.Client
-	ict         collector.InstaclustrTarget
-	seedHost    string
-	usePrivate  bool
-	sslMode     string
-	databases   []string
+	// prometheusKey is OPTIONAL (flag/env only, never prompted): absent means
+	// the platform-metrics plane stays off — database telemetry unaffected.
+	prometheusKey string
+	client        *api.Client
+	ict           collector.InstaclustrTarget
+	seedHost      string
+	usePrivate    bool
+	sslMode       string
+	databases     []string
 }
 
 // resolveInstaclustrInstallInputs gathers everything the substrates share:
@@ -263,10 +268,21 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 		return nil, err
 	}
 	readOnlyKey := ""
+	prometheusKey := ""
 	if !dryRun {
 		if readOnlyKey, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv,
 			"Instaclustr READ-ONLY API key (the collector keeps this one)"); err != nil {
 			return nil, err
+		}
+		// The Prometheus key is optional — flag or env, never prompted: a
+		// third key kind whose absence just means no platform-metrics plane.
+		prometheusKey, _ = cmd.Flags().GetString("instaclustr-prometheus-key")
+		if prometheusKey == "" {
+			prometheusKey = os.Getenv(instaclustrPrometheusEnv)
+		}
+		if prometheusKey == "" {
+			fmt.Println(style.Info("ℹ  no Instaclustr Prometheus key given — platform host metrics stay off " +
+				"(pass --instaclustr-prometheus-key, or set " + instaclustrPrometheusEnv + ", to enable them)"))
 		}
 	}
 
@@ -302,15 +318,16 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 	}
 	dbNames, _ := cmd.Flags().GetString("db-name")
 	return &instaclustrInstall{
-		clusterID:   clusterID,
-		setupCreds:  setupCreds,
-		readOnlyKey: readOnlyKey,
-		client:      client,
-		ict:         ict,
-		seedHost:    seedHost,
-		usePrivate:  usePrivate,
-		sslMode:     sslMode,
-		databases:   splitCSV(dbNames),
+		clusterID:     clusterID,
+		setupCreds:    setupCreds,
+		readOnlyKey:   readOnlyKey,
+		prometheusKey: prometheusKey,
+		client:        client,
+		ict:           ict,
+		seedHost:      seedHost,
+		usePrivate:    usePrivate,
+		sslMode:       sslMode,
+		databases:     splitCSV(dbNames),
 	}, nil
 }
 
@@ -411,7 +428,7 @@ func dryRunInstaclustr(cmd *cobra.Command, ict collector.InstaclustrTarget, seed
 	fmt.Println("  GRANT pg_monitor TO " + collector.InstaclustrMonitorUser)
 	fmt.Println("  GRANT pg_read_all_data TO " + collector.InstaclustrMonitorUser)
 	fmt.Println()
-	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "", apiUsername, usePrivate, collector.DBPasswordEnv)
+	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "", apiUsername, usePrivate, collector.DBPasswordEnv, false)
 	// Empty credentials: nothing is minted on a dry run, so the endpoints are
 	// whatever the --*-url flags say (or the collector's production defaults).
 	cfg := collector.BuildInstaclustr("<agent-id>", "<tenant-id>", comp, endpointsFor(&api.CollectorCredentials{}, cmd))
@@ -676,7 +693,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		assignIP = "ENABLED"
 	}
 	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, "",
-		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv)
+		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv, in.prometheusKey != "")
 	input := collector.AwsStackInput{
 		Region:          region,
 		AccountID:       accountID,
@@ -726,6 +743,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	input.ServerSecret = creds.Secret
 	input.DBPassword = monitorPassword
 	input.InstaclustrKey = in.readOnlyKey
+	input.InstaclustrPromKey = in.prometheusKey
 	params, secrets, err := collector.AwsStackParams(input)
 	if err != nil {
 		removeOperatorRule()
@@ -919,7 +937,7 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 		return err
 	}
 	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, "",
-		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv)
+		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv, in.prometheusKey != "")
 	input := collector.GcpStackInput{
 		Components:      []collector.Component{comp},
 		Network:         network,
@@ -981,6 +999,7 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 		ServerSecret:   creds.Secret,
 		DBPassword:     monitorPassword,
 		InstaclustrKey: in.readOnlyKey,
+		PrometheusKey:  in.prometheusKey,
 	}); err != nil {
 		deleteGcpSecretsOrWarn(project, deploymentName)
 		deprovisionOrWarn(in.client, creds.AgentID)

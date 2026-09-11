@@ -1000,7 +1000,7 @@ func promptPasswordOptional(label string) string {
 }
 
 // awsSecretParams are the stack parameters a dry run must never print.
-var awsSecretParams = []string{"ServerSecret", "DbPassword", "InstaclustrApiKey"}
+var awsSecretParams = []string{"ServerSecret", "DbPassword", "InstaclustrApiKey", "InstaclustrPrometheusKey"}
 
 // printAwsParams prints the stack's deploy parameters for a dry run, decoding
 // the config so it shows the TOML that would be deployed rather than an opaque

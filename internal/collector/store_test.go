@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,6 +249,30 @@ func TestWriteEnvFile(t *testing.T) {
 	info, _ := os.Stat(path)
 	if perm := info.Mode().Perm(); perm != 0600 {
 		t.Errorf("env-file mode = %o, want 600", perm)
+	}
+}
+
+func TestWriteInstaclustrEnvFile_PrometheusKeyIsOptional(t *testing.T) {
+	// With the key: a fourth line under the collector's contract name.
+	path := filepath.Join(t.TempDir(), "collector.env")
+	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom-key"); err != nil {
+		t.Fatalf("WriteInstaclustrEnvFile: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	want := SecretEnv + "=s3cr3t\n" + DBPasswordEnv + "=pgpass\n" +
+		InstaclustrAPIKeyEnv + "=ro-key\n" + InstaclustrPromKeyEnv + "=prom-key\n"
+	if string(data) != want {
+		t.Errorf("env-file content = %q, want %q", data, want)
+	}
+
+	// Without it: the phase-1 three-line file, no empty-valued var that a
+	// config stanza could accidentally reference.
+	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", ""); err != nil {
+		t.Fatalf("WriteInstaclustrEnvFile: %v", err)
+	}
+	data, _ = os.ReadFile(path)
+	if strings.Contains(string(data), InstaclustrPromKeyEnv) {
+		t.Errorf("absent key must omit the line: %q", data)
 	}
 }
 

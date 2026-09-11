@@ -502,10 +502,13 @@ type AwsStackInput struct {
 	ServerSecret    string
 	DBPassword      string
 	// Instaclustr source riding the aws substrate: the READ-ONLY API key the
-	// task keeps for discovery (a third Secrets Manager secret), and the
-	// pre-rendered components (Targets stays empty — there is no RDS).
-	InstaclustrKey string
-	Components     []Component
+	// task keeps for discovery, the optional PROMETHEUS key for the
+	// platform-metrics scrape (a separate Instaclustr key kind — third and
+	// fourth Secrets Manager secrets), and the pre-rendered components
+	// (Targets stays empty — there is no RDS).
+	InstaclustrKey     string
+	InstaclustrPromKey string
+	Components         []Component
 	// Stable egress (NAT + EIP): the collector's outbound address never
 	// changes, which IP-allowlist-gated databases require.
 	StableEgress  bool
@@ -554,9 +557,10 @@ func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err er
 		"NatSubnetCidr":    in.NatSubnetCidr,
 	}
 	secrets = map[string]string{
-		"ServerSecret":      in.ServerSecret,
-		"DbPassword":        in.DBPassword,
-		"InstaclustrApiKey": in.InstaclustrKey,
+		"ServerSecret":             in.ServerSecret,
+		"DbPassword":               in.DBPassword,
+		"InstaclustrApiKey":        in.InstaclustrKey,
+		"InstaclustrPrometheusKey": in.InstaclustrPromKey,
 	}
 	return params, secrets, nil
 }
@@ -769,7 +773,8 @@ const (
 // an upgrade preserves the monitored databases and their IAM grants.
 var fargateParamKeys = []string{
 	configParamKey, rdsConnectParamKey, "ServerSecret", "DbPassword",
-	"InstaclustrApiKey", "CollectorImage", "Subnets", "SecurityGroupId",
+	"InstaclustrApiKey", "InstaclustrPrometheusKey", "CollectorImage",
+	"Subnets", "SecurityGroupId",
 	"AssignPublicIp", "StableEgress", "VpcId", "NatSubnetCidr",
 }
 

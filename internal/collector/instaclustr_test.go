@@ -184,7 +184,7 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv, true)
 	cfg := BuildInstaclustr("agent-1", "tenant-1", comp, Endpoints{})
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -197,6 +197,7 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 		`region = "US_EAST_1"`,
 		`api_username = "someone"`,
 		`api_key = "${INSTACLUSTR_API_KEY}"`,
+		`prometheus_api_key = "${IC_PROMETHEUS_API_KEY}"`,
 		`user = "dbgorilla_monitor"`,
 		`password = "${COLLECTOR_DB_PASSWORD}"`,
 		`ssl_mode = "require"`,
@@ -207,6 +208,16 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 	}
 	if strings.Contains(rendered, "use_private_addresses") {
 		t.Fatalf("false use_private_addresses should be omitted:\n%s", rendered)
+	}
+	// Without the Prometheus key the stanza is OMITTED — the collector builds
+	// the platform-metrics plane only when the config carries the reference.
+	without := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv, false)
+	renderedWithout, err := BuildInstaclustr("agent-1", "tenant-1", without, Endpoints{}).Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(renderedWithout, "prometheus_api_key") {
+		t.Fatalf("absent key must omit the stanza:\n%s", renderedWithout)
 	}
 	// The aws update path round-trips configs through StrictParseConfig; the
 	// instaclustr keys must be modelled or an update would refuse them.
@@ -219,7 +230,7 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv, false)
 	params, secrets, err := AwsStackParams(AwsStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
 		Region: "us-east-1", AccountID: "111122223333",
@@ -241,8 +252,8 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 		params["VpcId"] != "vpc-1" || params["NatSubnetCidr"] != "10.0.200.0/28" {
 		t.Fatalf("v1.1 params wrong: %v %v", params, secrets)
 	}
-	if params["InstaclustrApiKey"] != "" {
-		t.Fatal("the API key must never enter the printable params map")
+	if params["InstaclustrApiKey"] != "" || params["InstaclustrPrometheusKey"] != "" {
+		t.Fatal("no Instaclustr key may enter the printable params map")
 	}
 	decoded, err := DecodeConfig(params["CollectorConfig"])
 	if err != nil {
@@ -334,7 +345,7 @@ func TestGcpDeployInputsWithInstaclustrComponents(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "GCP", Region: "us-central1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv, false)
 	inputs, err := GcpDeployInputs(GcpStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
 		Components:     []Component{comp},

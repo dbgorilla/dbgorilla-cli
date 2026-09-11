@@ -60,7 +60,7 @@ const templateProbeTimeout = 5 * time.Second
 //
 // v1.2 corrects the install command in the template's own header comment;
 // no parameter contract change.
-const TemplateVersion = "v1.2"
+const TemplateVersion = "v1.3"
 
 // hostedTemplateURL is the published template this build deploys.
 var hostedTemplateURL = templateBaseURL + TemplateVersion + ".yaml"

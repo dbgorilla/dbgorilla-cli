@@ -221,7 +221,7 @@ func GenerateInstaclustrPassword() (string, error) {
 // passwordEnv names the password variable of the deploy substrate: the docker
 // env-file uses COLLECTOR_DB_PASSWORD; the Fargate task definition names
 // DBG_DB_PASSWORD (fed from Secrets Manager).
-func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, databases []string, sslMode, caCert, apiUsername string, usePrivate bool, passwordEnv string) Component {
+func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, databases []string, sslMode, caCert, apiUsername string, usePrivate bool, passwordEnv string, withPrometheusKey bool) Component {
 	if sslMode == "" {
 		// `require` (encrypt, no verify): every Instaclustr node negotiates
 		// TLS, but its certificate chains to a per-cluster CA that is only
@@ -241,6 +241,7 @@ func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, d
 			Region:              t.Region,
 			APIUsername:         apiUsername,
 			APIKey:              "${" + InstaclustrAPIKeyEnv + "}",
+			PrometheusAPIKey:    prometheusKeyRef(withPrometheusKey),
 			UsePrivateAddresses: usePrivate,
 		},
 		Auth: Auth{
@@ -256,6 +257,17 @@ func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, d
 			CACert:    caCert,
 		},
 	}
+}
+
+// prometheusKeyRef is the provider block's prometheus_api_key value: an env
+// reference when the operator supplied the key, empty (omitted from the
+// rendered TOML) otherwise — the collector builds the platform-metrics plane
+// only when the config carries the reference.
+func prometheusKeyRef(withPrometheusKey bool) string {
+	if !withPrometheusKey {
+		return ""
+	}
+	return "${" + InstaclustrPromKeyEnv + "}"
 }
 
 // BuildInstaclustr assembles the full collector config for one Instaclustr

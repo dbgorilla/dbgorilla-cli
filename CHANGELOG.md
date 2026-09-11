@@ -4,6 +4,16 @@
 
 ### Added
 
+- `--instaclustr-prometheus-key` (or `INSTACLUSTR_PROMETHEUS_API_KEY`): the
+  optional third Instaclustr key kind — their dedicated low-privilege
+  Prometheus key — delivered to the collector as `IC_PROMETHEUS_API_KEY` on
+  every deploy substrate (docker env-file; Fargate template v1.3's fourth
+  `NoEcho` parameter and Secrets Manager secret; GCE template v1.4's fourth
+  Secret Manager secret). Present, the collector also scrapes Instaclustr's
+  per-node platform metrics (host tiles, infra alarms) and dedupes them
+  against the direct connection; absent, platform metrics stay off and
+  database telemetry is unaffected.
+
 - `dbg collector install --provider instaclustr --cluster-id <id>` monitors a
   NetApp Instaclustr managed PostgreSQL cluster. The install discovers the
   cluster through the Instaclustr Cluster Management API, creates a read-only

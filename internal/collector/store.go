@@ -239,10 +239,14 @@ func ClearSecrets(agentID string) {
 }
 
 // WriteInstaclustrEnvFile is WriteEnvFile plus the collector's read-only
-// Instaclustr API key (node discovery). Same file, same 0600 contract.
-func WriteInstaclustrEnvFile(path, secret, dbPassword, icReadOnlyKey string) error {
+// Instaclustr API key (node discovery) and, when supplied, the dedicated
+// Prometheus key (platform-metrics scrape). Same file, same 0600 contract.
+func WriteInstaclustrEnvFile(path, secret, dbPassword, icReadOnlyKey, icPrometheusKey string) error {
 	content := fmt.Sprintf("%s=%s\n%s=%s\n%s=%s\n",
 		SecretEnv, secret, DBPasswordEnv, dbPassword, InstaclustrAPIKeyEnv, icReadOnlyKey)
+	if icPrometheusKey != "" {
+		content += fmt.Sprintf("%s=%s\n", InstaclustrPromKeyEnv, icPrometheusKey)
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
 		return fmt.Errorf("cannot write env-file: %w", err)
