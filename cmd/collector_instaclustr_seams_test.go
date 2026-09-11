@@ -563,7 +563,33 @@ func stubGCPOKForInstaclustr(t *testing.T) {
 	stubGcpIdentity(t, "dev@example.com", nil)
 	stubGcpProject(t, "acme-prod", nil)
 	stubGcpDeploymentStatus(t, "", nil)
+	stubGcpSubnetworkPGA(t, true, nil)
 	stubRemoteDigest(t, nil)
+}
+
+func TestInstallInstaclustrGCPStableEgressRefusesSubnetworkAndAllowIP(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubGCPOKForInstaclustr(t)
+	cmd := icGcpCmd(t, "")
+	mustSet(t, cmd, "region", "us-central1")
+	mustSet(t, cmd, "network", "projects/acme-prod/global/networks/default")
+	mustSet(t, cmd, "nat-subnet-cidr", "10.10.200.0/28")
+	mustSet(t, cmd, "subnetwork", "projects/acme-prod/regions/us-central1/subnetworks/mine")
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--subnetwork does not apply") {
+		t.Fatalf("expected the subnetwork refusal, got %v", err)
+	}
+
+	cmd = icGcpCmd(t, "")
+	mustSet(t, cmd, "region", "us-central1")
+	mustSet(t, cmd, "network", "projects/acme-prod/global/networks/default")
+	mustSet(t, cmd, "nat-subnet-cidr", "10.10.200.0/28")
+	mustSet(t, cmd, "allow-ip", "203.0.113.7")
+	err = runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--allow-ip does not apply") {
+		t.Fatalf("expected the allow-ip refusal, got %v", err)
+	}
 }
 
 func TestInstallInstaclustrGCPRequiresRegionAndNetwork(t *testing.T) {

@@ -1585,7 +1585,13 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	// CLI deliberately never stores, so removal is the user's step — but a
 	// silent orphan (the machine's IP allowlisted forever) is not acceptable.
 	if st.InstaclustrClusterID != "" {
-		fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows this machine's IP."))
+		// A cloud install allowlisted the collector's egress address, a
+		// docker install this machine's — name the right one.
+		if st.IsAWS() || st.IsGCP() {
+			fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows the collector's egress IP."))
+		} else {
+			fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows this machine's IP."))
+		}
 		if st.FirewallRuleID != "" {
 			fmt.Printf("   Remove rule %s on the cluster's Firewall Rules page (or via the API).\n", st.FirewallRuleID)
 		} else {

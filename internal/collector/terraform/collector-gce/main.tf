@@ -74,6 +74,12 @@ resource "google_secret_manager_secret" "server_secret" {
 resource "google_secret_manager_secret_version" "server_secret" {
   secret      = google_secret_manager_secret.server_secret.id
   secret_data = var.server_secret
+
+  # On rotation the replacement version must exist before the old one is
+  # destroyed, or a booting instance reading "latest" hits a gap.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "google_secret_manager_secret" "db_password" {
@@ -86,6 +92,10 @@ resource "google_secret_manager_secret" "db_password" {
 resource "google_secret_manager_secret_version" "db_password" {
   secret      = google_secret_manager_secret.db_password.id
   secret_data = var.db_password == "" ? "unused" : var.db_password
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "google_secret_manager_secret" "instaclustr_api_key" {
@@ -98,6 +108,10 @@ resource "google_secret_manager_secret" "instaclustr_api_key" {
 resource "google_secret_manager_secret_version" "instaclustr_api_key" {
   secret      = google_secret_manager_secret.instaclustr_api_key.id
   secret_data = var.instaclustr_api_key == "" ? "unused" : var.instaclustr_api_key
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "server_secret" {
@@ -122,9 +136,11 @@ resource "google_secret_manager_secret_iam_member" "instaclustr_api_key" {
 
 # A dedicated subnetwork routed through a Cloud NAT that holds a reserved
 # static address. The NAT is scoped to ONLY this subnetwork
-# (LIST_OF_SUBNETWORKS), so it never collides with a NAT the VPC already has —
-# GCP allows several NATs on one network as long as their subnet sets are
-# disjoint.
+# (LIST_OF_SUBNETWORKS), so it coexists with other subnet-scoped NATs — GCP
+# allows several NATs on one network as long as their subnet sets are
+# disjoint. A pre-existing NAT configured for ALL subnetworks in this region
+# does block adding this one; the escape is stable_egress=false with the
+# CLI's --allow-ip naming that NAT's address.
 resource "google_compute_subnetwork" "egress" {
   count                    = var.stable_egress ? 1 : 0
   name                     = "${local.name}-egress"

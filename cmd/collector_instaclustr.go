@@ -750,24 +750,15 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 
 	fmt.Printf("Deploying to Fargate (stack %q)...\n", stackName)
 	if err := deployStack(collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}, "Deploying to Fargate…"); err != nil {
-		if errors.Is(err, collector.ErrDeployTimeout) {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The stack was NOT rolled back — "+
-				"it is most likely still converging.", collector.DeployTimeout())))
-			fmt.Printf("   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` " +
-				"once it is up (the EgressIP output appears only once the stack completes, so the firewall entry waits for it).\n")
-			removeOperatorRule()
-			return nil
-		}
-		fmt.Println("Deploy failed; rolling back the provisioned identity and stack...")
-		if derr := in.client.DeleteCollector(creds.AgentID); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
-		}
-		if derr := deleteStack(stackName, region); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v", stackName, derr)))
-		}
-		_ = collector.RemoveState()
+		// An interrupt, a lost operation, or a timeout must NOT tear down a
+		// stack that is most likely still converging server-side;
+		// cloudDeployFailed keeps those and rolls back only real failures.
+		_, derr := cloudDeployFailed(err, in.client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
+			func() error { return deleteStack(stackName, region) },
+			"   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` once it is up "+
+				"(the EgressIP output appears only once the stack completes, so the firewall entry waits for it).\n")
 		removeOperatorRule()
-		return err
+		return derr
 	}
 
 	// Allowlist the collector's actual egress: the EIP the stack allocated
@@ -864,6 +855,17 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 				"subnetwork routed through a Cloud NAT with a reserved static address; the CIDR must be unused " +
 				"in the VPC). Pass --stable-egress=false with --allow-ip to use egress you already manage")
 		}
+		// Refuse rather than silently drop: under stable egress the template
+		// owns the subnetwork and the allowlisted address.
+		if cmd.Flags().Changed("subnetwork") {
+			return errors.New("--subnetwork does not apply with --stable-egress: the instance lives in the " +
+				"template-owned NAT-routed subnetwork. Pass --stable-egress=false (with --allow-ip) to choose " +
+				"the subnetwork yourself")
+		}
+		if allowRaw != "" {
+			return errors.New("--allow-ip does not apply with --stable-egress: the install allowlists the " +
+				"deployment's reserved static address. Pass --stable-egress=false to allowlist an address you manage")
+		}
 	} else {
 		if allowRaw == "" {
 			return errors.New("--stable-egress=false needs --allow-ip: the instance has no public IP, so its egress " +
@@ -874,6 +876,17 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 			if subnetwork, err = resolveGcpSubnetwork(network, region); err != nil {
 				return err
 			}
+		}
+		// Preflight, not a gate (the cloudsql path's check): without Private
+		// Google Access or NAT coverage the boot script cannot fetch its
+		// secrets or the image, and the failure is an opaque 30-minute
+		// timeout.
+		if pga, subnetPath, perr := gcpSubnetworkPGA(network, subnetwork, region); perr == nil && !pga {
+			fmt.Println(style.Warn(fmt.Sprintf(
+				"⚠  subnetwork %s has Private Google Access OFF — without it (or NAT coverage of this subnetwork) "+
+					"the instance cannot reach Secret Manager or the registry at boot. Enable it with:\n"+
+					"   gcloud compute networks subnets update %s --region=%s --enable-private-ip-google-access",
+				subnetPath, lastPathSegmentOf(subnetPath), region)))
 		}
 	}
 	if err := requireNoRuntime(dryRun,
@@ -1050,22 +1063,20 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 		Inputs: inputs, Secrets: secrets,
 	}
 	if err := withSpinner("Deploying to Compute Engine…", func() error { return runGcpDeploy(deploy) }); err != nil {
-		if errors.Is(err, collector.ErrDeployTimeout) {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The deployment was NOT rolled back — "+
-				"it is most likely still converging.", collector.GcpDeployTimeout())))
-			fmt.Printf("   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` " +
-				"once it is up (the egress_ip output appears only once the deployment completes, so the firewall entry waits for it).\n")
-			removeOperatorRule()
-			return nil
-		}
-		fmt.Println("Deploy failed; rolling back the provisioned identity and deployment...")
-		deprovisionOrWarn(client, creds.AgentID)
-		if derr := deleteGcpDeployment(project, region, deploymentName); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete deployment %s: %v", deploymentName, derr)))
-		}
-		_ = collector.RemoveState()
+		// An interrupt, a lost operation, or a timeout must NOT tear down a
+		// deployment that is most likely still converging server-side;
+		// cloudDeployFailed keeps those and rolls back only real failures.
+		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.GcpDeployTimeout(), "deployment", deploymentName,
+			func() error { return deleteGcpDeployment(project, region, deploymentName) },
+			"   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` once it is up "+
+				"(the egress_ip output appears only once the deployment completes, so the firewall entry waits for it).\n")
 		removeOperatorRule()
-		return err
+		if !kept && stableEgress {
+			derr = fmt.Errorf("%w\n\nIf the failure is creating the Cloud NAT: a NAT gateway configured for ALL "+
+				"subnetworks in this region blocks adding a second one. Re-run with --stable-egress=false "+
+				"--allow-ip <that NAT's address> instead", derr)
+		}
+		return derr
 	}
 
 	// Allowlist the collector's actual egress: the static address the
