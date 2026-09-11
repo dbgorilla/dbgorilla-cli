@@ -4,7 +4,7 @@ Description: >-
   RDS/Aurora databases and reports telemetry to DBGorilla over OTLP/OpAMP. The
   whole collector configuration is one TOML document passed as the
   CollectorConfig parameter (base64-encoded); see the commented example at the
-  top of this template. Deploy it with `dbg install --target aws`, or launch it
+  top of this template. Deploy it with `dbg collector install --target aws`, or launch it
   by hand from the console.
 
 # This template is versioned independently of the dbg CLI: its version tracks
@@ -14,7 +14,7 @@ Description: >-
 # against collector.TemplateVersion by TestTemplateVersionMatches.
 Metadata:
   DBGorilla:
-    TemplateVersion: 'v1.1'
+    TemplateVersion: 'v1.2'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CollectorConfig — the collector's TOML config, base64-encoded.

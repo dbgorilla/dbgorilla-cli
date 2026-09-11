@@ -44,7 +44,7 @@ const templateProbeTimeout = 5 * time.Second
 // meant republishing an identical file under a new key on every release, and
 // meant a CLI could not deploy at all unless a template had been published under
 // its exact version. Versioned on its own, the template moves only when its
-// contract does, and every CLI that speaks v1.0's parameters deploys v1.0.
+// contract does, and every CLI that speaks v1.1's parameters deploys v1.1.
 //
 // Bump this only for a change to that contract: a parameter added, removed, or
 // reinterpreted. Publishing refuses to overwrite an existing version with
@@ -57,7 +57,10 @@ const templateProbeTimeout = 5 * time.Second
 // v1.1 adds the optional InstaclustrApiKey secret parameter and the
 // StableEgress (NAT gateway + Elastic IP) option with its VpcId /
 // NatSubnetCidr parameters and EgressIP output.
-const TemplateVersion = "v1.1"
+//
+// v1.2 corrects the install command in the template's own header comment;
+// no parameter contract change.
+const TemplateVersion = "v1.2"
 
 // hostedTemplateURL is the published template this build deploys.
 var hostedTemplateURL = templateBaseURL + TemplateVersion + ".yaml"
