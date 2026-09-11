@@ -419,8 +419,11 @@ func TestInstallInstaclustrAWSHappyPath(t *testing.T) {
 	if len(*roleRuns) != 1 {
 		t.Fatalf("role not ensured exactly once: %v", *roleRuns)
 	}
-	if rec.count != 1 || rec.params["StableEgress"] != "ENABLED" || rec.params["InstaclustrApiKey"] != "key456" {
+	if rec.count != 1 || rec.params["StableEgress"] != "ENABLED" || rec.secrets["InstaclustrApiKey"] != "key456" {
 		t.Fatalf("deploy params wrong: count=%d %v", rec.count, rec.params)
+	}
+	if rec.params["InstaclustrApiKey"] != "" {
+		t.Fatal("the API key must never enter the printable params map")
 	}
 	if len(cidrs) != 2 || cidrs[0] != "192.0.2.9/32" || cidrs[1] != "198.51.100.20/32" {
 		t.Fatalf("expected operator rule then EIP rule, got %v", cidrs)
