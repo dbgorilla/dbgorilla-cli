@@ -34,6 +34,22 @@ func stackParamXML(key, value string) string {
 	return `<member><ParameterKey>` + key + `</ParameterKey><ParameterValue>` + value + `</ParameterValue></member>`
 }
 
+// declaredParamsXML renders one <Parameters> member per key — what
+// DescribeStacks reports for a deployed stack. UpdateComponents and
+// UpgradeImage only send keys the stack declares, so a fixture that stubs the
+// DescribeStacks their key filter issues has to declare them; no keys means
+// the full current-template set.
+func declaredParamsXML(keys ...string) []string {
+	if len(keys) == 0 {
+		keys = fargateParamKeys
+	}
+	members := make([]string, 0, len(keys))
+	for _, k := range keys {
+		members = append(members, stackParamXML(k, "previous"))
+	}
+	return members
+}
+
 const noSuchStackXML = `<ErrorResponse xmlns="http://cloudformation.amazonaws.com/doc/2010-05-15/">
   <Error><Type>Sender</Type><Code>ValidationError</Code>
   <Message>Stack with id dbg-collector does not exist</Message></Error>
@@ -554,7 +570,7 @@ func TestUpgradeImage(t *testing.T) {
 	t.Run("sends the new image and holds everything else", func(t *testing.T) {
 		f := newAWSFake(t).
 			on("UpdateStack", updateStackXML()).
-			on("DescribeStacks", stacksXML("UPDATE_COMPLETE"))
+			on("DescribeStacks", stacksXML("UPDATE_COMPLETE", declaredParamsXML()...))
 		stubAWS(t, f)
 
 		if err := UpgradeImage("dbg-collector", "us-east-1", "ghcr.io/dbgorilla/collector%3Av2"); err != nil {
@@ -573,11 +589,39 @@ func TestUpgradeImage(t *testing.T) {
 
 	// "Nothing to do" is a legitimate outcome and must read as one.
 	t.Run("already on that image is a clear message", func(t *testing.T) {
-		stubAWS(t, newAWSFake(t).fail("UpdateStack", http.StatusBadRequest,
-			awsErrorXML("ValidationError", "No updates are to be performed.")))
+		stubAWS(t, newAWSFake(t).
+			on("DescribeStacks", stacksXML("CREATE_COMPLETE", declaredParamsXML()...)).
+			fail("UpdateStack", http.StatusBadRequest,
+				awsErrorXML("ValidationError", "No updates are to be performed.")))
 		err := UpgradeImage("dbg-collector", "us-east-1", "img:v2")
 		if err == nil || !strings.Contains(err.Error(), "nothing to upgrade") {
 			t.Fatalf("err = %v, want the already-current message", err)
+		}
+	})
+
+	// A stack deployed from the v1.0 template declares none of the
+	// Instaclustr/StableEgress parameters. Handing it those keys on an update
+	// that reuses the previous template makes CloudFormation reject the whole
+	// update, so they must be filtered out — not sent as UsePreviousValue.
+	t.Run("an older stack is never handed parameters it does not declare", func(t *testing.T) {
+		f := newAWSFake(t).
+			on("UpdateStack", updateStackXML()).
+			on("DescribeStacks", stacksXML("UPDATE_COMPLETE", declaredParamsXML(
+				configParamKey, rdsConnectParamKey, "ServerSecret", "DbPassword",
+				"CollectorImage", "Subnets", "SecurityGroupId", "AssignPublicIp")...))
+		stubAWS(t, f)
+
+		if err := UpgradeImage("dbg-collector", "us-east-1", "img:v2"); err != nil {
+			t.Fatalf("UpgradeImage: %v", err)
+		}
+		body := f.sentBody()
+		for _, k := range []string{"InstaclustrApiKey", "StableEgress", "VpcId", "NatSubnetCidr"} {
+			if strings.Contains(body, "ParameterKey="+k) {
+				t.Errorf("update sent undeclared parameter %s to a v1.0 stack", k)
+			}
+		}
+		if !strings.Contains(body, "ParameterKey=CollectorImage") {
+			t.Error("the image parameter itself must still be sent")
 		}
 	})
 

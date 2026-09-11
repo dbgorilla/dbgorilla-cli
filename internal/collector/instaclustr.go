@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // InstaclustrMonitorUser is the read-only role the install creates for the
@@ -152,9 +153,13 @@ func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) erro
 	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_monitor TO %s", user)); err != nil && !isBenignGrantErr(err) {
 		return fmt.Errorf("granting pg_monitor to %s failed: %w", user, err)
 	}
-	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_read_all_data TO %s", user)); err != nil &&
-		!isBenignGrantErr(err) && !strings.Contains(err.Error(), "pg_read_all_data") {
-		return fmt.Errorf("granting pg_read_all_data to %s failed: %w", user, err)
+	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_read_all_data TO %s", user)); err != nil && !isBenignGrantErr(err) {
+		// 42704 undefined_object: the role does not exist before PG 14 — the
+		// monitor grant above still stands, so degrade rather than fail.
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42704" {
+			return fmt.Errorf("granting pg_read_all_data to %s failed: %w", user, err)
+		}
 	}
 	return nil
 }

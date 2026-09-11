@@ -243,6 +243,15 @@ Resources:
       # Must be a public subnet — the parameter description says so.
       SubnetId: !Select [0, !Ref Subnets]
 
+  # The AZ is the region's first — a subnet parameter's AZ is not readable in
+  # CloudFormation, so it may differ from the NAT's subnet AZ. Cross-AZ
+  # routing to a NAT is legal; the costs are cross-AZ data charges and a
+  # coupled AZ blast radius, accepted for a single monitoring task.
+  #
+  # Note there is deliberately no DependsOn from the Service to the private
+  # route: DependsOn on a condition-guarded resource fails validation when
+  # the condition is off. First task launches may race the NAT route
+  # (~2 min) and fail image pulls; ECS retries until the route lands.
   PrivateSubnet:
     Type: AWS::EC2::Subnet
     Condition: UseStableEgress
@@ -294,6 +303,7 @@ Resources:
                 Resource:
                   - !Ref ServerSecretStore
                   - !If [IsPasswordAuth, !Ref ComponentPasswordStore, !Ref AWS::NoValue]
+                  - !If [HasInstaclustrKey, !Ref InstaclustrKeyStore, !Ref AWS::NoValue]
 
   # The collector's own runtime identity: IAM DB auth + RDS discovery, least privilege.
   TaskRole:

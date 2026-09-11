@@ -46,6 +46,7 @@ func TestUpdateComponents_ReplacesTheMonitoredSet(t *testing.T) {
 	f := newAWSFake(t).
 		onSeq("DescribeStacks",
 			stacksXML("CREATE_COMPLETE", stackParamXML(configParamKey, storedConfig(t, []AwsTarget{updateTarget("old", "db-old")}))),
+			stacksXML("CREATE_COMPLETE", declaredParamsXML()...), // the declared-key read
 			stacksXML("UPDATE_COMPLETE"), // the update waiter
 		).
 		on("GetCallerIdentity", callerIdentityXML).
@@ -75,7 +76,8 @@ func TestUpdateComponents_KeepsStoredPasswordWhenNoneGiven(t *testing.T) {
 	f := newAWSFake(t).
 		onSeq("DescribeStacks",
 			stacksXML("CREATE_COMPLETE", stackParamXML(configParamKey, storedConfig(t, []AwsTarget{updateTarget("old", "db-old")}))),
-			stacksXML("UPDATE_COMPLETE"),
+			stacksXML("CREATE_COMPLETE", declaredParamsXML()...), // the declared-key read
+			stacksXML("UPDATE_COMPLETE"), // the update waiter
 		).
 		on("GetCallerIdentity", callerIdentityXML).
 		on("UpdateStack", updateStackXML())
@@ -97,7 +99,8 @@ func TestUpdateComponents_CarriesANewPassword(t *testing.T) {
 	f := newAWSFake(t).
 		onSeq("DescribeStacks",
 			stacksXML("CREATE_COMPLETE", stackParamXML(configParamKey, storedConfig(t, []AwsTarget{updateTarget("old", "db-old")}))),
-			stacksXML("UPDATE_COMPLETE"),
+			stacksXML("CREATE_COMPLETE", declaredParamsXML()...), // the declared-key read
+			stacksXML("UPDATE_COMPLETE"), // the update waiter
 		).
 		on("GetCallerIdentity", callerIdentityXML).
 		on("UpdateStack", updateStackXML())

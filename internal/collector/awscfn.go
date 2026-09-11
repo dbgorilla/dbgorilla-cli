@@ -305,6 +305,17 @@ func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword 
 	if err != nil {
 		return err
 	}
+	// This path rebuilds the component list from RDS/Aurora targets. A stack
+	// whose config carries any other provider (an instaclustr source) would be
+	// silently converted into an RDS config — with the DbPassword secret still
+	// bound to the other provider's credential. Refuse instead.
+	for _, c := range conf.Component {
+		if c.Provider.Type != "aws_rds" && c.Provider.Type != "aws_aurora" {
+			return fmt.Errorf("stack %q monitors a %s source, which this update path cannot modify. "+
+				"Uninstall and re-run the matching `dbg collector install --provider %s` instead",
+				stackName, c.Provider.Type, c.Provider.Type)
+		}
+	}
 	conf.Component = nil
 	for _, t := range targets {
 		conf.Component = append(conf.Component, awsComponent(t, region))
@@ -318,8 +329,15 @@ func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword 
 		return err
 	}
 
+	declared, err := stackParamKeys(ctx, client, stackName)
+	if err != nil {
+		return err
+	}
 	params := make([]cfntypes.Parameter, 0, len(fargateParamKeys))
 	for _, k := range fargateParamKeys {
+		if !declared[k] {
+			continue // an older template version without this parameter
+		}
 		p := cfntypes.Parameter{ParameterKey: aws.String(k)}
 		switch k {
 		case configParamKey:
@@ -364,6 +382,28 @@ func stackParam(ctx context.Context, client *cloudformation.Client, stackName, k
 	return "", fmt.Errorf("stack %q has no %s parameter; it predates this CLI version. Re-run: dbg collector install --target aws", stackName, key)
 }
 
+// stackParamKeys returns the parameter keys the deployed stack's template
+// actually declares. UpdateComponents and UpgradeImage iterate
+// fargateParamKeys filtered through this: a stack deployed from an older
+// template version (v1.0 has no InstaclustrApiKey/StableEgress/VpcId/
+// NatSubnetCidr) rejects UpdateStack outright when handed parameter keys it
+// does not declare, so this CLI must never widen an old stack's parameter
+// set on an update that reuses the previous template.
+func stackParamKeys(ctx context.Context, client *cloudformation.Client, stackName string) (map[string]bool, error) {
+	out, err := client.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)})
+	if err != nil {
+		return nil, fmt.Errorf("could not describe stack %q: %w", stackName, err)
+	}
+	if len(out.Stacks) == 0 {
+		return nil, fmt.Errorf("stack %q does not exist. Run: dbg collector install --target aws", stackName)
+	}
+	keys := make(map[string]bool, len(out.Stacks[0].Parameters))
+	for _, p := range out.Stacks[0].Parameters {
+		keys[aws.ToString(p.ParameterKey)] = true
+	}
+	return keys, nil
+}
+
 // StackOutput reads one output value from the deployed stack — how the CLI
 // learns the EgressIP a StableEgress deploy allocated, so the firewall
 // allowlist can carry the address the database will actually see.
@@ -398,15 +438,23 @@ func UpgradeImage(stackName, region, image string) error {
 	if err != nil {
 		return err
 	}
+	client := cloudformation.NewFromConfig(cfg)
+	declared, err := stackParamKeys(ctx, client, stackName)
+	if err != nil {
+		return err
+	}
 	params := make([]cfntypes.Parameter, 0, len(fargateParamKeys))
 	for _, k := range fargateParamKeys {
+		if !declared[k] {
+			continue // an older template version without this parameter
+		}
 		if k == "CollectorImage" {
 			params = append(params, cfntypes.Parameter{ParameterKey: aws.String(k), ParameterValue: aws.String(image)})
 		} else {
 			params = append(params, cfntypes.Parameter{ParameterKey: aws.String(k), UsePreviousValue: aws.Bool(true)})
 		}
 	}
-	err = updateStack(ctx, cloudformation.NewFromConfig(cfg), stackName, templateRef{UsePreviousTemplate: true}, params)
+	err = updateStack(ctx, client, stackName, templateRef{UsePreviousTemplate: true}, params)
 	if errors.Is(err, errNoStackUpdates) {
 		return fmt.Errorf("already on %s (nothing to upgrade)", image)
 	}

@@ -53,7 +53,7 @@ func init() {
 	installCmd.Flags().String("instaclustr-readonly-key", "", "Instaclustr READ-ONLY provisioning API key the collector keeps for discovery (or "+instaclustrReadOnlyEnv+")")
 	installCmd.Flags().Bool("use-private-addresses", false, "Dial the cluster's private node addresses (VPC-peered collectors)")
 	installCmd.Flags().String("allow-ip", "", "Public IP the firewall should allow for the collector (default: this machine's, auto-detected)")
-	installCmd.Flags().Bool("stable-egress", true, "With --provider instaclustr --target aws: run the task behind a NAT gateway + Elastic IP so the firewall rule stays valid (adds ~USD 32/month)")
+	installCmd.Flags().Bool("stable-egress", true, "With --provider instaclustr --target aws: run the task behind a NAT gateway + Elastic IP so the firewall rule stays valid (adds ~USD 35-40/month plus NAT data processing)")
 	installCmd.Flags().String("vpc-id", "", "VPC for the stable-egress private subnet (required with --stable-egress on aws)")
 	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress private subnet, e.g. 10.0.200.0/28")
 
@@ -74,6 +74,16 @@ func instaclustrSource(cmd *cobra.Command) bool {
 // dispatching on the deploy substrate: docker (below) or aws
 // (runInstallInstaclustrAWS). gcp arrives with the GCP target.
 func runInstallInstaclustr(cmd *cobra.Command) error {
+	// Neither substrate can carry a cluster CA yet: the docker CA mount
+	// replaces the container's system trust store (which the collector's own
+	// control-plane TLS relies on), and the Fargate template has no CA-mount
+	// mechanism at all. verify-full waits on a bundling story for both roots.
+	if ca, _ := cmd.Flags().GetString("ca-cert"); ca != "" {
+		return errors.New("--ca-cert is not supported with --provider instaclustr yet: neither the " +
+			"docker CA mount (it replaces the system trust store the collector's own TLS needs) nor " +
+			"the Fargate template can carry a cluster CA. The install uses ssl_mode=require " +
+			"(encrypted, unverified) for now")
+	}
 	switch target, _ := cmd.Flags().GetString("target"); target {
 	case "", "docker", "local":
 	case "aws", "fargate":
@@ -81,14 +91,6 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	default:
 		return fmt.Errorf("unknown --target %q for --provider instaclustr (expected 'docker' or 'aws'; "+
 			"'gcp' arrives with the GCP target)", target)
-	}
-	// The docker CA mount replaces the container's system trust store, which
-	// the collector's own control-plane TLS relies on — so a cluster CA can't
-	// ride it. verify-full support waits on a bundling story for both roots.
-	if ca, _ := cmd.Flags().GetString("ca-cert"); ca != "" {
-		return errors.New("--ca-cert is not supported with --provider instaclustr yet: the docker CA " +
-			"mount would replace the system trust store the collector's own TLS needs. " +
-			"The install uses ssl_mode=require (encrypted, unverified) for now")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
@@ -507,8 +509,15 @@ func runRefreshFirewall(cmd *cobra.Command, _ []string) error {
 			fmt.Println(style.Success("✓ Removed the stale rule from the previous IP"))
 		}
 	}
+	// Record ownership honestly either way: the new rule's id when this run
+	// created it, empty when the current rule pre-existed (the old owned id,
+	// if any, was just retired above and must not linger in state).
+	newID := ""
 	if created {
-		st.FirewallRuleID = rule.ID
+		newID = rule.ID
+	}
+	if st.FirewallRuleID != newID {
+		st.FirewallRuleID = newID
 		if err := collector.SaveState(st); err != nil {
 			return err
 		}
@@ -535,7 +544,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	if _, err := requireLogin(); err != nil {
 		return err
 	}
-	if st, _ := collector.LoadState(); st != nil {
+	if st, _ := collector.LoadState(); st != nil && !dryRun {
 		return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
 			st.AgentID)
 	}
@@ -549,6 +558,10 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	region := awsRegion()
 	if region == "" {
 		return errors.New("no AWS region resolved. Set AWS_REGION or configure a profile region")
+	}
+	accountID, err := awsAccountID()
+	if err != nil {
+		return err
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ AWS identity: %s (%s)", identity, region)))
 
@@ -639,14 +652,19 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	assignIP, _ := cmd.Flags().GetString("assign-public-ip")
+	if assignIP == "" {
+		assignIP = "ENABLED"
+	}
 	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "",
 		setupCreds.Username, usePrivate, collector.AwsDBPasswordEnv)
 	input := collector.AwsStackInput{
 		Region:          region,
+		AccountID:       accountID,
 		Components:      []collector.Component{comp},
 		Subnets:         subnets,
 		SecurityGroup:   sg,
-		AssignPublicIP:  "ENABLED",
+		AssignPublicIP:  assignIP,
 		CommandsEnabled: false,
 		StableEgress:    stableEgress,
 		VpcID:           vpcID,
@@ -749,7 +767,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The stack was NOT rolled back — "+
 				"it is most likely still converging.", collector.DeployTimeout())))
 			fmt.Printf("   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` " +
-				"once it is up (the firewall entry for the collector is not created until the stack reports its address).\n")
+				"once it is up (the EgressIP output appears only once the stack completes, so the firewall entry waits for it).\n")
 			removeOperatorRule()
 			return nil
 		}
@@ -793,6 +811,11 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	fmt.Println(style.Success(fmt.Sprintf("✓ Firewall: allowlisted %s for the collector", collectorCIDR)))
 	if opRule.ID != rule.ID {
 		removeOperatorRule()
+	} else if opCreated {
+		// The operator's machine and the collector share an egress address, so
+		// the temporary rule IS the collector's rule — this run created it and
+		// must own it, or refresh-firewall could never retire it.
+		created = true
 	}
 
 	if created {

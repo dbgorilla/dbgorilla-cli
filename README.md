@@ -158,7 +158,7 @@ dbg collector install --provider instaclustr --cluster-id <id>
 dbg collector refresh-firewall     # re-allowlist after this machine's IP changes
 
 # Or run it on Fargate behind a NAT gateway with an Elastic IP, so the
-# firewall entry never goes stale (~USD 32/month for the NAT):
+# firewall entry never goes stale (~USD 35–40/month for the NAT + Elastic IP, plus NAT data processing):
 dbg collector install --provider instaclustr --cluster-id <id> --target aws \
   --subnets subnet-aaa --security-group-id sg-bbb \
   --vpc-id vpc-ccc --nat-subnet-cidr 10.0.200.0/28
