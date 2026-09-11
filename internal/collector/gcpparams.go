@@ -21,15 +21,17 @@ const gceMetadataConfigLimit = 245760
 var gcpInputKeys = []string{
 	"collector_config",
 	"collector_image",
+	"nat_subnet_cidr",
 	"network",
 	"region",
 	"runtime_service_account",
+	"stable_egress",
 	"subnetwork",
 }
 
 // GcpSecretInputKeys are the template inputs that carry credentials. A dry
 // run prints their presence, never their values.
-var GcpSecretInputKeys = []string{"db_password", "server_secret"}
+var GcpSecretInputKeys = []string{"db_password", "instaclustr_api_key", "server_secret"}
 
 // GcpRuntimeServiceAccountFor is the service account the template creates for
 // the collector VM. The IAM database user derives from it before it exists.
@@ -67,6 +69,17 @@ type GcpStackInput struct {
 	// own input, never the config document.
 	DBPassword      string
 	CommandsEnabled bool
+	// Instaclustr source riding the gcp substrate: the READ-ONLY API key the
+	// instance keeps for discovery (its own Secret Manager secret), and the
+	// pre-rendered components (Targets stays empty — there is no Cloud SQL).
+	InstaclustrKey string
+	Components     []Component
+	// Stable egress (template-owned subnetwork + Cloud NAT + reserved static
+	// address): the collector's outbound IP never changes, which
+	// IP-allowlist-gated databases require. NatSubnetCidr is the subnetwork's
+	// range; Subnetwork is ignored when set, the template picks its own.
+	StableEgress  bool
+	NatSubnetCidr string
 }
 
 // GcpDeployInputs renders the template's input variables as two maps: the
@@ -75,7 +88,14 @@ type GcpStackInput struct {
 // credential can't be proven clean by inspection (or by a taint analysis) —
 // so the only place the two meet is the deploy request body.
 func GcpDeployInputs(in GcpStackInput) (inputs, secrets map[string]string, err error) {
-	configTOML, err := GcpConfigTOML(in.AgentID, in.TenantID, in.Targets, in.Endpoints, in.CommandsEnabled)
+	var configTOML string
+	if len(in.Components) > 0 {
+		// Pre-rendered components (the instaclustr source): no Cloud SQL
+		// discovery, no per-target render — the caller built the blocks.
+		configTOML, err = componentsConfigTOML(in.AgentID, in.TenantID, in.Components, in.Endpoints, in.CommandsEnabled)
+	} else {
+		configTOML, err = GcpConfigTOML(in.AgentID, in.TenantID, in.Targets, in.Endpoints, in.CommandsEnabled)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -83,17 +103,24 @@ func GcpDeployInputs(in GcpStackInput) (inputs, secrets map[string]string, err e
 	if err != nil {
 		return nil, nil, err
 	}
+	stableEgress := "false"
+	if in.StableEgress {
+		stableEgress = "true"
+	}
 	inputs = map[string]string{
 		"collector_config":        encoded,
 		"collector_image":         in.Image,
+		"nat_subnet_cidr":         in.NatSubnetCidr,
 		"network":                 in.Network,
 		"region":                  in.Region,
 		"runtime_service_account": GcpRuntimeServiceAccountFor(in.DeploymentName, in.Project),
+		"stable_egress":           stableEgress,
 		"subnetwork":              in.Subnetwork,
 	}
 	secrets = map[string]string{
-		"db_password":   in.DBPassword,
-		"server_secret": in.ServerSecret,
+		"db_password":         in.DBPassword,
+		"instaclustr_api_key": in.InstaclustrKey,
+		"server_secret":       in.ServerSecret,
 	}
 	return inputs, secrets, nil
 }

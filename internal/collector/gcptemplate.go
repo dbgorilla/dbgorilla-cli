@@ -18,7 +18,7 @@ const (
 
 // GcpTemplateVersion is the template's own version, bumped when its input
 // contract changes; a published version is never rewritten.
-const GcpTemplateVersion = "v1.1"
+const GcpTemplateVersion = "v1.2"
 
 const gcpTemplateProbeTimeout = 5 * time.Second
 

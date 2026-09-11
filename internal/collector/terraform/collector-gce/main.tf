@@ -2,7 +2,7 @@
 # instance group running the collector container on Container-Optimized OS,
 # deployed by Infrastructure Manager (or plain Terraform).
 #
-# template-version: v1.1
+# template-version: v1.2
 #
 # This file is published, never embedded in the CLI. Secrets arrive as
 # sensitive input variables and are stored in Secret Manager; the instance
@@ -88,6 +88,18 @@ resource "google_secret_manager_secret_version" "db_password" {
   secret_data = var.db_password == "" ? "unused" : var.db_password
 }
 
+resource "google_secret_manager_secret" "instaclustr_api_key" {
+  secret_id = "${local.name}-instaclustr-api-key"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "instaclustr_api_key" {
+  secret      = google_secret_manager_secret.instaclustr_api_key.id
+  secret_data = var.instaclustr_api_key == "" ? "unused" : var.instaclustr_api_key
+}
+
 resource "google_secret_manager_secret_iam_member" "server_secret" {
   secret_id = google_secret_manager_secret.server_secret.id
   role      = "roles/secretmanager.secretAccessor"
@@ -98,6 +110,56 @@ resource "google_secret_manager_secret_iam_member" "db_password" {
   secret_id = google_secret_manager_secret.db_password.id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.collector.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "instaclustr_api_key" {
+  secret_id = google_secret_manager_secret.instaclustr_api_key.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.collector.email}"
+}
+
+# --- stable egress (optional) -----------------------------------------------
+
+# A dedicated subnetwork routed through a Cloud NAT that holds a reserved
+# static address. The NAT is scoped to ONLY this subnetwork
+# (LIST_OF_SUBNETWORKS), so it never collides with a NAT the VPC already has —
+# GCP allows several NATs on one network as long as their subnet sets are
+# disjoint.
+resource "google_compute_subnetwork" "egress" {
+  count                    = var.stable_egress ? 1 : 0
+  name                     = "${local.name}-egress"
+  ip_cidr_range            = var.nat_subnet_cidr
+  region                   = var.region
+  network                  = var.network
+  private_ip_google_access = true
+}
+
+resource "google_compute_address" "egress" {
+  count  = var.stable_egress ? 1 : 0
+  name   = "${local.name}-egress"
+  region = var.region
+}
+
+resource "google_compute_router" "egress" {
+  count   = var.stable_egress ? 1 : 0
+  name    = "${local.name}-egress"
+  region  = var.region
+  network = var.network
+}
+
+resource "google_compute_router_nat" "egress" {
+  count                              = var.stable_egress ? 1 : 0
+  name                               = "${local.name}-egress"
+  router                             = google_compute_router.egress[0].name
+  region                             = var.region
+  nat_ip_allocate_option             = "MANUAL_ONLY"
+  nat_ips                            = [google_compute_address.egress[0].self_link]
+  source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+
+  subnetwork {
+    name                    = google_compute_subnetwork.egress[0].id
+    source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
+  }
 }
 
 # --- the instance -----------------------------------------------------------
@@ -132,13 +194,15 @@ locals {
     }
     DBG_SERVER_SECRET=$(retry 30 secret "${local.name}-server-secret")
     DBG_DB_PASSWORD=$(retry 30 secret "${local.name}-db-password")
-    export DBG_SERVER_SECRET DBG_DB_PASSWORD
+    INSTACLUSTR_API_KEY=$(retry 30 secret "${local.name}-instaclustr-api-key")
+    export DBG_SERVER_SECRET DBG_DB_PASSWORD INSTACLUSTR_API_KEY
     mkdir -p /var/lib/dbgorilla
     retry 30 metadata instance/attributes/collector-config | base64 -d > /var/lib/dbgorilla/collector.toml
     docker run -d --name dbg-collector --restart=always --network=host \
       -v /var/lib/dbgorilla/collector.toml:/etc/dbgorilla/collector.toml:ro \
       -e DBG_SERVER_SECRET \
       -e DBG_DB_PASSWORD \
+      -e INSTACLUSTR_API_KEY \
       "${var.collector_image}" --config-file /etc/dbgorilla/collector.toml
   EOT
 }
@@ -156,8 +220,10 @@ resource "google_compute_instance_template" "collector" {
   }
 
   network_interface {
+    # Under stable egress the instance lives in the NAT-routed subnetwork the
+    # template owns; otherwise in the caller's (or the auto-mode default).
     network    = var.network
-    subnetwork = var.subnetwork == "" ? null : var.subnetwork
+    subnetwork = var.stable_egress ? google_compute_subnetwork.egress[0].id : (var.subnetwork == "" ? null : var.subnetwork)
   }
 
   service_account {
@@ -203,12 +269,17 @@ resource "google_compute_region_instance_group_manager" "collector" {
   }
 
   # The instance reads its secrets at boot; do not start it before it may.
+  # Under stable egress it must also not start before its route to the
+  # internet exists, or the boot script times out fetching the image.
   depends_on = [
     google_project_iam_member.collector,
     google_secret_manager_secret_version.server_secret,
     google_secret_manager_secret_version.db_password,
+    google_secret_manager_secret_version.instaclustr_api_key,
     google_secret_manager_secret_iam_member.server_secret,
     google_secret_manager_secret_iam_member.db_password,
+    google_secret_manager_secret_iam_member.instaclustr_api_key,
+    google_compute_router_nat.egress,
   ]
 }
 
@@ -218,4 +289,10 @@ output "instance_group" {
 
 output "service_account" {
   value = google_service_account.collector.email
+}
+
+output "egress_ip" {
+  # The reserved static address all collector egress leaves through under
+  # stable egress — the address to allowlist on IP-gated databases.
+  value = var.stable_egress ? google_compute_address.egress[0].address : ""
 }

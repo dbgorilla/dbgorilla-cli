@@ -53,10 +53,11 @@ func gcpDeploymentPath(project, region, name string) string {
 }
 
 type gcpDeployment struct {
-	Name        string `json:"name"`
-	State       string `json:"state"` // CREATING | ACTIVE | UPDATING | DELETING | FAILED | SUSPENDED
-	StateDetail string `json:"stateDetail"`
-	ErrorLogs   string `json:"errorLogs"`
+	Name           string `json:"name"`
+	State          string `json:"state"` // CREATING | ACTIVE | UPDATING | DELETING | FAILED | SUSPENDED
+	StateDetail    string `json:"stateDetail"`
+	ErrorLogs      string `json:"errorLogs"`
+	LatestRevision string `json:"latestRevision"`
 }
 
 func (d GcpDeploy) body() map[string]any {
@@ -156,6 +157,47 @@ func GcpDeploymentStatus(project, region, name string) (string, error) {
 		return "", nil
 	}
 	return dep.State, nil
+}
+
+// GcpDeploymentOutput reads one Terraform output off the deployment's latest
+// applied revision — how the CLI learns the egress_ip a stable-egress deploy
+// reserved, so the firewall allowlist carries the address the database will
+// actually see.
+func GcpDeploymentOutput(project, region, name, key string) (string, error) {
+	ctx := context.Background()
+	cfg, err := loadGCPConfig(ctx)
+	if err != nil {
+		return "", gcpCredsErr(err)
+	}
+	dep, err := getGcpDeployment(ctx, cfg, gcpDeploymentPath(project, region, name))
+	if err != nil {
+		return "", err
+	}
+	if dep == nil {
+		return "", fmt.Errorf("deployment %q does not exist", name)
+	}
+	if dep.LatestRevision == "" {
+		return "", fmt.Errorf("deployment %q has no applied revision yet — is it still deploying?", name)
+	}
+	var rev struct {
+		ApplyResults struct {
+			Outputs map[string]struct {
+				Value any `json:"value"`
+			} `json:"outputs"`
+		} `json:"applyResults"`
+	}
+	if err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+dep.LatestRevision, nil, &rev); err != nil {
+		return "", fmt.Errorf("could not read deployment %q's latest revision: %w", name, err)
+	}
+	out, ok := rev.ApplyResults.Outputs[key]
+	if !ok {
+		return "", fmt.Errorf("deployment %q has no %s output — was it deployed with stable egress enabled?", name, key)
+	}
+	s, ok := out.Value.(string)
+	if !ok || s == "" {
+		return "", fmt.Errorf("deployment %q's %s output is empty — was it deployed with stable egress enabled?", name, key)
+	}
+	return s, nil
 }
 
 // DeleteGcpDeployment destroys the deployment and everything Terraform

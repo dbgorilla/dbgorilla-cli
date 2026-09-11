@@ -329,3 +329,103 @@ func TestFirewallRules(t *testing.T) {
 		}
 	})
 }
+
+func TestGcpDeployInputsWithInstaclustrComponents(t *testing.T) {
+	target := InstaclustrTarget{
+		ClusterID: "c-1", Name: "orders", CloudProvider: "GCP", Region: "us-central1",
+	}
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv)
+	inputs, secrets, err := GcpDeployInputs(GcpStackInput{
+		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
+		Components:     []Component{comp},
+		Network:        "projects/p/global/networks/default",
+		Region:         "us-central1",
+		DeploymentName: "dbgorilla-collector",
+		Project:        "p",
+		ServerSecret:   "sek",
+		DBPassword:     "monitor-pw",
+		InstaclustrKey: "key456",
+		StableEgress:   true,
+		NatSubnetCidr:  "10.10.200.0/28",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets["instaclustr_api_key"] != "key456" || inputs["stable_egress"] != "true" ||
+		inputs["nat_subnet_cidr"] != "10.10.200.0/28" {
+		t.Fatalf("v1.2 inputs wrong: %v %v", inputs, secrets)
+	}
+	if inputs["instaclustr_api_key"] != "" {
+		t.Fatal("the API key must never enter the printable inputs map")
+	}
+	decoded, err := DecodeConfig(inputs["collector_config"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`type = "instaclustr"`,
+		`api_key = "${INSTACLUSTR_API_KEY}"`,
+		`password = "${DBG_DB_PASSWORD}"`, // the GCE boot script's variable name
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("deploy config missing %q:\n%s", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, "key456") || strings.Contains(decoded, "monitor-pw") {
+		t.Fatalf("a literal secret leaked into the deploy config:\n%s", decoded)
+	}
+}
+
+func TestGcpDeploymentOutput(t *testing.T) {
+	const (
+		icDepPath = "/v1/projects/p/locations/us-central1/deployments/dbg"
+		icRevPath = "/v1/projects/p/locations/us-central1/deployments/dbg/revisions/r-3"
+	)
+	depJSON := `{"name":"projects/p/locations/us-central1/deployments/dbg","state":"ACTIVE",` +
+		`"latestRevision":"projects/p/locations/us-central1/deployments/dbg/revisions/r-3"}`
+
+	t.Run("reads the output off the latest revision", func(t *testing.T) {
+		f := newGCPFake(t).
+			on("GET", icDepPath, 200, depJSON).
+			on("GET", icRevPath, 200, `{"applyResults":{"outputs":{"egress_ip":{"value":"198.51.100.20"}}}}`)
+		stubGCP(t, f)
+		got, err := GcpDeploymentOutput("p", "us-central1", "dbg", "egress_ip")
+		if err != nil {
+			t.Fatalf("GcpDeploymentOutput: %v", err)
+		}
+		if got != "198.51.100.20" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("a missing output names stable egress", func(t *testing.T) {
+		f := newGCPFake(t).
+			on("GET", icDepPath, 200, depJSON).
+			on("GET", icRevPath, 200, `{"applyResults":{"outputs":{}}}`)
+		stubGCP(t, f)
+		_, err := GcpDeploymentOutput("p", "us-central1", "dbg", "egress_ip")
+		if err == nil || !strings.Contains(err.Error(), "stable egress") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("an empty output value is refused", func(t *testing.T) {
+		f := newGCPFake(t).
+			on("GET", icDepPath, 200, depJSON).
+			on("GET", icRevPath, 200, `{"applyResults":{"outputs":{"egress_ip":{"value":""}}}}`)
+		stubGCP(t, f)
+		if _, err := GcpDeploymentOutput("p", "us-central1", "dbg", "egress_ip"); err == nil {
+			t.Fatal("an empty egress_ip must be an error, not an empty allowlist entry")
+		}
+	})
+
+	t.Run("no revision yet reads as still deploying", func(t *testing.T) {
+		f := newGCPFake(t).
+			on("GET", icDepPath, 200, `{"name":"x","state":"CREATING"}`)
+		stubGCP(t, f)
+		_, err := GcpDeploymentOutput("p", "us-central1", "dbg", "egress_ip")
+		if err == nil || !strings.Contains(err.Error(), "still deploying") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}

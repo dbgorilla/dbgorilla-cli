@@ -44,3 +44,22 @@ variable "server_secret" {
   type        = string
   sensitive   = true
 }
+
+variable "instaclustr_api_key" {
+  description = "Read-only Instaclustr provisioning API key for node discovery; empty when no Instaclustr source is monitored."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "stable_egress" {
+  description = "Create a dedicated subnetwork routed through a Cloud NAT with a reserved static address, so the collector's outbound IP never changes (IP-allowlist-gated databases require it)."
+  type        = bool
+  default     = false
+}
+
+variable "nat_subnet_cidr" {
+  description = "Unused CIDR in the VPC for the stable-egress subnetwork, e.g. 10.10.200.0/28. Required when stable_egress is true."
+  type        = string
+  default     = ""
+}

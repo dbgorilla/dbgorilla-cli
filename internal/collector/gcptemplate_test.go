@@ -72,7 +72,7 @@ func TestGcpTemplateContract_RuntimePins(t *testing.T) {
 	for _, want := range []string{
 		`google-logging-enabled  = "true"`,
 		`--name ` + gcpCollectorContainerName,
-		`subnetwork = var.subnetwork == "" ? null : var.subnetwork`,
+		`subnetwork = var.stable_egress ? google_compute_subnetwork.egress[0].id : (var.subnetwork == "" ? null : var.subnetwork)`,
 		"depends_on = [",
 	} {
 		if !strings.Contains(string(main), want) {

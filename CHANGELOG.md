@@ -36,6 +36,19 @@
   `InstaclustrApiKey` secret parameter (the read-only key, injected as
   `INSTACLUSTR_API_KEY`) and the stable-egress resources.
 
+- `--provider instaclustr --target gcp` deploys the collector to Compute
+  Engine via Infrastructure Manager. Networking is explicit
+  (`--region`/`--network` — there is no Cloud SQL instance to discover it
+  from), and by default the instance lives in a template-owned subnetwork
+  routed through a Cloud NAT with a reserved static address
+  (`--stable-egress`, requiring `--nat-subnet-cidr`); the NAT is scoped to
+  only that subnetwork, so it never collides with one the VPC already has.
+  The deployment's new `egress_ip` output is the address on the allowlist,
+  and `refresh-firewall` reads it the way it reads the AWS stack's
+  `EgressIP`. GCE template v1.2 adds the optional `instaclustr_api_key`
+  secret variable (injected as `INSTACLUSTR_API_KEY`) and the stable-egress
+  resources.
+
 ## v0.5.3
 
 ### Added

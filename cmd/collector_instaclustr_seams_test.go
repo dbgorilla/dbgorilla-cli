@@ -524,3 +524,207 @@ func TestRefreshFirewallNeverDeletesARuleItDoesNotOwn(t *testing.T) {
 		t.Fatalf("deleted a rule the CLI does not own: %v", *deleted)
 	}
 }
+
+// --- the gcp substrate ------------------------------------------------------
+
+func stubGcpDeploymentOutput(t *testing.T, value string, err error) {
+	t.Helper()
+	orig := gcpDeploymentOutput
+	gcpDeploymentOutput = func(string, string, string, string) (string, error) { return value, err }
+	t.Cleanup(func() { gcpDeploymentOutput = orig })
+}
+
+// icGcpCmd mirrors the REAL flag registrations for the gcp substrate (types
+// must match — see icCmd's db-name note).
+func icGcpCmd(t *testing.T, apiURL string) *cobra.Command {
+	t.Helper()
+	cmd := icCmd(t, apiURL)
+	cmd.Flags().String("project", "", "")
+	cmd.Flags().String("deployment-name", collector.DefaultGcpDeploymentName, "")
+	cmd.Flags().String("template-source", "", "")
+	cmd.Flags().String("deploy-service-account", "", "")
+	cmd.Flags().String("network", "", "")
+	cmd.Flags().String("subnetwork", "", "")
+	cmd.Flags().Bool("stable-egress", true, "")
+	cmd.Flags().String("nat-subnet-cidr", "", "")
+	cmd.Flags().String("region", "", "")
+	mustSet(t, cmd, "target", "gcp")
+	mustSet(t, cmd, "cluster-id", "c-1")
+	mustSet(t, cmd, "instaclustr-user", "someone")
+	mustSet(t, cmd, "instaclustr-api-key", "key123")
+	mustSet(t, cmd, "instaclustr-readonly-key", "key456")
+	mustSet(t, cmd, "deploy-service-account", "projects/acme-prod/serviceAccounts/deployer@acme-prod.iam.gserviceaccount.com")
+	return cmd
+}
+
+func stubGCPOKForInstaclustr(t *testing.T) {
+	t.Helper()
+	stubGcpAvailable(t, nil)
+	stubGcpIdentity(t, "dev@example.com", nil)
+	stubGcpProject(t, "acme-prod", nil)
+	stubGcpDeploymentStatus(t, "", nil)
+	stubRemoteDigest(t, nil)
+}
+
+func TestInstallInstaclustrGCPRequiresRegionAndNetwork(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubGCPOKForInstaclustr(t)
+	cmd := icGcpCmd(t, "")
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--region is required") {
+		t.Fatalf("expected the region requirement, got %v", err)
+	}
+	mustSet(t, cmd, "region", "us-central1")
+	err = runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--network is required") {
+		t.Fatalf("expected the network requirement, got %v", err)
+	}
+}
+
+func TestInstallInstaclustrGCPStableEgressNeedsCidr(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubGCPOKForInstaclustr(t)
+	cmd := icGcpCmd(t, "")
+	mustSet(t, cmd, "region", "us-central1")
+	mustSet(t, cmd, "network", "projects/acme-prod/global/networks/default")
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--nat-subnet-cidr is required") {
+		t.Fatalf("expected the stable-egress requirement, got %v", err)
+	}
+}
+
+func TestInstallInstaclustrGCPNoStableEgressNeedsAllowIP(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubGCPOKForInstaclustr(t)
+	cmd := icGcpCmd(t, "")
+	mustSet(t, cmd, "region", "us-central1")
+	mustSet(t, cmd, "network", "projects/acme-prod/global/networks/default")
+	mustSet(t, cmd, "stable-egress", "false")
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "needs --allow-ip") {
+		t.Fatalf("expected the allow-ip requirement, got %v", err)
+	}
+}
+
+func TestInstallInstaclustrGCPHappyPath(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	defer srv.Close()
+	stubGCPOKForInstaclustr(t)
+	stubDiscoverInstaclustr(t, icTestTarget(), nil)
+	stubPublicEgressIP(t, "192.0.2.9", nil) // the operator's machine
+	rec := stubGcpDeploy(t, nil)
+	stubGcpDeploymentOutput(t, "198.51.100.20", nil) // the reserved static address
+	roleRuns := stubCreateInstaclustrRole(t, nil)
+	deleted := stubDeleteFirewallRule(t, nil)
+
+	// ensureFirewallRule is called twice: the operator's temp rule (created)
+	// and the egress-address rule. Distinct ids so the temp-rule cleanup and
+	// the ownership recording are distinguishable.
+	var cidrs []string
+	origEnsure := ensureFirewallRule
+	ensureFirewallRule = func(_ context.Context, _ collector.InstaclustrCreds, _ string, cidr string) (collector.FirewallRule, bool, error) {
+		cidrs = append(cidrs, cidr)
+		if cidr == "192.0.2.9/32" {
+			return collector.FirewallRule{ID: "r-operator", Network: cidr}, true, nil
+		}
+		return collector.FirewallRule{ID: "r-egress", Network: cidr}, true, nil
+	}
+	t.Cleanup(func() { ensureFirewallRule = origEnsure })
+
+	cmd := icGcpCmd(t, srv.URL)
+	mustSet(t, cmd, "region", "us-central1")
+	mustSet(t, cmd, "network", "projects/acme-prod/global/networks/default")
+	mustSet(t, cmd, "nat-subnet-cidr", "10.10.200.0/28")
+
+	if err := runInstall(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*roleRuns) != 1 {
+		t.Fatalf("role not ensured exactly once: %v", *roleRuns)
+	}
+	if rec.count != 1 || rec.deploy.Inputs["stable_egress"] != "true" ||
+		rec.deploy.Inputs["nat_subnet_cidr"] != "10.10.200.0/28" ||
+		rec.deploy.Secrets["instaclustr_api_key"] != "key456" {
+		t.Fatalf("deploy inputs wrong: count=%d inputs=%v", rec.count, rec.deploy.Inputs)
+	}
+	if rec.deploy.Inputs["instaclustr_api_key"] != "" {
+		t.Fatal("the API key must never enter the printable inputs map")
+	}
+	if len(cidrs) != 2 || cidrs[0] != "192.0.2.9/32" || cidrs[1] != "198.51.100.20/32" {
+		t.Fatalf("expected operator rule then egress rule, got %v", cidrs)
+	}
+	if len(*deleted) != 1 || (*deleted)[0] != "r-operator" {
+		t.Fatalf("operator temp rule not cleaned up: %v", *deleted)
+	}
+	st, err := collector.LoadState()
+	if err != nil || st == nil {
+		t.Fatalf("no state: %v", err)
+	}
+	if !st.IsGCP() || st.InstaclustrClusterID != "c-1" || st.FirewallRuleID != "r-egress" ||
+		st.Project != "acme-prod" || st.DeploymentName != collector.DefaultGcpDeploymentName {
+		t.Fatalf("state wrong: %+v", st)
+	}
+}
+
+func TestInstallInstaclustrGCPDryRunMutatesNothing(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	defer srv.Close()
+	stubGCPOKForInstaclustr(t)
+	stubDiscoverInstaclustr(t, icTestTarget(), nil)
+	rec := stubGcpDeploy(t, nil)
+	cidrs := stubEnsureFirewallRule(t, collector.FirewallRule{}, false, errors.New("must not be called"))
+	roleRuns := stubCreateInstaclustrRole(t, errors.New("must not be called"))
+
+	cmd := icGcpCmd(t, srv.URL)
+	mustSet(t, cmd, "region", "us-central1")
+	mustSet(t, cmd, "network", "projects/acme-prod/global/networks/default")
+	mustSet(t, cmd, "nat-subnet-cidr", "10.10.200.0/28")
+	mustSet(t, cmd, "dry-run", "true")
+
+	out := capture(t, func() {
+		if err := runInstall(cmd, nil); err != nil {
+			t.Errorf("dry run failed: %v", err)
+		}
+	})
+	if len(*cidrs) != 0 || len(*roleRuns) != 0 {
+		t.Fatalf("dry run mutated: firewall=%v role=%v", *cidrs, *roleRuns)
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		t.Fatalf("dry run saved state: %+v", st)
+	}
+	if rec.count != 1 || !rec.deploy.DryRun {
+		t.Fatalf("expected exactly one dry-run deploy probe, got count=%d dryRun=%v", rec.count, rec.deploy.DryRun)
+	}
+	if strings.Contains(out, "key123") || strings.Contains(out, "key456") {
+		t.Fatalf("a credential leaked into the dry-run output:\n%s", out)
+	}
+}
+
+func TestRefreshFirewallOnGCPUsesTheDeploymentEgressIP(t *testing.T) {
+	isolate(t)
+	if err := collector.SaveState(&collector.State{
+		AgentID: "a-1", Target: "gcp", Project: "acme-prod", Region: "us-central1",
+		DeploymentName:       "dbgorilla-collector",
+		InstaclustrClusterID: "c-1", InstaclustrUsername: "someone",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(instaclustrProvisioningEnv, "key123")
+	stubGcpDeploymentOutput(t, "198.51.100.20", nil)
+	stubPublicEgressIP(t, "192.0.2.9", errors.New("must not be called for a gcp install"))
+	cidrs := stubEnsureFirewallRule(t, collector.FirewallRule{ID: "r-egress", Network: "198.51.100.20/32"}, false, nil)
+
+	if err := runRefreshFirewall(refreshFirewallCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*cidrs) != 1 || (*cidrs)[0] != "198.51.100.20/32" {
+		t.Fatalf("expected the deployment's static address, got %v", *cidrs)
+	}
+}

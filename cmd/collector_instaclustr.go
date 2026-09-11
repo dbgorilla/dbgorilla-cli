@@ -44,6 +44,7 @@ var (
 	createInstaclustrRole = collector.EnsureInstaclustrRole
 	publicEgressIP        = func(ctx context.Context) (string, error) { return collector.PublicEgressIP(ctx) }
 	stackOutput           = collector.StackOutput
+	gcpDeploymentOutput   = collector.GcpDeploymentOutput
 )
 
 func init() {
@@ -54,9 +55,10 @@ func init() {
 	installCmd.Flags().String("instaclustr-readonly-key", "", "Instaclustr READ-ONLY provisioning API key the collector keeps for discovery (or "+instaclustrReadOnlyEnv+")")
 	installCmd.Flags().Bool("use-private-addresses", false, "Dial the cluster's private node addresses (VPC-peered collectors)")
 	installCmd.Flags().String("allow-ip", "", "Public IP the firewall should allow for the collector (default: this machine's, auto-detected)")
-	installCmd.Flags().Bool("stable-egress", true, "With --provider instaclustr --target aws: run the task behind a NAT gateway + Elastic IP so the firewall rule stays valid (adds ~USD 35-40/month plus NAT data processing)")
+	installCmd.Flags().Bool("stable-egress", true, "With --provider instaclustr on a cloud target: route the collector's egress through a NAT with a reserved static IP so the firewall rule stays valid (aws: NAT gateway + Elastic IP, ~USD 35-40/month plus data processing; gcp: Cloud NAT + static address, ~USD 3-5/month plus data processing)")
 	installCmd.Flags().String("vpc-id", "", "VPC for the stable-egress private subnet (required with --stable-egress on aws)")
-	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress private subnet, e.g. 10.0.200.0/28")
+	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress subnet, e.g. 10.0.200.0/28 (aws and gcp)")
+	installCmd.Flags().String("region", "", "GCP: region for the collector instance (required with --provider instaclustr --target gcp; aws reads AWS_REGION)")
 
 	refreshFirewallCmd.Flags().String("instaclustr-user", "", "Instaclustr console username (or "+instaclustrUserEnv+")")
 	refreshFirewallCmd.Flags().String("instaclustr-api-key", "", "Instaclustr provisioning API key (or "+instaclustrProvisioningEnv+")")
@@ -72,26 +74,27 @@ func instaclustrSource(cmd *cobra.Command) bool {
 }
 
 // runInstallInstaclustr is the install flow for the instaclustr source,
-// dispatching on the deploy substrate: docker (below) or aws
-// (runInstallInstaclustrAWS). gcp arrives with the GCP target.
+// dispatching on the deploy substrate: docker (below), aws
+// (runInstallInstaclustrAWS), or gcp (runInstallInstaclustrGCP).
 func runInstallInstaclustr(cmd *cobra.Command) error {
-	// Neither substrate can carry a cluster CA yet: the docker CA mount
-	// replaces the container's system trust store (which the collector's own
-	// control-plane TLS relies on), and the Fargate template has no CA-mount
-	// mechanism at all. verify-full waits on a bundling story for both roots.
+	// No substrate can carry a cluster CA yet: the docker CA mount replaces
+	// the container's system trust store (which the collector's own
+	// control-plane TLS relies on), and neither cloud template has a CA-mount
+	// mechanism. verify-full waits on a bundling story for all three roots.
 	if ca, _ := cmd.Flags().GetString("ca-cert"); ca != "" {
 		return errors.New("--ca-cert is not supported with --provider instaclustr yet: neither the " +
 			"docker CA mount (it replaces the system trust store the collector's own TLS needs) nor " +
-			"the Fargate template can carry a cluster CA. The install uses ssl_mode=require " +
+			"the cloud templates can carry a cluster CA. The install uses ssl_mode=require " +
 			"(encrypted, unverified) for now")
 	}
 	switch target, _ := cmd.Flags().GetString("target"); target {
 	case "", "docker", "local":
 	case "aws", "fargate":
 		return runInstallInstaclustrAWS(cmd)
+	case "gcp":
+		return runInstallInstaclustrGCP(cmd)
 	default:
-		return fmt.Errorf("unknown --target %q for --provider instaclustr (expected 'docker' or 'aws'; "+
-			"'gcp' arrives with the GCP target)", target)
+		return fmt.Errorf("unknown --target %q for --provider instaclustr (expected 'docker', 'aws' or 'gcp')", target)
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
@@ -524,7 +527,8 @@ func runRefreshFirewall(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	allowRaw, _ := cmd.Flags().GetString("allow-ip")
 	if allowRaw == "" {
-		if st.IsAWS() {
+		switch {
+		case st.IsAWS():
 			// The collector's egress is the stack's Elastic IP, not this
 			// machine's address. A stack without the output was deployed
 			// without stable egress — then only an explicit address makes
@@ -533,7 +537,13 @@ func runRefreshFirewall(cmd *cobra.Command, _ []string) error {
 			if err != nil {
 				return fmt.Errorf("%w\n\nPass --allow-ip explicitly for a deploy without stable egress", err)
 			}
-		} else {
+		case st.IsGCP():
+			// Same shape on gcp: the deployment's reserved static address.
+			allowRaw, err = gcpDeploymentOutput(st.Project, st.Region, st.DeploymentName, "egress_ip")
+			if err != nil {
+				return fmt.Errorf("%w\n\nPass --allow-ip explicitly for a deploy without stable egress", err)
+			}
+		default:
 			allowRaw, err = publicEgressIP(ctx)
 			if err != nil {
 				return err
@@ -776,6 +786,336 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	fmt.Println("Collector deployed. Next:")
 	fmt.Println("  dbg collector status              # stack + connection")
 	fmt.Println("  dbg collector logs -f             # CloudWatch logs")
+	fmt.Println("  dbg collector refresh-firewall    # re-assert the allowlist entry")
+	return nil
+}
+
+// --- the gcp substrate ------------------------------------------------------
+
+// runInstallInstaclustrGCP deploys the collector for an Instaclustr cluster
+// onto Compute Engine via Infrastructure Manager. Networking is explicit
+// (--network/--region): there is no Cloud SQL instance to discover it from.
+// By default the instance lives in a template-owned subnetwork routed through
+// a Cloud NAT with a reserved static address (--stable-egress), so the
+// firewall rule created for it stays valid across instance recreates;
+// --stable-egress=false requires --allow-ip, because the instance has no
+// public IP of its own and whatever NAT the VPC already has is an address the
+// operator, not this CLI, manages.
+func runInstallInstaclustrGCP(cmd *cobra.Command) error {
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+	apiURL, err := requireInstallSession(cmd)
+	if err != nil {
+		return err
+	}
+	if st, _ := collector.LoadState(); st != nil && !dryRun {
+		return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
+			st.AgentID)
+	}
+	if err := printCloudIdentity("Google Cloud", gcpAvailable, gcpIdentity); err != nil {
+		return err
+	}
+
+	project, _ := cmd.Flags().GetString("project")
+	if project == "" {
+		if project, err = gcpProject(); err != nil {
+			return err
+		}
+	}
+	if gcpProjectNumberRe.MatchString(project) {
+		return fmt.Errorf("project %q is a project number; pass the project ID (--project), "+
+			"which names the collector's service account", project)
+	}
+	deploymentName, _ := cmd.Flags().GetString("deployment-name")
+	if !gcpDeploymentNameRe.MatchString(deploymentName) {
+		return fmt.Errorf("--deployment-name %q must be 6-30 chars of [a-z0-9-], starting with a letter and not ending with '-' "+
+			"(it names the collector's service account and secrets)", deploymentName)
+	}
+	deployServiceAccount, _ := cmd.Flags().GetString("deploy-service-account")
+	switch {
+	case deployServiceAccount == "" && !dryRun:
+		return errors.New("pass --deploy-service-account: the account Infrastructure Manager actuates Terraform as " +
+			"(it needs roles/config.agent plus permission to create the collector's instance group, service account, " +
+			"and — under stable egress — its subnetwork, router and static address)")
+	case deployServiceAccount != "" && !gcpServiceAccountRe.MatchString(deployServiceAccount):
+		return fmt.Errorf("--deploy-service-account %q must be of the form projects/<project>/serviceAccounts/<email>", deployServiceAccount)
+	}
+	templateSource, _ := cmd.Flags().GetString("template-source")
+	if templateSource == "" {
+		templateSource = collector.HostedGcpTemplateSource()
+	}
+	region, _ := cmd.Flags().GetString("region")
+	if region == "" {
+		return errors.New("--region is required with --provider instaclustr --target gcp: there is no " +
+			"Cloud SQL instance to take it from. Pick the region closest to the cluster")
+	}
+	network, _ := cmd.Flags().GetString("network")
+	if network == "" {
+		return errors.New("--network is required with --provider instaclustr --target gcp " +
+			"(projects/<project>/global/networks/<name>): there is no Cloud SQL instance to discover it from")
+	}
+	stableEgress, _ := cmd.Flags().GetBool("stable-egress")
+	natCidr, _ := cmd.Flags().GetString("nat-subnet-cidr")
+	allowRaw, _ := cmd.Flags().GetString("allow-ip")
+	subnetwork := ""
+	if stableEgress {
+		if natCidr == "" {
+			return errors.New("--nat-subnet-cidr is required with --stable-egress (the template creates its own " +
+				"subnetwork routed through a Cloud NAT with a reserved static address; the CIDR must be unused " +
+				"in the VPC). Pass --stable-egress=false with --allow-ip to use egress you already manage")
+		}
+	} else {
+		if allowRaw == "" {
+			return errors.New("--stable-egress=false needs --allow-ip: the instance has no public IP, so its egress " +
+				"address belongs to whatever NAT the VPC already has — an address you manage, not this CLI")
+		}
+		subnetwork, _ = cmd.Flags().GetString("subnetwork")
+		if subnetwork == "" {
+			if subnetwork, err = resolveGcpSubnetwork(network, region); err != nil {
+				return err
+			}
+		}
+	}
+	if err := requireNoRuntime(dryRun,
+		func() (string, error) { return gcpDeploymentStatus(project, region, deploymentName) },
+		"deployment", deploymentName, "--deployment-name"); err != nil {
+		return err
+	}
+
+	clusterID, _ := cmd.Flags().GetString("cluster-id")
+	if clusterID == "" {
+		return errors.New("--cluster-id is required with --provider instaclustr. " +
+			"Find it in the Instaclustr console URL or Cluster Details")
+	}
+	setupCreds, err := resolveInstaclustrCreds(cmd, "", "instaclustr-api-key", instaclustrProvisioningEnv,
+		"Instaclustr provisioning API key (setup only, never stored)")
+	if err != nil {
+		return err
+	}
+	readOnlyKey := "preview"
+	if !dryRun {
+		readOnlyKey, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv,
+			"Instaclustr READ-ONLY API key (the collector keeps this one)")
+		if err != nil {
+			return err
+		}
+	}
+
+	client, err := requireCollectorSupport(cmd, apiURL)
+	if err != nil {
+		return err
+	}
+
+	ctx := cmd.Context()
+	ict, err := discoverInstaclustr(ctx, setupCreds, clusterID)
+	if err != nil {
+		return err
+	}
+	usePrivate, _ := cmd.Flags().GetBool("use-private-addresses")
+	seedHost := ""
+	for _, n := range ict.Nodes {
+		if h := n.Host(usePrivate); h != "" {
+			seedHost = h
+			break
+		}
+	}
+	if seedHost == "" {
+		return errors.New("no node has an address on the selected network side. " +
+			"A private-network cluster needs --use-private-addresses; a public one must not set it")
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Cluster %q: %d node(s), PostgreSQL %s, %s %s",
+		ict.Name, len(ict.Nodes), ict.PostgresVersion, ict.CloudProvider, ict.Region)))
+
+	sslMode := ""
+	if cmd.Flags().Changed("ssl-mode") {
+		sslMode, _ = cmd.Flags().GetString("ssl-mode")
+	}
+	dbNames, _ := cmd.Flags().GetString("db-name")
+	databases := splitCSV(dbNames)
+
+	monitorPassword, err := collector.GenerateInstaclustrPassword()
+	if err != nil {
+		return err
+	}
+	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "",
+		setupCreds.Username, usePrivate, collector.CloudDBPasswordEnv)
+	input := collector.GcpStackInput{
+		Components:      []collector.Component{comp},
+		Network:         network,
+		Subnetwork:      subnetwork,
+		Region:          region,
+		DeploymentName:  deploymentName,
+		Project:         project,
+		CommandsEnabled: false,
+		StableEgress:    stableEgress,
+		NatSubnetCidr:   natCidr,
+	}
+
+	if dryRun {
+		input.AgentID, input.TenantID, input.Image = "<agent-id>", "<tenant-id>", "<image>"
+		inputs, secrets, err := collector.GcpDeployInputs(input)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\nDry run — probing the template for deployment %q (no identity minted, no firewall or role changes):\n", deploymentName)
+		printDeployParams(inputs, nil, "collector_config")
+		// Secrets never enter the printed map; only their presence is shown.
+		for _, k := range collector.GcpSecretInputKeys {
+			v := "(not set)"
+			if secrets[k] != "" {
+				v = "<redacted>"
+			}
+			fmt.Printf("    %s = %s\n", k, v)
+		}
+		return runGcpDeploy(collector.GcpDeploy{
+			Project: project, Region: region, DeploymentName: deploymentName,
+			TemplateSource: templateSource, DryRun: true,
+		})
+	}
+
+	// Role first, via a temporary allowlist entry for THIS machine (the
+	// operator's IP is not the instance's): create, use, and remove it unless
+	// it pre-existed.
+	operatorIP, err := publicEgressIP(ctx)
+	if err != nil {
+		return err
+	}
+	operatorCIDR, err := collector.AllowCIDR(operatorIP)
+	if err != nil {
+		return err
+	}
+	opRule, opCreated, err := ensureFirewallRule(ctx, setupCreds, clusterID, operatorCIDR)
+	if err != nil {
+		return err
+	}
+	removeOperatorRule := func() {
+		if opCreated {
+			if derr := deleteFirewallRule(ctx, setupCreds, opRule.ID); derr != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove the temporary setup rule %s: %v (remove it from the console)", operatorCIDR, derr)))
+			}
+		}
+	}
+	dsn := collector.InstaclustrAdminDSN(seedHost, 5432, ict.DefaultUserPassword)
+	if err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword); err != nil {
+		removeOperatorRule()
+		return fmt.Errorf("%w\n\nA just-created firewall rule can take ~a minute to apply; re-running is safe", err)
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Monitoring role %q ready (pg_monitor + pg_read_all_data)", collector.InstaclustrMonitorUser)))
+
+	fmt.Println(style.Info("Provisioning collector identity..."))
+	creds, err := client.ProvisionCollector()
+	if err != nil {
+		removeOperatorRule()
+		return err
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
+
+	image, imageSource := resolveImage(cmd, creds)
+	image = pinImageOrWarn(image, "instance")
+	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
+
+	input.AgentID, input.TenantID, input.Image = creds.AgentID, creds.TenantID, image
+	input.Endpoints = endpointsFor(creds, cmd)
+	input.ServerSecret = creds.Secret
+	input.DBPassword = monitorPassword
+	input.InstaclustrKey = readOnlyKey
+	inputs, secrets, err := collector.GcpDeployInputs(input)
+	if err != nil {
+		deprovisionOrWarn(client, creds.AgentID)
+		removeOperatorRule()
+		return err
+	}
+
+	// Save state BEFORE the slow deploy (the aws pattern): an interrupted
+	// install leaves a tracked collector, not an orphaned deployment + identity.
+	saveStateOrWarn(&collector.State{
+		AgentID:              creds.AgentID,
+		TenantID:             creds.TenantID,
+		Domain:               creds.Domain,
+		Target:               "gcp",
+		Image:                image,
+		TargetName:           ict.Name,
+		Project:              project,
+		Region:               region,
+		DeploymentName:       deploymentName,
+		InstaclustrClusterID: clusterID,
+		InstaclustrUsername:  setupCreds.Username,
+		CreatedAt:            time.Now().UTC(),
+	})
+
+	fmt.Printf("Deploying to Compute Engine (deployment %q)...\n", deploymentName)
+	deploy := collector.GcpDeploy{
+		Project: project, Region: region, DeploymentName: deploymentName,
+		TemplateSource: templateSource, ServiceAccount: deployServiceAccount,
+		Inputs: inputs, Secrets: secrets,
+	}
+	if err := withSpinner("Deploying to Compute Engine…", func() error { return runGcpDeploy(deploy) }); err != nil {
+		if errors.Is(err, collector.ErrDeployTimeout) {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The deployment was NOT rolled back — "+
+				"it is most likely still converging.", collector.GcpDeployTimeout())))
+			fmt.Printf("   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` " +
+				"once it is up (the egress_ip output appears only once the deployment completes, so the firewall entry waits for it).\n")
+			removeOperatorRule()
+			return nil
+		}
+		fmt.Println("Deploy failed; rolling back the provisioned identity and deployment...")
+		deprovisionOrWarn(client, creds.AgentID)
+		if derr := deleteGcpDeployment(project, region, deploymentName); derr != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete deployment %s: %v", deploymentName, derr)))
+		}
+		_ = collector.RemoveState()
+		removeOperatorRule()
+		return err
+	}
+
+	// Allowlist the collector's actual egress: the static address the
+	// deployment reserved (stable egress) or the operator-supplied address.
+	collectorCIDR := ""
+	if stableEgress {
+		eip, oerr := gcpDeploymentOutput(project, region, deploymentName, "egress_ip")
+		if oerr != nil {
+			removeOperatorRule()
+			return fmt.Errorf("the collector deployed but its egress_ip output could not be read: %w", oerr)
+		}
+		if collectorCIDR, err = collector.AllowCIDR(eip); err != nil {
+			removeOperatorRule()
+			return err
+		}
+	} else {
+		if collectorCIDR, err = collector.AllowCIDR(allowRaw); err != nil {
+			removeOperatorRule()
+			return err
+		}
+	}
+	rule, created, err := ensureFirewallRule(ctx, setupCreds, clusterID, collectorCIDR)
+	if err != nil {
+		removeOperatorRule()
+		return fmt.Errorf("the collector deployed but its firewall entry failed: %w\n\n"+
+			"Add %s to the cluster's PostgreSQL allowlist, or re-run `dbg collector refresh-firewall`", err, collectorCIDR)
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Firewall: allowlisted %s for the collector", collectorCIDR)))
+	if opRule.ID != rule.ID {
+		removeOperatorRule()
+	} else if opCreated {
+		// The operator's machine and the collector share an egress address, so
+		// the temporary rule IS the collector's rule — this run created it and
+		// must own it, or refresh-firewall could never retire it.
+		created = true
+	}
+
+	if created {
+		if st, lerr := collector.LoadState(); lerr == nil && st != nil {
+			st.FirewallRuleID = rule.ID
+			if serr := collector.SaveState(st); serr != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not record the firewall rule id: %v", serr)))
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Collector deployed. Next:")
+	fmt.Println("  dbg collector status              # deployment + connection")
+	fmt.Println("  dbg collector logs -f             # Cloud Logging")
 	fmt.Println("  dbg collector refresh-firewall    # re-assert the allowlist entry")
 	return nil
 }
