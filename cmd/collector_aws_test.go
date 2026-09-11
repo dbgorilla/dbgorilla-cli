@@ -329,12 +329,6 @@ func TestPrintGrantFor(t *testing.T) {
 	}
 }
 
-// awsParams spreads a parameter map into printDeployParams' arguments with
-// the AWS redaction set, as runInstallAWS calls it.
-func awsParams(params map[string]string) (map[string]string, []string, string) {
-	return params, awsSecretParams, "CollectorConfig"
-}
-
 func TestPrintAwsParams_RedactsSecretsAndDecodesConfig(t *testing.T) {
 	encoded, err := collector.EncodeConfig("[collector]\nid = \"agent-1\"\n")
 	if err != nil {
