@@ -1,0 +1,53 @@
+# Example collector config for a NetApp Instaclustr managed PostgreSQL
+# cluster — this is what `dbg collector install --provider instaclustr`
+# renders for you. Kept here so the shape is inspectable and hand-editable.
+#
+# Secrets never go in the config: the api_key and password are env
+# references, materialized by the install into the collector's env-file.
+# The api_key must be a READ-ONLY provisioning key — discovery is one GET,
+# and the writable key can read database passwords and manage clusters, so
+# it never belongs in a collector's configuration.
+
+[dbgorilla]
+agent_id  = "00000000-0000-0000-0000-000000000000"
+tenant_id = "11111111-1111-1111-1111-111111111111"
+secret    = "${DBG_SERVER_SECRET}"
+
+[[component]]
+name   = "my-cluster"
+engine = "postgres"
+
+[component.provider]
+type         = "instaclustr"
+cluster_id   = "00000000-0000-0000-0000-000000000000"
+# Instaclustr's own spellings, shown in the DBGorilla UI.
+provider     = "AWS_VPC"
+region       = "US_EAST_1"
+api_username = "you@example.com"
+api_key      = "${INSTACLUSTR_API_KEY}"
+# Dial private node addresses instead of public ones (VPC-peered collectors).
+#use_private_addresses = true
+
+[component.auth]
+method   = "password"
+user     = "dbgorilla_monitor"
+password = "${COLLECTOR_DB_PASSWORD}"
+
+[component.connect]
+# Any current node address works as the seed; the collector discovers the
+# rest (and which node is the writer) through the Instaclustr API plus a
+# per-node replication probe.
+host     = "203.0.113.10"
+port     = 5432
+# `require` encrypts without verifying — the workable default, because the
+# per-cluster CA is only distributed for encryption-enabled clusters. With
+# the cluster CA in hand (Instaclustr console > Connection Info), switch to:
+#   ssl_mode = "verify-full"
+#   ca_cert  = "/etc/dbgorilla/instaclustr-cluster-ca.pem"
+ssl_mode = "require"
+
+[topology]
+interval = "60s"
+
+[commands]
+enabled = false

@@ -563,32 +563,84 @@ type AwsStackInput struct {
 	CommandsEnabled bool
 	ServerSecret    string
 	DBPassword      string
+	// Instaclustr source riding the aws substrate: the READ-ONLY API key the
+	// task keeps for discovery (a third Secrets Manager secret), and the
+	// pre-rendered components (Targets stays empty — there is no RDS).
+	InstaclustrKey string
+	Components     []Component
+	// Stable egress (NAT + EIP): the collector's outbound address never
+	// changes, which IP-allowlist-gated databases require.
+	StableEgress  bool
+	VpcID         string
+	NatSubnetCidr string
 }
 
 // AwsStackParams renders the CloudFormation parameter set for the collector
-// stack. The monitored databases ride in two of them — the base64 config and
-// the matching rds-db:connect grants — which is what keeps the template static
-// and publishable.
-func AwsStackParams(in AwsStackInput) (map[string]string, error) {
-	configTOML, err := awsConfigTOML(in.AgentID, in.TenantID, in.Region, in.Targets, in.Endpoints, in.CommandsEnabled)
+// stack as two maps: the printable parameters, and the secrets. The monitored
+// databases ride in two of the former — the base64 config and the matching
+// rds-db:connect grants — which is what keeps the template static and
+// publishable. Secrets are kept out of the printable map by construction
+// (a dry run prints it wholesale, and a map that ever held a credential can't
+// be proven clean by inspection or by a taint analysis); the two meet only in
+// the stack request.
+func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err error) {
+	var configTOML string
+	if len(in.Components) > 0 {
+		// Pre-rendered components (the instaclustr source): no RDS discovery,
+		// no per-target render — the caller built the component blocks.
+		configTOML, err = componentsConfigTOML(in.AgentID, in.TenantID, in.Components, in.Endpoints, in.CommandsEnabled)
+	} else {
+		configTOML, err = awsConfigTOML(in.AgentID, in.TenantID, in.Region, in.Targets, in.Endpoints, in.CommandsEnabled)
+	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	encoded, err := EncodeConfig(configTOML)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	arns := rdsConnectParam(in.Targets, in.Region, in.AccountID)
-	return map[string]string{
+	stableEgress := "DISABLED"
+	if in.StableEgress {
+		stableEgress = "ENABLED"
+	}
+	params = map[string]string{
 		configParamKey:     encoded,
 		rdsConnectParamKey: strings.Join(arns, ","),
-		"ServerSecret":     in.ServerSecret,
-		"DbPassword":       in.DBPassword,
 		"CollectorImage":   in.Image,
 		"Subnets":          strings.Join(in.Subnets, ","),
 		"SecurityGroupId":  in.SecurityGroup,
 		"AssignPublicIp":   in.AssignPublicIP,
-	}, nil
+		"StableEgress":     stableEgress,
+		"VpcId":            in.VpcID,
+		"NatSubnetCidr":    in.NatSubnetCidr,
+	}
+	secrets = map[string]string{
+		"ServerSecret":      in.ServerSecret,
+		"DbPassword":        in.DBPassword,
+		"InstaclustrApiKey": in.InstaclustrKey,
+	}
+	return params, secrets, nil
+}
+
+// componentsConfigTOML renders a stack config from pre-built component
+// blocks — the path for sources whose components the caller constructs
+// (instaclustr), as opposed to AwsTargets rendered per RDS instance.
+func componentsConfigTOML(agentID, tenantID string, components []Component, eps Endpoints, commandsEnabled bool) (string, error) {
+	cfg := Config{
+		Dbgorilla: Dbgorilla{
+			AgentID:      agentID,
+			TenantID:     tenantID,
+			Secret:       "${" + SecretEnv + "}",
+			OpampBaseURL: eps.OpampBaseURL,
+			OtlpBaseURL:  eps.OtlpBaseURL,
+			AuthBaseURL:  eps.AuthBaseURL,
+		},
+		Component: components,
+		Topology:  Topology{Interval: "60s"},
+		Commands:  Commands{Enabled: commandsEnabled},
+	}
+	return cfg.Render()
 }
 
 // CompactConfig strips whole-line comments and blank lines from a collector
@@ -751,7 +803,10 @@ func quoteIdent(s string) string {
 type FargateDeploy struct {
 	StackName string
 	Params    map[string]string
-	DryRun    bool // validate the template without creating/updating anything
+	// Secrets are the credential parameters, kept apart from Params so nothing
+	// that prints Params can ever print them; they merge only in the request.
+	Secrets map[string]string
+	DryRun  bool // validate the template without creating/updating anything
 	// TemplateURL overrides the published template this deploy uses. Empty means
 	// the version-pinned default. Either way it must be reachable — there is no
 	// local copy to fall back to.
@@ -781,7 +836,8 @@ const (
 // an upgrade preserves the monitored databases and their IAM grants.
 var fargateParamKeys = []string{
 	configParamKey, rdsConnectParamKey, "ServerSecret", "DbPassword",
-	"CollectorImage", "Subnets", "SecurityGroupId", "AssignPublicIp",
+	"InstaclustrApiKey", "CollectorImage", "Subnets", "SecurityGroupId",
+	"AssignPublicIp", "StableEgress", "VpcId", "NatSubnetCidr",
 }
 
 // --- helpers ---------------------------------------------------------------

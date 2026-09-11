@@ -66,6 +66,14 @@ type State struct {
 	StackName string `json:"stack_name,omitempty"`
 	Region    string `json:"region,omitempty"`
 
+	// instaclustr source (any target). ClusterID is what refresh-firewall
+	// operates on; FirewallRuleID is the rule the install created for the
+	// collector's egress IP (empty when the rule pre-existed, so uninstall
+	// never removes an allowlist entry it does not own).
+	InstaclustrClusterID string `json:"instaclustr_cluster_id,omitempty"`
+	InstaclustrUsername  string `json:"instaclustr_username,omitempty"`
+	FirewallRuleID       string `json:"firewall_rule_id,omitempty"`
+
 	// helm target -- the collector runs in-cluster as a Helm release this CLI
 	// never started, so there is no container to inspect and no stack to query.
 	// The release coordinates are recorded anyway so `status` can say where it
@@ -221,6 +229,18 @@ func ClearSecrets(agentID string) {
 	if path, err := secretsFallbackPath(); err == nil {
 		_ = os.Remove(path)
 	}
+}
+
+// WriteInstaclustrEnvFile is WriteEnvFile plus the collector's read-only
+// Instaclustr API key (node discovery). Same file, same 0600 contract.
+func WriteInstaclustrEnvFile(path, secret, dbPassword, icReadOnlyKey string) error {
+	content := fmt.Sprintf("%s=%s\n%s=%s\n%s=%s\n",
+		SecretEnv, secret, DBPasswordEnv, dbPassword, InstaclustrAPIKeyEnv, icReadOnlyKey)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
+		return fmt.Errorf("cannot write env-file: %w", err)
+	}
+	return os.Rename(tmp, path)
 }
 
 // WriteEnvFile materializes the secrets into a 0600 env-file that `docker run

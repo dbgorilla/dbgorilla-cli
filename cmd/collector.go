@@ -136,7 +136,10 @@ your dev environment to DBGorilla.
   dbg collector status      Show the collector's state and connection
   dbg collector logs        Tail the collector's logs
   dbg collector stop/start  Pause or resume without losing the identity
-  dbg collector uninstall   Stop the collector and deprovision its identity`,
+  dbg collector uninstall   Stop the collector and deprovision its identity
+
+For NetApp Instaclustr sources (--provider instaclustr):
+  dbg collector refresh-firewall  Re-allowlist this machine's current IP`,
 }
 
 // --- install --------------------------------------------------------------
@@ -148,6 +151,16 @@ var installCmd = &cobra.Command{
 }
 
 func runInstall(cmd *cobra.Command, _ []string) error {
+	// A managed-platform *source* (--provider) is orthogonal to the deploy
+	// substrate (--target) and takes its own path before the target dispatch.
+	// An unknown value must not silently fall through to the docker prompts.
+	switch provider, _ := cmd.Flags().GetString("provider"); {
+	case provider == "":
+	case instaclustrSource(cmd):
+		return runInstallInstaclustr(cmd)
+	default:
+		return fmt.Errorf("unknown --provider %q (expected 'instaclustr'; for RDS vs Aurora use --provider-type with --target aws)", provider)
+	}
 	switch target, _ := cmd.Flags().GetString("target"); target {
 	case "", "docker", "local":
 		return runInstallLocal(cmd)
@@ -182,15 +195,10 @@ func runInstallLocal(cmd *cobra.Command) error {
 		return err
 	}
 
-	client := newAPIClient(cmd)
-
 	// Capability gate: the managed collector only exists on main-based backends.
-	supported, err := client.CollectorSupported()
+	client, err := requireCollectorSupport(cmd, apiURL)
 	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
-	}
-	if !supported {
-		return api.ErrCollectorUnsupported
+		return err
 	}
 
 	// Gather the database target.
@@ -253,20 +261,39 @@ func runInstallLocal(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	if collector.IsLoopback(target.Host) {
+		fmt.Println(style.Success(fmt.Sprintf("✓ Rewrote %s -> %s for in-container access", target.Host, collector.DockerHostInternal)))
+	}
+	return finishDockerInstall(cmd, client, creds, rendered, password, caCert,
+		func(envPath string) error { return collector.WriteEnvFile(envPath, creds.Secret, password) },
+		&collector.State{TargetName: target.Name}, func() {},
+		"  dbg collector status     # check connection\n"+
+			"  dbg collector logs -f    # watch it work")
+}
+
+// finishDockerInstall is the shared tail of every docker-target install:
+// materialize config + secrets, resolve and digest-pin the image, start the
+// container (rolling back the identity — plus whatever the caller adds via
+// onFail — when it will not start), persist state, and confirm liveness.
+// state arrives carrying only the caller's substrate-specific fields; the
+// common ones are filled in here. nextSteps is the epilogue body.
+func finishDockerInstall(cmd *cobra.Command, client *api.Client, creds *api.CollectorCredentials,
+	rendered, dbPassword, caCert string, writeEnv func(envPath string) error,
+	state *collector.State, onFail func(), nextSteps string) error {
+
 	configPath, _ := collector.ConfigPath()
 	envPath, _ := collector.EnvPath()
-
-	if err := collector.StoreSecrets(creds.AgentID, creds.Secret, password); err != nil {
+	if err := collector.StoreSecrets(creds.AgentID, creds.Secret, dbPassword); err != nil {
+		onFail()
 		return err
 	}
 	if err := collector.WriteConfig(configPath, rendered); err != nil {
+		onFail()
 		return err
 	}
-	if err := collector.WriteEnvFile(envPath, creds.Secret, password); err != nil {
+	if err := writeEnv(envPath); err != nil {
+		onFail()
 		return err
-	}
-	if collector.IsLoopback(target.Host) {
-		fmt.Println(style.Success(fmt.Sprintf("✓ Rewrote %s -> %s for in-container access", target.Host, collector.DockerHostInternal)))
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Wrote config: %s", configPath)))
 
@@ -280,6 +307,7 @@ func runInstallLocal(cmd *cobra.Command) error {
 	// default. Already-pinned refs pass through untouched.
 	pinned, err := pinImage(image)
 	if err != nil {
+		onFail()
 		return fmt.Errorf("resolving collector image digest: %w", err)
 	}
 	if pinned != image {
@@ -305,22 +333,20 @@ func runInstallLocal(cmd *cobra.Command) error {
 		collector.ClearSecrets(creds.AgentID)
 		_ = os.Remove(configPath)
 		_ = os.Remove(envPath)
+		onFail()
 		return fmt.Errorf("%w\n\nRolled back. Fix Docker and re-run `dbg collector install`", err)
 	}
 
 	// Persist state.
-	state := &collector.State{
-		AgentID:       creds.AgentID,
-		TenantID:      creds.TenantID,
-		Domain:        creds.Domain,
-		ContainerName: runner.Name,
-		Image:         image,
-		ConfigPath:    configPath,
-		EnvFilePath:   envPath,
-		CACertPath:    caCert,
-		TargetName:    target.Name,
-		CreatedAt:     time.Now().UTC(),
-	}
+	state.AgentID = creds.AgentID
+	state.TenantID = creds.TenantID
+	state.Domain = creds.Domain
+	state.ContainerName = runner.Name
+	state.Image = image
+	state.ConfigPath = configPath
+	state.EnvFilePath = envPath
+	state.CACertPath = caCert
+	state.CreatedAt = time.Now().UTC()
 	if err := collector.SaveState(state); err != nil {
 		return err
 	}
@@ -338,8 +364,7 @@ func runInstallLocal(cmd *cobra.Command) error {
 
 	fmt.Println()
 	fmt.Println("Collector installed. Next:")
-	fmt.Println("  dbg collector status     # check connection")
-	fmt.Println("  dbg collector logs -f    # watch it work")
+	fmt.Println(nextSteps)
 	return nil
 }
 
@@ -399,13 +424,9 @@ func runInstallAWS(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ AWS identity: %s", identity)))
 
-	client := newAPIClient(cmd)
-	supported, err := client.CollectorSupported()
+	client, err := requireCollectorSupport(cmd, apiURL)
 	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
-	}
-	if !supported {
-		return api.ErrCollectorUnsupported
+		return err
 	}
 
 	targets, err := resolveAwsTargets(cmd)
@@ -449,7 +470,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// anything. Placeholder identity keeps the template shape valid.
 	if dry, _ := cmd.Flags().GetBool("dry-run"); dry {
 		image, _ := resolveImage(cmd, nil)
-		params, err := collector.AwsStackParams(collector.AwsStackInput{
+		params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:           image,
 			Region:          region,
@@ -465,9 +486,9 @@ func runInstallAWS(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Printf("\nDry run — validating the template for stack %q (%d database(s), no identity minted):\n", stackName, len(targets))
-		printAwsParams(params)
+		printAwsParams(params, secrets)
 		return runFargateDeploy(collector.FargateDeploy{
-			StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL,
+			StackName: stackName, Params: params, Secrets: secrets, DryRun: true, TemplateURL: templateURL,
 		})
 	}
 
@@ -481,20 +502,12 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// Pin to a digest before it reaches CloudFormation. ECS re-pulls whenever a
 	// task starts, so an unresolved tag means the collector's version can change
 	// on a restart nobody asked for -- and the stack parameter never changing
-	// means an upgrade has nothing to act on. Resolved over the registry's HTTP
-	// API, since the AWS installer may have no container runtime.
+	// means an upgrade has nothing to act on.
 	image, imageSource := resolveImage(cmd, creds)
-	if pinned, perr := pinImageRemote(image); perr == nil {
-		image = pinned
-	} else {
-		fmt.Println(style.Warn(fmt.Sprintf(
-			"⚠  could not resolve %s to a fixed version (%v).\n"+
-				"   Deploying the tag as-is: the collector may change version when its task restarts.",
-			image, perr)))
-	}
+	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
-	params, err := collector.AwsStackParams(collector.AwsStackInput{
+	params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 		AgentID:         creds.AgentID,
 		TenantID:        creds.TenantID,
 		Image:           image,
@@ -516,7 +529,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// Save state BEFORE the (slow) deploy so an interrupted install leaves a
 	// tracked collector that status/uninstall can find and clean — not an
 	// orphaned stack + identity.
-	if serr := collector.SaveState(&collector.State{
+	saveStateOrWarn(&collector.State{
 		AgentID:    creds.AgentID,
 		TenantID:   creds.TenantID,
 		Domain:     creds.Domain,
@@ -526,12 +539,10 @@ func runInstallAWS(cmd *cobra.Command) error {
 		StackName:  stackName,
 		Region:     region,
 		CreatedAt:  time.Now().UTC(),
-	}); serr != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not save local state: %v", serr)))
-	}
+	})
 
 	fmt.Printf("Deploying to Fargate (stack %q, %d database(s))...\n", stackName, len(targets))
-	deploy := collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}
+	deploy := collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
 		// A timeout is not a failure — the stack is still converging, and the
 		// rollback below would deprovision the identity and delete a deploy
@@ -1060,10 +1071,15 @@ func promptPasswordOptional(label string) string {
 	return strings.TrimSpace(v)
 }
 
-// printAwsParams prints deploy parameters for dry-run, redacting the secret and
-// decoding the config so the dry run shows the TOML that would be deployed
-// rather than an opaque blob.
-func printAwsParams(params map[string]string) {
+// awsSecretParams are the stack parameters a dry run must never print.
+var awsSecretParams = []string{"ServerSecret", "DbPassword", "InstaclustrApiKey"}
+
+// printAwsParams prints deploy parameters for dry-run, decoding the config so
+// the dry run shows the TOML that would be deployed rather than an opaque
+// blob. Secrets never enter the printable params map (AwsStackParams keeps
+// them apart by construction); only their presence is shown, derived as a
+// boolean so no code path prints a credential.
+func printAwsParams(params, secrets map[string]string) {
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		keys = append(keys, k)
@@ -1071,20 +1087,21 @@ func printAwsParams(params map[string]string) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := params[k]
-		switch k {
-		case "ServerSecret", "DbPassword":
-			if v != "" {
-				v = "<redacted>"
-			}
-		case "CollectorConfig":
-			decoded, err := collector.DecodeConfig(v)
-			if err == nil {
+		if k == "CollectorConfig" {
+			if decoded, err := collector.DecodeConfig(v); err == nil {
 				fmt.Printf("    %s =\n", k)
 				for _, line := range strings.Split(strings.TrimRight(decoded, "\n"), "\n") {
 					fmt.Printf("      %s\n", line)
 				}
 				continue
 			}
+		}
+		fmt.Printf("    %s = %s\n", k, v)
+	}
+	for _, k := range awsSecretParams {
+		v := "(not set)"
+		if secrets[k] != "" {
+			v = "<redacted>"
 		}
 		fmt.Printf("    %s = %s\n", k, v)
 	}
@@ -1635,6 +1652,18 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove container: %v", err)))
 		} else {
 			fmt.Println(style.Success("✓ Container removed"))
+		}
+	}
+
+	// An Instaclustr install's firewall rule needs the provisioning key this
+	// CLI deliberately never stores, so removal is the user's step — but a
+	// silent orphan (the machine's IP allowlisted forever) is not acceptable.
+	if st.InstaclustrClusterID != "" {
+		fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows this machine's IP."))
+		if st.FirewallRuleID != "" {
+			fmt.Printf("   Remove rule %s on the cluster's Firewall Rules page (or via the API).\n", st.FirewallRuleID)
+		} else {
+			fmt.Println("   Review the cluster's Firewall Rules page and remove the entry if no longer wanted.")
 		}
 	}
 

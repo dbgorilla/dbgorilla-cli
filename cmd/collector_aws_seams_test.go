@@ -111,10 +111,11 @@ func stubUpdateComponents(t *testing.T, err error) *updateCall {
 
 // stubDeploy records deploys and controls their outcome.
 type deployCall struct {
-	count  int
-	params map[string]string
-	stack  string
-	dryRun bool
+	count   int
+	params  map[string]string
+	secrets map[string]string
+	stack   string
+	dryRun  bool
 }
 
 func stubDeploy(t *testing.T, err error) *deployCall {
@@ -123,12 +124,12 @@ func stubDeploy(t *testing.T, err error) *deployCall {
 	origRun, origQuiet := runFargateDeploy, runFargateDeployQuiet
 	runFargateDeploy = func(d collector.FargateDeploy) error {
 		rec.count++
-		rec.params, rec.stack, rec.dryRun = d.Params, d.StackName, d.DryRun
+		rec.params, rec.secrets, rec.stack, rec.dryRun = d.Params, d.Secrets, d.StackName, d.DryRun
 		return err
 	}
 	runFargateDeployQuiet = func(d collector.FargateDeploy) (string, error) {
 		rec.count++
-		rec.params, rec.stack, rec.dryRun = d.Params, d.StackName, d.DryRun
+		rec.params, rec.secrets, rec.stack, rec.dryRun = d.Params, d.Secrets, d.StackName, d.DryRun
 		return "", err
 	}
 	t.Cleanup(func() {

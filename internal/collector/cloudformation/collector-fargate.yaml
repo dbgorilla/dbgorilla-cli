@@ -14,7 +14,7 @@ Description: >-
 # against collector.TemplateVersion by TestTemplateVersionMatches.
 Metadata:
   DBGorilla:
-    TemplateVersion: 'v1.0'
+    TemplateVersion: 'v1.1'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CollectorConfig — the collector's TOML config, base64-encoded.
@@ -143,13 +143,50 @@ Parameters:
       arn:aws:rds-db:us-east-1:123456789012:dbuser:db-ABCDEF/dbgorilla. The
       default grants every database in this account; narrow it in production.
 
+  # ── Third-party monitoring credential (v1.1) ──
+  # For components whose provider reads a managed platform's API (NetApp
+  # Instaclustr today): a READ-ONLY API key, referenced by the config as
+  # ${INSTACLUSTR_API_KEY}. Stored in Secrets Manager like the other secrets.
+  InstaclustrApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >-
+      Optional READ-ONLY NetApp Instaclustr provisioning API key for
+      instaclustr components, referenced by the config as
+      ${INSTACLUSTR_API_KEY}. Leave empty otherwise.
+
   # ── Networking (discovered from the database's VPC) ──
   Subnets:         { Type: List<AWS::EC2::Subnet::Id>, Description: Subnets that can reach the RDS instance }
   SecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id, Description: SG allowing egress to RDS + DBGorilla }
   AssignPublicIp:  { Type: String, Default: ENABLED, AllowedValues: [ENABLED, DISABLED] }
 
+  # ── Stable egress (v1.1) ──
+  # ENABLED runs the task in a NEW private subnet behind a NAT gateway with an
+  # Elastic IP, so the collector's outbound address never changes — required
+  # when the database gates access by IP allowlist (NetApp Instaclustr). The
+  # NAT gateway lands in the FIRST entry of Subnets, which must therefore be a
+  # public subnet (a route to an internet gateway); VpcId and NatSubnetCidr
+  # (an unused CIDR inside that VPC) are required with ENABLED. The stack
+  # output EgressIP is the address to allowlist.
+  StableEgress:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+    Description: Run the task behind a NAT gateway with an Elastic IP (stable egress address)
+  VpcId:
+    Type: String
+    Default: ''
+    Description: 'VPC for the private subnet (required with StableEgress: ENABLED)'
+  NatSubnetCidr:
+    Type: String
+    Default: ''
+    Description: 'Unused CIDR in the VPC for the private subnet (required with StableEgress: ENABLED), e.g. 10.0.200.0/28'
+
 Conditions:
   IsPasswordAuth: !Not [!Equals [!Ref DbPassword, '']]
+  HasInstaclustrKey: !Not [!Equals [!Ref InstaclustrApiKey, '']]
+  UseStableEgress: !Equals [!Ref StableEgress, ENABLED]
 
 Resources:
   LogGroup:
@@ -182,6 +219,68 @@ Resources:
       Description: !Sub 'DBGorilla collector database password for ${AWS::StackName}'
       SecretString: !Ref DbPassword
 
+  # Optional read-only Instaclustr API key, injected as INSTACLUSTR_API_KEY.
+  # Unnamed for the same reason as ServerSecretStore.
+  InstaclustrKeyStore:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasInstaclustrKey
+    Properties:
+      Description: !Sub 'DBGorilla collector Instaclustr read-only API key for ${AWS::StackName}'
+      SecretString: !Ref InstaclustrApiKey
+
+  # ── Stable egress: EIP + NAT + a private subnet the task runs in ──
+  EgressEIP:
+    Type: AWS::EC2::EIP
+    Condition: UseStableEgress
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: UseStableEgress
+    Properties:
+      AllocationId: !GetAtt EgressEIP.AllocationId
+      # Must be a public subnet — the parameter description says so.
+      SubnetId: !Select [0, !Ref Subnets]
+
+  # The AZ is the region's first — a subnet parameter's AZ is not readable in
+  # CloudFormation, so it may differ from the NAT's subnet AZ. Cross-AZ
+  # routing to a NAT is legal; the costs are cross-AZ data charges and a
+  # coupled AZ blast radius, accepted for a single monitoring task.
+  #
+  # Note there is deliberately no DependsOn from the Service to the private
+  # route: DependsOn on a condition-guarded resource fails validation when
+  # the condition is off. First task launches may race the NAT route
+  # (~2 min) and fail image pulls; ECS retries until the route lands.
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: UseStableEgress
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref NatSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: UseStableEgress
+    Properties:
+      VpcId: !Ref VpcId
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: UseStableEgress
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseStableEgress
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+
   # Pulls the image and reads the secret. Standard ECS execution role + one grant.
   ExecutionRole:
     Type: AWS::IAM::Role
@@ -204,6 +303,7 @@ Resources:
                 Resource:
                   - !Ref ServerSecretStore
                   - !If [IsPasswordAuth, !Ref ComponentPasswordStore, !Ref AWS::NoValue]
+                  - !If [HasInstaclustrKey, !Ref InstaclustrKeyStore, !Ref AWS::NoValue]
 
   # The collector's own runtime identity: IAM DB auth + RDS discovery, least privilege.
   TaskRole:
@@ -278,6 +378,10 @@ Resources:
               - IsPasswordAuth
               - { Name: DBG_DB_PASSWORD, ValueFrom: !Ref ComponentPasswordStore }
               - !Ref AWS::NoValue
+            - !If
+              - HasInstaclustrKey
+              - { Name: INSTACLUSTR_API_KEY, ValueFrom: !Ref InstaclustrKeyStore }
+              - !Ref AWS::NoValue
           Environment:
             - { Name: DBG_CONFIG_B64, Value: !Ref CollectorConfig }
 
@@ -295,12 +399,16 @@ Resources:
         MaximumPercent: 100
       NetworkConfiguration:
         AwsvpcConfiguration:
-          Subnets: !Ref Subnets
+          Subnets: !If [UseStableEgress, [!Ref PrivateSubnet], !Ref Subnets]
           SecurityGroups: [!Ref SecurityGroupId]
-          AssignPublicIp: !Ref AssignPublicIp
+          AssignPublicIp: !If [UseStableEgress, DISABLED, !Ref AssignPublicIp]
 
 Outputs:
   ClusterName:    { Value: !Ref Cluster }
   ServiceName:    { Value: !GetAtt Service.Name }
   LogGroupName:   { Value: !Ref LogGroup }
   TaskRoleArn:    { Value: !GetAtt TaskRole.Arn, Description: Grant this role rds_iam on the DB user }
+  EgressIP:
+    Condition: UseStableEgress
+    Value: !Ref EgressEIP
+    Description: The collector's stable outbound address — allowlist this on IP-gated databases
