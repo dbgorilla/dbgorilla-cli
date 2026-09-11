@@ -136,10 +136,12 @@ func TestFirstActiveSG_NoneActive(t *testing.T) {
 // The ambiguity error is what a user sees when auto-selection refuses to guess.
 // It has to name the candidates and the flag that resolves it.
 func TestAmbiguousTargetError_Message(t *testing.T) {
-	err := &AmbiguousTargetError{
-		Instances: []string{"rds-a", "rds-b"},
-		Clusters:  []string{"aurora-c"},
-	}
+	err := &AmbiguousTargetError{Choices: []TargetChoice{
+		{ID: "rds-a", ProviderType: "aws_rds"},
+		{ID: "rds-b", ProviderType: "aws_rds"},
+		{ID: "aurora-c", ProviderType: "aws_aurora"},
+	}}
+
 	msg := err.Error()
 	for _, want := range []string{"rds-a", "rds-b", "aurora-c", "--db-instance-id"} {
 		if !strings.Contains(msg, want) {

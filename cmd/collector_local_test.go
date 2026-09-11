@@ -19,7 +19,7 @@ func TestRunInstall_TargetDispatch(t *testing.T) {
 
 	t.Run("an unknown target names the valid ones", func(t *testing.T) {
 		c := awsCmd(t)
-		mustSet(t, c, "target", "gcp")
+		mustSet(t, c, "target", "azure")
 		err := runInstall(c, nil)
 		if err == nil {
 			t.Fatal("an unknown target must be rejected")
@@ -28,6 +28,18 @@ func TestRunInstall_TargetDispatch(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error should mention %q, got: %v", want, err)
 			}
+		}
+	})
+
+	t.Run("gcp takes the GCP path", func(t *testing.T) {
+		stubGcpAvailable(t, errors.New("sentinel-gcp-path"))
+		c := gcpCmd(t)
+		mustSet(t, c, "yes", "true")
+
+		var err error
+		capture(t, func() { err = runInstall(c, nil) })
+		if err == nil || !strings.Contains(err.Error(), "sentinel-gcp-path") {
+			t.Errorf("--target gcp should route to the GCP installer, got %v", err)
 		}
 	})
 

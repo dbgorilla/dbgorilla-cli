@@ -61,7 +61,7 @@ func TestResolveCommands_HardOff(t *testing.T) {
 				{Name: "a", Commands: []string{collector.CmdExplain}},
 				{Name: "b", Commands: []string{collector.CmdExecuteQuery, collector.CmdExplain}},
 			}
-			if resolveCommands(c, targets) {
+			if resolveCommands(c, targets, awsTargetLabel) {
 				t.Error("a hard off should return disabled")
 			}
 			for _, tg := range targets {
@@ -78,7 +78,7 @@ func TestResolveCommands_ImplicitGate(t *testing.T) {
 	// implicitly on because a database ended up with commands.
 	c := commandsTestCmd()
 	targets := []collector.AwsTarget{{Name: "a"}}
-	if !resolveCommands(c, targets) {
+	if !resolveCommands(c, targets, awsTargetLabel) {
 		t.Error("default (all commands) should be implicitly enabled")
 	}
 	if len(targets[0].Commands) != 2 {
@@ -94,7 +94,7 @@ func TestResolveCommands_FlagSubsetAndConfigClamp(t *testing.T) {
 	// also "explain", overwriting and retaining would produce the same result and
 	// the assertion could not tell them apart.
 	targets := []collector.AwsTarget{{Name: "a"}, {Name: "b", Commands: []string{"execute_query", "bogus"}}}
-	if !resolveCommands(c, targets) {
+	if !resolveCommands(c, targets, awsTargetLabel) {
 		t.Error("explicit commands should be enabled")
 	}
 	// --commands wins for a target without its own config commands...

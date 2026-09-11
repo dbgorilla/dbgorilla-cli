@@ -219,7 +219,7 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, AwsDBPasswordEnv)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv)
 	params, secrets, err := AwsStackParams(AwsStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
 		Region: "us-east-1", AccountID: "111122223333",

@@ -666,7 +666,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		assignIP = "ENABLED"
 	}
 	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, "",
-		in.setupCreds.Username, in.usePrivate, collector.AwsDBPasswordEnv)
+		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv)
 	input := collector.AwsStackInput{
 		Region:          region,
 		AccountID:       accountID,

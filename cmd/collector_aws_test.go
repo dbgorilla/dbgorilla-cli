@@ -78,7 +78,7 @@ func TestResolveAwsTarget_PasswordFlagSelectsPasswordAuth(t *testing.T) {
 // silently picking a database.
 func TestResolveAwsTarget_AmbiguousNonInteractiveErrors(t *testing.T) {
 	isolate(t)
-	amb := &collector.AmbiguousTargetError{Instances: []string{"a", "b"}}
+	amb := &collector.AmbiguousTargetError{Choices: []collector.TargetChoice{{ID: "a", ProviderType: "aws_rds"}, {ID: "b", ProviderType: "aws_rds"}}}
 	stubDiscover(t, collector.AwsTarget{}, amb)
 
 	c := awsCmd(t)
@@ -97,11 +97,11 @@ func TestAwsDBPassword_FlagBeatsEnv(t *testing.T) {
 	t.Setenv(collector.DBPasswordEnv, "from-env")
 
 	c := awsCmd(t)
-	if got := awsDBPassword(c); got != "from-env" {
+	if got := dbPasswordFlag(c); got != "from-env" {
 		t.Errorf("with no flag the env var should be used, got %q", got)
 	}
 	mustSet(t, c, "db-password", "from-flag")
-	if got := awsDBPassword(c); got != "from-flag" {
+	if got := dbPasswordFlag(c); got != "from-flag" {
 		t.Errorf("the flag must win, got %q", got)
 	}
 }
@@ -109,7 +109,7 @@ func TestAwsDBPassword_FlagBeatsEnv(t *testing.T) {
 func TestAwsDBPassword_EmptyMeansIAM(t *testing.T) {
 	isolate(t)
 	t.Setenv(collector.DBPasswordEnv, "")
-	if got := awsDBPassword(awsCmd(t)); got != "" {
+	if got := dbPasswordFlag(awsCmd(t)); got != "" {
 		t.Errorf("got %q, want empty (IAM auth)", got)
 	}
 }
@@ -285,13 +285,15 @@ func TestTargetsSummary(t *testing.T) {
 }
 
 func TestProviderLabel(t *testing.T) {
-	if got := providerLabel("aws_aurora"); got != "Aurora" {
-		t.Errorf("got %q", got)
+	for in, want := range map[string]string{"aws_aurora": "Aurora", "cloud_sql": "Cloud SQL", "alloydb": "AlloyDB"} {
+		if got := collector.ProviderLabel(in); got != want {
+			t.Errorf("ProviderLabel(%q) = %q, want %q", in, got, want)
+		}
 	}
-	// Anything else, including empty, reads as RDS.
+	// Anything else, including empty (the aws default), reads as RDS.
 	for _, in := range []string{"aws_rds", "", "something-else"} {
-		if got := providerLabel(in); got != "RDS" {
-			t.Errorf("providerLabel(%q) = %q, want RDS", in, got)
+		if got := collector.ProviderLabel(in); got != "RDS" {
+			t.Errorf("ProviderLabel(%q) = %q, want RDS", in, got)
 		}
 	}
 }

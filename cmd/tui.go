@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 
@@ -76,18 +78,24 @@ func runForm(fields ...huh.Field) error {
 	return f.Run()
 }
 
+// errInterrupted marks an action abandoned by Ctrl-C under the spinner. Its
+// outcome is unknown: it may have completed, or may still be running
+// server-side.
+var errInterrupted = errors.New("interrupted")
+
 // withSpinner runs a slow action under a spinner when interactive; otherwise it
-// just runs it (so CI/logs stay linear). The action owns capturing any output
-// it wants to show on failure.
+// just runs it.
 func withSpinner(title string, action func() error) error {
 	if !interactiveTerminal() {
 		return action()
 	}
 	var err error
-	_ = spinner.New().
+	if rerr := spinner.New().
 		Title(" " + title).
 		Style(lipgloss.NewStyle()). // default text color, not huh's red accent
 		Action(func() { err = action() }).
-		Run()
+		Run(); rerr != nil {
+		return fmt.Errorf("%w: %v", errInterrupted, rerr)
+	}
 	return err
 }
