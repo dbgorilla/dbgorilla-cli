@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -111,61 +112,11 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 		}
 	}
 
-	clusterID, _ := cmd.Flags().GetString("cluster-id")
-	if clusterID == "" {
-		if !interactiveTerminal() {
-			return errors.New("--cluster-id is required with --provider instaclustr. " +
-				"Find it in the Instaclustr console URL or Cluster Details")
-		}
-		clusterID = strings.TrimSpace(prompt("Instaclustr cluster id", ""))
-		if clusterID == "" {
-			return errors.New("aborted: no cluster id given")
-		}
-	}
-	setupCreds, err := resolveInstaclustrCreds(cmd, "", "instaclustr-api-key", instaclustrProvisioningEnv,
-		"Instaclustr provisioning API key (setup only, never stored)")
+	in, err := resolveInstaclustrInstallInputs(cmd, apiURL, dryRun)
 	if err != nil {
 		return err
 	}
-	readOnlyKey := "preview" // never rendered; the config carries an env reference
-	if !dryRun {
-		readOnlyKey, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv,
-			"Instaclustr READ-ONLY API key (the collector keeps this one)")
-		if err != nil {
-			return err
-		}
-	}
-
-	client := newAPIClient(cmd)
-	supported, err := client.CollectorSupported()
-	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
-	}
-	if !supported {
-		return api.ErrCollectorUnsupported
-	}
-
-	// Discover the cluster through the Cluster Management API (read-only, so
-	// the dry-run path shares it).
 	ctx := cmd.Context()
-	ict, err := discoverInstaclustr(ctx, setupCreds, clusterID)
-	if err != nil {
-		return err
-	}
-	usePrivate, _ := cmd.Flags().GetBool("use-private-addresses")
-	seedHost := ""
-	for _, n := range ict.Nodes {
-		if h := n.Host(usePrivate); h != "" {
-			seedHost = h
-			break
-		}
-	}
-	if seedHost == "" {
-		return errors.New("no node has an address on the selected network side. " +
-			"A private-network cluster needs --use-private-addresses; a public one must not set it")
-	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Cluster %q: %d node(s), PostgreSQL %s, %s %s",
-		ict.Name, len(ict.Nodes), ict.PostgresVersion, ict.CloudProvider, ict.Region)))
 
 	allowCIDR := ""
 	if raw, _ := cmd.Flags().GetString("allow-ip"); raw != "" {
@@ -182,15 +133,8 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 		}
 	}
 
-	sslMode := ""
-	if cmd.Flags().Changed("ssl-mode") {
-		sslMode, _ = cmd.Flags().GetString("ssl-mode")
-	}
-	dbNames, _ := cmd.Flags().GetString("db-name")
-	databases := splitCSV(dbNames)
-
 	if dryRun {
-		return dryRunInstaclustr(cmd, ict, seedHost, databases, sslMode, setupCreds.Username, usePrivate, allowCIDR)
+		return dryRunInstaclustr(cmd, in.ict, in.seedHost, in.databases, in.sslMode, in.setupCreds.Username, in.usePrivate, allowCIDR)
 	}
 
 	// Firewall: the collector runs on THIS machine for the docker target, so
@@ -198,13 +142,13 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	// failure below that follows a rule WE created rolls the rule back —
 	// otherwise a later re-run finds it "pre-existing", never records
 	// ownership, and refresh-firewall accumulates stale rules forever.
-	rule, created, err := ensureFirewallRule(ctx, setupCreds, clusterID, allowCIDR)
+	rule, created, err := ensureFirewallRule(ctx, in.setupCreds, in.clusterID, allowCIDR)
 	if err != nil {
 		return err
 	}
 	rollbackRule := func() {
 		if created {
-			if derr := deleteFirewallRule(ctx, setupCreds, rule.ID); derr != nil {
+			if derr := deleteFirewallRule(ctx, in.setupCreds, rule.ID); derr != nil {
 				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove the firewall rule created for %s: %v (remove it from the console)", allowCIDR, derr)))
 			}
 		}
@@ -224,7 +168,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 		rollbackRule()
 		return err
 	}
-	dsn := collector.InstaclustrAdminDSN(seedHost, 5432, ict.DefaultUserPassword)
+	dsn := collector.InstaclustrAdminDSN(in.seedHost, 5432, in.ict.DefaultUserPassword)
 	if err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword); err != nil {
 		rollbackRule()
 		return fmt.Errorf("%w\n\nA just-created firewall rule can take ~a minute to apply; re-running is safe", err)
@@ -234,7 +178,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	// Deep DB preflight with the monitoring role itself — the same gate the
 	// local path runs, so a cluster missing pg_stat_statements is a warning
 	// before anything is provisioned, not a silent gap after.
-	monitorDSN := collector.InstaclustrAdminDSNAs(collector.InstaclustrMonitorUser, monitorPassword, seedHost, 5432)
+	monitorDSN := collector.InstaclustrAdminDSNAs(collector.InstaclustrMonitorUser, monitorPassword, in.seedHost, 5432)
 	report := runPreflight(ctx, monitorDSN)
 	printPreflight(report)
 	if report.Failed() {
@@ -248,97 +192,206 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	caCert := "" // refused above; kept as a named value for the Runner below
 
 	fmt.Println(style.Info("Provisioning collector identity..."))
-	creds, err := client.ProvisionCollector()
+	creds, err := in.client.ProvisionCollector()
 	if err != nil {
 		rollbackRule()
 		return err
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, caCert, setupCreds.Username, usePrivate, collector.DBPasswordEnv)
+	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, caCert, in.setupCreds.Username, in.usePrivate, collector.DBPasswordEnv)
 	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, comp, endpointsFor(creds, cmd))
 	rendered, err := cfg.Render()
 	if err != nil {
 		rollbackRule()
 		return err
 	}
-	configPath, _ := collector.ConfigPath()
-	envPath, _ := collector.EnvPath()
-	if err := collector.StoreSecrets(creds.AgentID, creds.Secret, monitorPassword); err != nil {
-		rollbackRule()
-		return err
-	}
-	if err := collector.WriteConfig(configPath, rendered); err != nil {
-		rollbackRule()
-		return err
-	}
-	if err := collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, readOnlyKey); err != nil {
-		rollbackRule()
-		return err
-	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Wrote config: %s", configPath)))
-
-	image, imageSource := resolveImage(cmd, creds)
-	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
-	pinned, err := pinImage(image)
-	if err != nil {
-		rollbackRule()
-		return fmt.Errorf("resolving collector image digest: %w", err)
-	}
-	image = pinned
-
-	runner := collector.Runner{
-		Name:        collector.DefaultContainerName,
-		Image:       image,
-		ConfigPath:  configPath,
-		EnvFilePath: envPath,
-		CACertPath:  caCert,
-	}
-	fmt.Println(style.Info(fmt.Sprintf("Starting collector container (%s)...", image)))
-	if err := runContainer(runner); err != nil {
-		fmt.Println(style.Warn("Container failed to start; rolling back the provisioned identity..."))
-		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
-		}
-		collector.ClearSecrets(creds.AgentID)
-		_ = os.Remove(configPath)
-		_ = os.Remove(envPath)
-		rollbackRule()
-		return fmt.Errorf("%w\n\nRolled back. Fix Docker and re-run `dbg collector install`", err)
-	}
-
 	state := &collector.State{
-		AgentID:              creds.AgentID,
-		TenantID:             creds.TenantID,
-		Domain:               creds.Domain,
-		ContainerName:        runner.Name,
-		Image:                image,
-		ConfigPath:           configPath,
-		EnvFilePath:          envPath,
-		CACertPath:           caCert,
-		TargetName:           ict.Name,
-		InstaclustrClusterID: clusterID,
-		InstaclustrUsername:  setupCreds.Username,
-		CreatedAt:            time.Now().UTC(),
+		TargetName:           in.ict.Name,
+		InstaclustrClusterID: in.clusterID,
+		InstaclustrUsername:  in.setupCreds.Username,
 	}
 	if created {
 		state.FirewallRuleID = rule.ID
 	}
-	if err := collector.SaveState(state); err != nil {
+	return finishDockerInstall(cmd, in.client, creds, rendered, monitorPassword, caCert,
+		func(envPath string) error {
+			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey)
+		},
+		state, rollbackRule,
+		"  dbg collector status              # check connection\n"+
+			"  dbg collector logs -f             # watch it work\n"+
+			"  dbg collector refresh-firewall    # re-allowlist after an IP change")
+}
+
+// instaclustrInstall is the front matter every instaclustr install resolves
+// identically, whatever substrate runs the collector.
+type instaclustrInstall struct {
+	clusterID  string
+	setupCreds collector.InstaclustrCreds
+	// readOnlyKey stays empty on a dry run — nothing renders or ships it.
+	readOnlyKey string
+	client      *api.Client
+	ict         collector.InstaclustrTarget
+	seedHost    string
+	usePrivate  bool
+	sslMode     string
+	databases   []string
+}
+
+// resolveInstaclustrInstallInputs gathers everything the substrates share:
+// the cluster id, both API keys (by their two fates), the backend capability
+// gate, and cluster discovery down to the seed host.
+func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun bool) (*instaclustrInstall, error) {
+	clusterID, _ := cmd.Flags().GetString("cluster-id")
+	if clusterID == "" {
+		if !interactiveTerminal() {
+			return nil, errors.New("--cluster-id is required with --provider instaclustr. " +
+				"Find it in the Instaclustr console URL or Cluster Details")
+		}
+		clusterID = strings.TrimSpace(prompt("Instaclustr cluster id", ""))
+		if clusterID == "" {
+			return nil, errors.New("aborted: no cluster id given")
+		}
+	}
+	setupCreds, err := resolveInstaclustrCreds(cmd, "", "instaclustr-api-key", instaclustrProvisioningEnv,
+		"Instaclustr provisioning API key (setup only, never stored)")
+	if err != nil {
+		return nil, err
+	}
+	readOnlyKey := ""
+	if !dryRun {
+		if readOnlyKey, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv,
+			"Instaclustr READ-ONLY API key (the collector keeps this one)"); err != nil {
+			return nil, err
+		}
+	}
+
+	client, err := requireCollectorSupport(cmd, apiURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Discover the cluster through the Cluster Management API (read-only, so
+	// the dry-run path shares it).
+	ict, err := discoverInstaclustr(cmd.Context(), setupCreds, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	usePrivate, _ := cmd.Flags().GetBool("use-private-addresses")
+	seedHost := ""
+	for _, n := range ict.Nodes {
+		if h := n.Host(usePrivate); h != "" {
+			seedHost = h
+			break
+		}
+	}
+	if seedHost == "" {
+		return nil, errors.New("no node has an address on the selected network side. " +
+			"A private-network cluster needs --use-private-addresses; a public one must not set it")
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Cluster %q: %d node(s), PostgreSQL %s, %s %s",
+		ict.Name, len(ict.Nodes), ict.PostgresVersion, ict.CloudProvider, ict.Region)))
+
+	sslMode := ""
+	if cmd.Flags().Changed("ssl-mode") {
+		sslMode, _ = cmd.Flags().GetString("ssl-mode")
+	}
+	dbNames, _ := cmd.Flags().GetString("db-name")
+	return &instaclustrInstall{
+		clusterID:   clusterID,
+		setupCreds:  setupCreds,
+		readOnlyKey: readOnlyKey,
+		client:      client,
+		ict:         ict,
+		seedHost:    seedHost,
+		usePrivate:  usePrivate,
+		sslMode:     sslMode,
+		databases:   splitCSV(dbNames),
+	}, nil
+}
+
+// setupMonitoringRole creates the monitoring role for a cloud install, via a
+// temporary allowlist entry for THIS machine (the operator's IP is not the
+// collector's). It hands back the rule, whether this run created it, and its
+// remover — which every later exit path must call, unless the temporary rule
+// turns out to be the collector's own.
+func setupMonitoringRole(ctx context.Context, in *instaclustrInstall, monitorPassword string) (opRule collector.FirewallRule, opCreated bool, removeOperatorRule func(), err error) {
+	operatorIP, err := publicEgressIP(ctx)
+	if err != nil {
+		return collector.FirewallRule{}, false, nil, err
+	}
+	operatorCIDR, err := collector.AllowCIDR(operatorIP)
+	if err != nil {
+		return collector.FirewallRule{}, false, nil, err
+	}
+	opRule, opCreated, err = ensureFirewallRule(ctx, in.setupCreds, in.clusterID, operatorCIDR)
+	if err != nil {
+		return collector.FirewallRule{}, false, nil, err
+	}
+	removeOperatorRule = func() {
+		if opCreated {
+			if derr := deleteFirewallRule(ctx, in.setupCreds, opRule.ID); derr != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove the temporary setup rule %s: %v (remove it from the console)", operatorCIDR, derr)))
+			}
+		}
+	}
+	dsn := collector.InstaclustrAdminDSN(in.seedHost, 5432, in.ict.DefaultUserPassword)
+	if err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword); err != nil {
+		removeOperatorRule()
+		return collector.FirewallRule{}, false, nil,
+			fmt.Errorf("%w\n\nA just-created firewall rule can take ~a minute to apply; re-running is safe", err)
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Monitoring role %q ready (pg_monitor + pg_read_all_data)", collector.InstaclustrMonitorUser)))
+	return opRule, opCreated, removeOperatorRule, nil
+}
+
+// allowlistCollectorEgress allowlists the collector's actual egress after a
+// cloud deploy — the stable-egress address the deployment reserved (read via
+// deployedEgressIP, whose error names the substrate) or the operator-supplied
+// one — retires the operator's temporary rule unless it IS the collector's,
+// and records rule ownership so refresh-firewall can retire it later.
+func allowlistCollectorEgress(ctx context.Context, in *instaclustrInstall, stableEgress bool,
+	deployedEgressIP func() (string, error), allowRaw string,
+	opRule collector.FirewallRule, opCreated bool, removeOperatorRule func()) error {
+
+	source := allowRaw
+	if stableEgress {
+		var err error
+		if source, err = deployedEgressIP(); err != nil {
+			removeOperatorRule()
+			return err
+		}
+	}
+	collectorCIDR, err := collector.AllowCIDR(source)
+	if err != nil {
+		removeOperatorRule()
 		return err
 	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Container started: %s", runner.Name)))
-
-	if crashLooping(runner) {
-		return errCollectorCrashLooping
+	rule, created, err := ensureFirewallRule(ctx, in.setupCreds, in.clusterID, collectorCIDR)
+	if err != nil {
+		removeOperatorRule()
+		return fmt.Errorf("the collector deployed but its firewall entry failed: %w\n\n"+
+			"Add %s to the cluster's PostgreSQL allowlist, or re-run `dbg collector refresh-firewall`", err, collectorCIDR)
 	}
-	verifyConnection(client, creds.AgentID, caCert)
+	fmt.Println(style.Success(fmt.Sprintf("✓ Firewall: allowlisted %s for the collector", collectorCIDR)))
+	if opRule.ID != rule.ID {
+		removeOperatorRule()
+	} else if opCreated {
+		// The operator's machine and the collector share an egress address, so
+		// the temporary rule IS the collector's rule — this run created it and
+		// must own it, or refresh-firewall could never retire it.
+		created = true
+	}
 
-	fmt.Println()
-	fmt.Println("Collector installed. Next:")
-	fmt.Println("  dbg collector status              # check connection")
-	fmt.Println("  dbg collector logs -f             # watch it work")
-	fmt.Println("  dbg collector refresh-firewall    # re-allowlist after an IP change")
+	if created {
+		if st, lerr := collector.LoadState(); lerr == nil && st != nil {
+			st.FirewallRuleID = rule.ID
+			if serr := collector.SaveState(st); serr != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not record the firewall rule id: %v", serr)))
+			}
+		}
+	}
 	return nil
 }
 
@@ -584,65 +637,21 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 				"the FIRST --subnets entry must be a public subnet for the NAT gateway). " +
 				"Pass --stable-egress=false with --allow-ip to skip the NAT at the cost of firewall churn")
 		}
+		// Validate here rather than letting the deploy fail on it after the
+		// role and firewall work is already done.
+		if _, _, cerr := net.ParseCIDR(natCidr); cerr != nil {
+			return fmt.Errorf("--nat-subnet-cidr %q is not a CIDR (e.g. 10.0.200.0/28)", natCidr)
+		}
 	} else if allowRaw == "" {
 		return errors.New("--stable-egress=false needs --allow-ip: a plain Fargate task's public IP is " +
 			"ephemeral, so the firewall entry must be an address you manage (a NAT you already have)")
 	}
 
-	clusterID, _ := cmd.Flags().GetString("cluster-id")
-	if clusterID == "" {
-		return errors.New("--cluster-id is required with --provider instaclustr. " +
-			"Find it in the Instaclustr console URL or Cluster Details")
-	}
-	setupCreds, err := resolveInstaclustrCreds(cmd, "", "instaclustr-api-key", instaclustrProvisioningEnv,
-		"Instaclustr provisioning API key (setup only, never stored)")
+	in, err := resolveInstaclustrInstallInputs(cmd, apiURL, dryRun)
 	if err != nil {
 		return err
 	}
-	readOnlyKey := "preview"
-	if !dryRun {
-		readOnlyKey, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv,
-			"Instaclustr READ-ONLY API key (the collector keeps this one)")
-		if err != nil {
-			return err
-		}
-	}
-
-	client := newAPIClient(cmd)
-	supported, err := client.CollectorSupported()
-	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
-	}
-	if !supported {
-		return api.ErrCollectorUnsupported
-	}
-
 	ctx := cmd.Context()
-	ict, err := discoverInstaclustr(ctx, setupCreds, clusterID)
-	if err != nil {
-		return err
-	}
-	usePrivate, _ := cmd.Flags().GetBool("use-private-addresses")
-	seedHost := ""
-	for _, n := range ict.Nodes {
-		if h := n.Host(usePrivate); h != "" {
-			seedHost = h
-			break
-		}
-	}
-	if seedHost == "" {
-		return errors.New("no node has an address on the selected network side. " +
-			"A private-network cluster needs --use-private-addresses; a public one must not set it")
-	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Cluster %q: %d node(s), PostgreSQL %s, %s %s",
-		ict.Name, len(ict.Nodes), ict.PostgresVersion, ict.CloudProvider, ict.Region)))
-
-	sslMode := ""
-	if cmd.Flags().Changed("ssl-mode") {
-		sslMode, _ = cmd.Flags().GetString("ssl-mode")
-	}
-	dbNames, _ := cmd.Flags().GetString("db-name")
-	databases := splitCSV(dbNames)
 	stackName, _ := cmd.Flags().GetString("stack-name")
 	templateURL, _ := cmd.Flags().GetString("template-url")
 
@@ -656,8 +665,8 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	if assignIP == "" {
 		assignIP = "ENABLED"
 	}
-	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "",
-		setupCreds.Username, usePrivate, collector.AwsDBPasswordEnv)
+	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, "",
+		in.setupCreds.Username, in.usePrivate, collector.AwsDBPasswordEnv)
 	input := collector.AwsStackInput{
 		Region:          region,
 		AccountID:       accountID,
@@ -684,37 +693,14 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		})
 	}
 
-	// Role first, via a temporary allowlist entry for THIS machine (the
-	// operator's IP is not the task's): create, use, and remove it unless it
-	// pre-existed.
-	operatorIP, err := publicEgressIP(ctx)
+	// Role first, through the operator's temporary firewall entry.
+	opRule, opCreated, removeOperatorRule, err := setupMonitoringRole(ctx, in, monitorPassword)
 	if err != nil {
 		return err
 	}
-	operatorCIDR, err := collector.AllowCIDR(operatorIP)
-	if err != nil {
-		return err
-	}
-	opRule, opCreated, err := ensureFirewallRule(ctx, setupCreds, clusterID, operatorCIDR)
-	if err != nil {
-		return err
-	}
-	removeOperatorRule := func() {
-		if opCreated {
-			if derr := deleteFirewallRule(ctx, setupCreds, opRule.ID); derr != nil {
-				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove the temporary setup rule %s: %v (remove it from the console)", operatorCIDR, derr)))
-			}
-		}
-	}
-	dsn := collector.InstaclustrAdminDSN(seedHost, 5432, ict.DefaultUserPassword)
-	if err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword); err != nil {
-		removeOperatorRule()
-		return fmt.Errorf("%w\n\nA just-created firewall rule can take ~a minute to apply; re-running is safe", err)
-	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Monitoring role %q ready (pg_monitor + pg_read_all_data)", collector.InstaclustrMonitorUser)))
 
 	fmt.Println(style.Info("Provisioning collector identity..."))
-	creds, err := client.ProvisionCollector()
+	creds, err := in.client.ProvisionCollector()
 	if err != nil {
 		removeOperatorRule()
 		return err
@@ -722,21 +708,14 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
 	image, imageSource := resolveImage(cmd, creds)
-	if pinned, perr := pinImageRemote(image); perr == nil {
-		image = pinned
-	} else {
-		fmt.Println(style.Warn(fmt.Sprintf(
-			"⚠  could not resolve %s to a fixed version (%v).\n"+
-				"   Deploying the tag as-is: the collector may change version when its task restarts.",
-			image, perr)))
-	}
+	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
 	input.AgentID, input.TenantID, input.Image = creds.AgentID, creds.TenantID, image
 	input.Endpoints = endpointsFor(creds, cmd)
 	input.ServerSecret = creds.Secret
 	input.DBPassword = monitorPassword
-	input.InstaclustrKey = readOnlyKey
+	input.InstaclustrKey = in.readOnlyKey
 	params, err := collector.AwsStackParams(input)
 	if err != nil {
 		removeOperatorRule()
@@ -745,21 +724,19 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 
 	// Save state BEFORE the slow deploy (the aws pattern): an interrupted
 	// install leaves a tracked collector, not an orphaned stack + identity.
-	if serr := collector.SaveState(&collector.State{
+	saveStateOrWarn(&collector.State{
 		AgentID:              creds.AgentID,
 		TenantID:             creds.TenantID,
 		Domain:               creds.Domain,
 		Target:               "aws",
 		Image:                image,
-		TargetName:           ict.Name,
+		TargetName:           in.ict.Name,
 		StackName:            stackName,
 		Region:               region,
-		InstaclustrClusterID: clusterID,
-		InstaclustrUsername:  setupCreds.Username,
+		InstaclustrClusterID: in.clusterID,
+		InstaclustrUsername:  in.setupCreds.Username,
 		CreatedAt:            time.Now().UTC(),
-	}); serr != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not save local state: %v", serr)))
-	}
+	})
 
 	fmt.Printf("Deploying to Fargate (stack %q)...\n", stackName)
 	if err := deployStack(collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}, "Deploying to Fargate…"); err != nil {
@@ -772,7 +749,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 			return nil
 		}
 		fmt.Println("Deploy failed; rolling back the provisioned identity and stack...")
-		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
+		if derr := in.client.DeleteCollector(creds.AgentID); derr != nil {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
 		}
 		if derr := deleteStack(stackName, region); derr != nil {
@@ -785,46 +762,14 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 
 	// Allowlist the collector's actual egress: the EIP the stack allocated
 	// (stable egress) or the operator-supplied address.
-	collectorCIDR := ""
-	if stableEgress {
+	if err := allowlistCollectorEgress(ctx, in, stableEgress, func() (string, error) {
 		eip, oerr := stackOutput(stackName, region, "EgressIP")
 		if oerr != nil {
-			removeOperatorRule()
-			return fmt.Errorf("the stack deployed but its EgressIP output could not be read: %w", oerr)
+			return "", fmt.Errorf("the stack deployed but its EgressIP output could not be read: %w", oerr)
 		}
-		if collectorCIDR, err = collector.AllowCIDR(eip); err != nil {
-			removeOperatorRule()
-			return err
-		}
-	} else {
-		if collectorCIDR, err = collector.AllowCIDR(allowRaw); err != nil {
-			removeOperatorRule()
-			return err
-		}
-	}
-	rule, created, err := ensureFirewallRule(ctx, setupCreds, clusterID, collectorCIDR)
-	if err != nil {
-		removeOperatorRule()
-		return fmt.Errorf("the collector deployed but its firewall entry failed: %w\n\n"+
-			"Add %s to the cluster's PostgreSQL allowlist, or re-run `dbg collector refresh-firewall`", err, collectorCIDR)
-	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Firewall: allowlisted %s for the collector", collectorCIDR)))
-	if opRule.ID != rule.ID {
-		removeOperatorRule()
-	} else if opCreated {
-		// The operator's machine and the collector share an egress address, so
-		// the temporary rule IS the collector's rule — this run created it and
-		// must own it, or refresh-firewall could never retire it.
-		created = true
-	}
-
-	if created {
-		if st, lerr := collector.LoadState(); lerr == nil && st != nil {
-			st.FirewallRuleID = rule.ID
-			if serr := collector.SaveState(st); serr != nil {
-				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not record the firewall rule id: %v", serr)))
-			}
-		}
+		return eip, nil
+	}, allowRaw, opRule, opCreated, removeOperatorRule); err != nil {
+		return err
 	}
 
 	fmt.Println()

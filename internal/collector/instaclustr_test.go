@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -140,11 +141,19 @@ func TestRedactPasswordScrubsBothForms(t *testing.T) {
 }
 
 func TestRetriableRoleError(t *testing.T) {
-	if !RetriableRoleError(fmt.Errorf("cannot connect to the cluster to create the monitoring role: dial tcp: i/o timeout")) {
+	// The connection-failure wrap EnsureInstaclustrRole produces.
+	connectErr := fmt.Errorf("%w to create the monitoring role: %w",
+		errClusterUnreachable, errors.New("dial tcp: i/o timeout"))
+	if !RetriableRoleError(connectErr) {
 		t.Fatal("dial timeout should retry")
 	}
 	if RetriableRoleError(fmt.Errorf("creating role x failed: permission denied to create role")) {
 		t.Fatal("a SQL failure is deterministic and must not retry")
+	}
+	// Recognition is structural (errors.Is), not prose-matching: an error that
+	// merely mentions the words does not retry.
+	if RetriableRoleError(fmt.Errorf("cannot connect to the cluster somewhere: i/o timeout")) {
+		t.Fatal("only the tagged connection failure retries, not any error containing the phrase")
 	}
 }
 
@@ -159,6 +168,11 @@ func TestAllowCIDR(t *testing.T) {
 		got, err := AllowCIDR(in)
 		if err != nil || got != want {
 			t.Fatalf("AllowCIDR(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, wholeInternet := range []string{"0.0.0.0/0", "::/0"} {
+		if _, err := AllowCIDR(wholeInternet); err == nil {
+			t.Fatalf("AllowCIDR(%q) must refuse to allowlist the whole internet", wholeInternet)
 		}
 	}
 	if _, err := AllowCIDR("<html>portal</html>"); err == nil {

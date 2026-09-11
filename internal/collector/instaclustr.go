@@ -138,22 +138,25 @@ func DiscoverInstaclustrCluster(ctx context.Context, creds InstaclustrCreds, clu
 func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) error {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return fmt.Errorf("cannot connect to the cluster to create the monitoring role: %w", err)
+		return fmt.Errorf("%w to create the monitoring role: %w", errClusterUnreachable, err)
 	}
 	defer conn.Close(ctx)
+	// The role name is quoted as an identifier: every caller passes the
+	// constant today, but this signature accepts any string.
+	role := pgx.Identifier{user}.Sanitize()
 	quoted := strings.ReplaceAll(password, "'", "''")
-	if _, err := conn.Exec(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", user, quoted)); err != nil {
+	if _, err := conn.Exec(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", role, quoted)); err != nil {
 		if !isBenignGrantErr(err) {
 			return fmt.Errorf("creating role %s failed: %w", user, redactPassword(err, quoted, password))
 		}
-		if _, aerr := conn.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", user, quoted)); aerr != nil {
+		if _, aerr := conn.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", role, quoted)); aerr != nil {
 			return fmt.Errorf("updating role %s's password failed: %w", user, redactPassword(aerr, quoted, password))
 		}
 	}
-	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_monitor TO %s", user)); err != nil && !isBenignGrantErr(err) {
+	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_monitor TO %s", role)); err != nil && !isBenignGrantErr(err) {
 		return fmt.Errorf("granting pg_monitor to %s failed: %w", user, err)
 	}
-	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_read_all_data TO %s", user)); err != nil && !isBenignGrantErr(err) {
+	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_read_all_data TO %s", role)); err != nil && !isBenignGrantErr(err) {
 		// 42704 undefined_object: the role does not exist before PG 14 — the
 		// monitor grant above still stands, so degrade rather than fail.
 		var pgErr *pgconn.PgError
@@ -177,17 +180,24 @@ func redactPassword(err error, forms ...string) error {
 	return errors.New(msg)
 }
 
+// errClusterUnreachable tags a connection-establishment failure from
+// EnsureInstaclustrRole, so RetriableRoleError recognizes it structurally
+// rather than by matching the wrapper's prose.
+var errClusterUnreachable = errors.New("cannot connect to the cluster")
+
 // RetriableRoleError reports whether a role-ensure failure is worth another
 // attempt: only connection-establishment failures are — a freshly created
 // firewall rule takes a moment to pass packets, and the symptom is a dial
 // timeout or refusal. SQL-level failures are deterministic; retrying them
 // just multiplies the wait before the user sees the real error.
 func RetriableRoleError(err error) bool {
+	if !errors.Is(err, errClusterUnreachable) {
+		return false
+	}
 	msg := err.Error()
-	return strings.Contains(msg, "cannot connect to the cluster") &&
-		(strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out") ||
-			strings.Contains(msg, "connection refused") || strings.Contains(msg, "i/o") ||
-			strings.Contains(msg, "unreachable") || strings.Contains(msg, "reset"))
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "connection refused") || strings.Contains(msg, "i/o") ||
+		strings.Contains(msg, "unreachable") || strings.Contains(msg, "reset")
 }
 
 // GenerateInstaclustrPassword returns a random password safe to embed in a
@@ -309,6 +319,13 @@ func AllowCIDR(s string) (string, error) {
 		return s + "/32", nil
 	}
 	if p, err := netip.ParsePrefix(s); err == nil {
+		// A /0 allowlists the entire internet, which defeats the firewall the
+		// entry lives in — refused rather than warned, since nothing this CLI
+		// sets up needs it (the console is there for a deliberate open rule).
+		if p.Bits() == 0 {
+			return "", fmt.Errorf("refusing to allowlist %s: it opens the cluster's firewall to the whole "+
+				"internet. Pass the collector's actual egress IP, or a CIDR that covers only it", p)
+		}
 		return p.String(), nil
 	}
 	return "", fmt.Errorf("%q is not an IP address or CIDR — pass e.g. 203.0.113.10 or 203.0.113.0/24", s)
