@@ -140,7 +140,7 @@ func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) erro
 	if err != nil {
 		return fmt.Errorf("%w to create the monitoring role: %w", errClusterUnreachable, err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	// The role name is quoted as an identifier: every caller passes the
 	// constant today, but this signature accepts any string.
 	role := pgx.Identifier{user}.Sanitize()
@@ -344,7 +344,7 @@ var PublicEgressIP = func(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot determine this machine's public IP: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 128))
 	if err != nil {
 		return "", fmt.Errorf("cannot determine this machine's public IP: %w", err)

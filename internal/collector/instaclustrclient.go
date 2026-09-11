@@ -74,7 +74,7 @@ func icSend(ctx context.Context, creds InstaclustrCreds, method, path string, bo
 	if err != nil {
 		return nil, fmt.Errorf("instaclustr API request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("instaclustr API response read failed: %w", err)

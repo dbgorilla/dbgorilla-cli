@@ -1084,9 +1084,15 @@ func printAwsParams(params map[string]string) {
 		v := params[k]
 		switch k {
 		case "ServerSecret", "DbPassword", "InstaclustrApiKey":
+			// Print presence only, as a fresh constant: the secret's value
+			// must never be an operand of the print call, so no code path
+			// (and no taint analysis) can put it on the terminal.
+			presence := "(not set)"
 			if v != "" {
-				v = "<redacted>"
+				presence = "<redacted>"
 			}
+			fmt.Printf("    %s = %s\n", k, presence)
+			continue
 		case "CollectorConfig":
 			decoded, err := collector.DecodeConfig(v)
 			if err == nil {
