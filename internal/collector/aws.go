@@ -463,7 +463,6 @@ func awsComponent(t AwsTarget, region string) Component {
 	if t.AuthMethod == "password" {
 		auth.Method = "password"
 		auth.Password = "${" + CloudDBPasswordEnv + "}"
-
 	}
 	// No ca_cert: the collector image trusts the Amazon RDS roots system-wide
 	// (0.3.2+), so verification works the same under password auth as under IAM.
