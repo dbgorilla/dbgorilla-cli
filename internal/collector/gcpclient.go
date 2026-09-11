@@ -200,6 +200,10 @@ func gcpTokenEmail(ctx context.Context, cfg gcpConfig) (string, error) {
 // errGcpNotFound tags a 404 so callers can errors.Is it.
 var errGcpNotFound = errors.New("not found")
 
+// errGcpConflict tags a 409, so create-if-absent callers can tolerate the
+// resource already existing.
+var errGcpConflict = errors.New("already exists")
+
 // gcpRequestContext adds the per-request deadline unless ctx already has one.
 func gcpRequestContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
@@ -303,8 +307,11 @@ func gcpAPIError(rawURL string, resp *http.Response) error {
 	} else {
 		err = fmt.Errorf("%s returned HTTP %d", apiHost(rawURL), resp.StatusCode)
 	}
-	if resp.StatusCode == http.StatusNotFound {
+	switch resp.StatusCode {
+	case http.StatusNotFound:
 		return fmt.Errorf("%w: %w", errGcpNotFound, err)
+	case http.StatusConflict:
+		return fmt.Errorf("%w: %w", errGcpConflict, err)
 	}
 	return err
 }

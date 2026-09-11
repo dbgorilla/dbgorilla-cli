@@ -32,13 +32,12 @@ type GcpDeploy struct {
 	// ServiceAccount is the account Infrastructure Manager actuates Terraform
 	// as (projects/{p}/serviceAccounts/{email}).
 	ServiceAccount string
-	// Inputs are the template's non-secret input variables (gcpInputKeys).
+	// Inputs are the template's input variables (gcpInputKeys). None carries a
+	// credential: secret values go straight to Secret Manager
+	// (EnsureGcpSecrets) and never enter the deployment — its input values and
+	// Terraform state are readable by config.* read roles.
 	Inputs map[string]string
-	// Secrets are the credential inputs (GcpSecretInputKeys), kept apart from
-	// Inputs so nothing that prints Inputs can ever print them; the two meet
-	// only in the request body.
-	Secrets map[string]string
-	DryRun  bool
+	DryRun bool
 }
 
 // Run deploys (create, or update in place) and waits for a terminal state.
@@ -53,18 +52,16 @@ func gcpDeploymentPath(project, region, name string) string {
 }
 
 type gcpDeployment struct {
-	Name        string `json:"name"`
-	State       string `json:"state"` // CREATING | ACTIVE | UPDATING | DELETING | FAILED | SUSPENDED
-	StateDetail string `json:"stateDetail"`
-	ErrorLogs   string `json:"errorLogs"`
+	Name           string `json:"name"`
+	State          string `json:"state"` // CREATING | ACTIVE | UPDATING | DELETING | FAILED | SUSPENDED
+	StateDetail    string `json:"stateDetail"`
+	ErrorLogs      string `json:"errorLogs"`
+	LatestRevision string `json:"latestRevision"`
 }
 
 func (d GcpDeploy) body() map[string]any {
 	inputs := map[string]any{}
 	for k, v := range d.Inputs {
-		inputs[k] = map[string]any{"inputValue": v}
-	}
-	for k, v := range d.Secrets {
 		inputs[k] = map[string]any{"inputValue": v}
 	}
 	return map[string]any{
@@ -156,6 +153,47 @@ func GcpDeploymentStatus(project, region, name string) (string, error) {
 		return "", nil
 	}
 	return dep.State, nil
+}
+
+// GcpDeploymentOutput reads one Terraform output off the deployment's latest
+// applied revision — how the CLI learns the egress_ip a stable-egress deploy
+// reserved, so the firewall allowlist carries the address the database will
+// actually see.
+func GcpDeploymentOutput(project, region, name, key string) (string, error) {
+	ctx := context.Background()
+	cfg, err := loadGCPConfig(ctx)
+	if err != nil {
+		return "", gcpCredsErr(err)
+	}
+	dep, err := getGcpDeployment(ctx, cfg, gcpDeploymentPath(project, region, name))
+	if err != nil {
+		return "", err
+	}
+	if dep == nil {
+		return "", fmt.Errorf("deployment %q does not exist", name)
+	}
+	if dep.LatestRevision == "" {
+		return "", fmt.Errorf("deployment %q has no applied revision yet — is it still deploying?", name)
+	}
+	var rev struct {
+		ApplyResults struct {
+			Outputs map[string]struct {
+				Value any `json:"value"`
+			} `json:"outputs"`
+		} `json:"applyResults"`
+	}
+	if err := gcpDo(ctx, cfg, http.MethodGet, infraManagerBase+"/"+dep.LatestRevision, nil, &rev); err != nil {
+		return "", fmt.Errorf("could not read deployment %q's latest revision: %w", name, err)
+	}
+	out, ok := rev.ApplyResults.Outputs[key]
+	if !ok {
+		return "", fmt.Errorf("deployment %q has no %s output — was it deployed with stable egress enabled?", name, key)
+	}
+	s, ok := out.Value.(string)
+	if !ok || s == "" {
+		return "", fmt.Errorf("deployment %q's %s output is empty — was it deployed with stable egress enabled?", name, key)
+	}
+	return s, nil
 }
 
 // DeleteGcpDeployment destroys the deployment and everything Terraform

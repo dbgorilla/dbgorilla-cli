@@ -111,10 +111,20 @@ type gcpCandidates struct {
 // to one API.
 func listGcpCandidates(ctx context.Context, cfg gcpConfig, project, providerHint string) (gcpCandidates, error) {
 	out := gcpCandidates{locations: map[string]string{}}
+	// With no hint, one disabled API must not hide the other's candidates:
+	// AlloyDB's API is off by default, so a Cloud SQL-only project would
+	// otherwise fail auto-detection on the common path (and vice versa). The
+	// deferred error still surfaces when NOTHING was found, so a
+	// permissions problem never reads as an empty project.
+	tolerate := providerHint == ""
+	var deferred []error
 	if providerHint == "" || providerHint == "cloud_sql" {
 		sqlInstances, err := listCloudSQLInstances(ctx, cfg, project)
 		if err != nil {
-			return out, err
+			if !tolerate {
+				return out, err
+			}
+			deferred = append(deferred, err)
 		}
 		var ids []string
 		for _, inst := range sqlInstances {
@@ -131,13 +141,19 @@ func listGcpCandidates(ctx context.Context, cfg gcpConfig, project, providerHint
 	if providerHint == "" || providerHint == "alloydb" {
 		primaries, err := listAlloyDBPrimaries(ctx, cfg, project)
 		if err != nil {
-			return out, err
+			if !tolerate {
+				return out, err
+			}
+			deferred = append(deferred, err)
 		}
 		sort.Slice(primaries, func(i, j int) bool { return primaries[i].id() < primaries[j].id() })
 		for _, p := range primaries {
 			out.choices = append(out.choices, TargetChoice{ID: p.id(), ProviderType: "alloydb"})
 			out.locations[p.id()] = p.location
 		}
+	}
+	if len(out.choices) == 0 && len(deferred) > 0 {
+		return out, errors.Join(deferred...)
 	}
 	return out, nil
 }

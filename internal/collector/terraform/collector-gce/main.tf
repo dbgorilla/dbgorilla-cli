@@ -2,18 +2,21 @@
 # instance group running the collector container on Container-Optimized OS,
 # deployed by Infrastructure Manager (or plain Terraform).
 #
-# template-version: v1.1
+# template-version: v1.3
 #
-# This file is published, never embedded in the CLI. Secrets arrive as
-# sensitive input variables and are stored in Secret Manager; the instance
-# fetches them at boot with its own service account, so they never appear in
-# instance metadata. Infrastructure Manager retains input values on the
-# deployment resource and in its Terraform state, readable by principals
-# holding config.* read roles.
+# This file is published, never embedded in the CLI. Secret values never reach
+# it: the CLI writes them to Secret Manager before deploying (v1.2 passed them
+# as input variables, which Infrastructure Manager retains on the deployment
+# resource and in its Terraform state, readable by config.* read roles). This
+# template only grants the instance's service account read access by name;
+# the instance fetches the values at boot, so they never appear in instance
+# metadata either.
 #
 # Naming contract with the CLI (a change is a version bump): every resource is
 # named by the local part of var.runtime_service_account, which the CLI sets to
-# the deployment name.
+# the deployment name — including the three secrets the CLI creates before
+# deploying: <name>-server-secret, <name>-db-password,
+# <name>-instaclustr-api-key.
 #
 # The instance has no public IP. Image pulls and the collector's connection to
 # DBGorilla need egress from the VPC (Cloud NAT, or an equivalent route).
@@ -44,19 +47,26 @@ resource "google_service_account" "collector" {
   display_name = "DBGorilla collector"
 }
 
-# Read-only monitoring roles, the connect and IAM-login roles of both database
-# services, and log writing for `dbg collector logs`.
+# Read-only monitoring plus log writing for `dbg collector logs` always; the
+# connect and IAM-login roles of both database services only when a
+# Google-managed database is the target — they are project-wide grants
+# (instanceUser permits IAM database login to ANY Cloud SQL instance in the
+# project), so a source that is not a Google database must not carry them.
 resource "google_project_iam_member" "collector" {
-  for_each = toset([
-    "roles/monitoring.viewer",
-    "roles/cloudsql.viewer",
-    "roles/cloudsql.client",
-    "roles/cloudsql.instanceUser",
-    "roles/alloydb.viewer",
-    "roles/alloydb.client",
-    "roles/alloydb.databaseUser",
-    "roles/logging.logWriter",
-  ])
+  for_each = toset(concat(
+    [
+      "roles/monitoring.viewer",
+      "roles/logging.logWriter",
+    ],
+    var.database_roles ? [
+      "roles/cloudsql.viewer",
+      "roles/cloudsql.client",
+      "roles/cloudsql.instanceUser",
+      "roles/alloydb.viewer",
+      "roles/alloydb.client",
+      "roles/alloydb.databaseUser",
+    ] : [],
+  ))
   project = local.project
   role    = each.value
   member  = "serviceAccount:${google_service_account.collector.email}"
@@ -64,45 +74,73 @@ resource "google_project_iam_member" "collector" {
 
 # --- secrets ----------------------------------------------------------------
 
-resource "google_secret_manager_secret" "server_secret" {
-  secret_id = "${local.name}-server-secret"
-  replication {
-    auto {}
-  }
+# The CLI creates these secrets before deploying and owns their lifecycle;
+# this template never sees their values, only grants the collector's service
+# account read access by the naming contract.
+locals {
+  secret_ids = [
+    "${local.name}-server-secret",
+    "${local.name}-db-password",
+    "${local.name}-instaclustr-api-key",
+  ]
 }
 
-resource "google_secret_manager_secret_version" "server_secret" {
-  secret      = google_secret_manager_secret.server_secret.id
-  secret_data = var.server_secret
-}
-
-resource "google_secret_manager_secret" "db_password" {
-  secret_id = "${local.name}-db-password"
-  replication {
-    auto {}
-  }
-}
-
-resource "google_secret_manager_secret_version" "db_password" {
-  secret      = google_secret_manager_secret.db_password.id
-  secret_data = var.db_password == "" ? "unused" : var.db_password
-}
-
-resource "google_secret_manager_secret_iam_member" "server_secret" {
-  secret_id = google_secret_manager_secret.server_secret.id
+resource "google_secret_manager_secret_iam_member" "collector" {
+  for_each  = toset(local.secret_ids)
+  secret_id = "projects/${local.project}/secrets/${each.value}"
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.collector.email}"
 }
 
-resource "google_secret_manager_secret_iam_member" "db_password" {
-  secret_id = google_secret_manager_secret.db_password.id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.collector.email}"
+# --- stable egress (optional) -----------------------------------------------
+
+# A dedicated subnetwork routed through a Cloud NAT that holds a reserved
+# static address. The NAT is scoped to ONLY this subnetwork
+# (LIST_OF_SUBNETWORKS), so it coexists with other subnet-scoped NATs — GCP
+# allows several NATs on one network as long as their subnet sets are
+# disjoint. A pre-existing NAT configured for ALL subnetworks in this region
+# does block adding this one; the escape is stable_egress=false with the
+# CLI's --allow-ip naming that NAT's address.
+resource "google_compute_subnetwork" "egress" {
+  count                    = var.stable_egress ? 1 : 0
+  name                     = "${local.name}-egress"
+  ip_cidr_range            = var.nat_subnet_cidr
+  region                   = var.region
+  network                  = var.network
+  private_ip_google_access = true
+}
+
+resource "google_compute_address" "egress" {
+  count  = var.stable_egress ? 1 : 0
+  name   = "${local.name}-egress"
+  region = var.region
+}
+
+resource "google_compute_router" "egress" {
+  count   = var.stable_egress ? 1 : 0
+  name    = "${local.name}-egress"
+  region  = var.region
+  network = var.network
+}
+
+resource "google_compute_router_nat" "egress" {
+  count                              = var.stable_egress ? 1 : 0
+  name                               = "${local.name}-egress"
+  router                             = google_compute_router.egress[0].name
+  region                             = var.region
+  nat_ip_allocate_option             = "MANUAL_ONLY"
+  nat_ips                            = [google_compute_address.egress[0].self_link]
+  source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+
+  subnetwork {
+    name                    = google_compute_subnetwork.egress[0].id
+    source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
+  }
 }
 
 # --- the instance -----------------------------------------------------------
 
-# Boot: fetch both secrets with the VM's own token (retrying while IAM
+# Boot: fetch the secrets with the VM's own token (retrying while IAM
 # bindings propagate), materialize the config from metadata, run the
 # container. Secrets reach docker by variable name, never on a command line.
 locals {
@@ -132,13 +170,15 @@ locals {
     }
     DBG_SERVER_SECRET=$(retry 30 secret "${local.name}-server-secret")
     DBG_DB_PASSWORD=$(retry 30 secret "${local.name}-db-password")
-    export DBG_SERVER_SECRET DBG_DB_PASSWORD
+    INSTACLUSTR_API_KEY=$(retry 30 secret "${local.name}-instaclustr-api-key")
+    export DBG_SERVER_SECRET DBG_DB_PASSWORD INSTACLUSTR_API_KEY
     mkdir -p /var/lib/dbgorilla
     retry 30 metadata instance/attributes/collector-config | base64 -d > /var/lib/dbgorilla/collector.toml
     docker run -d --name dbg-collector --restart=always --network=host \
       -v /var/lib/dbgorilla/collector.toml:/etc/dbgorilla/collector.toml:ro \
       -e DBG_SERVER_SECRET \
       -e DBG_DB_PASSWORD \
+      -e INSTACLUSTR_API_KEY \
       "${var.collector_image}" --config-file /etc/dbgorilla/collector.toml
   EOT
 }
@@ -156,8 +196,10 @@ resource "google_compute_instance_template" "collector" {
   }
 
   network_interface {
+    # Under stable egress the instance lives in the NAT-routed subnetwork the
+    # template owns; otherwise in the caller's (or the auto-mode default).
     network    = var.network
-    subnetwork = var.subnetwork == "" ? null : var.subnetwork
+    subnetwork = var.stable_egress ? google_compute_subnetwork.egress[0].id : (var.subnetwork == "" ? null : var.subnetwork)
   }
 
   service_account {
@@ -202,13 +244,14 @@ resource "google_compute_region_instance_group_manager" "collector" {
     replacement_method    = "RECREATE"
   }
 
-  # The instance reads its secrets at boot; do not start it before it may.
+  # The instance reads its secrets at boot; do not start it before it may
+  # (the secrets themselves exist before the deploy — the CLI writes them
+  # first). Under stable egress it must also not start before its route to
+  # the internet exists, or the boot script times out fetching the image.
   depends_on = [
     google_project_iam_member.collector,
-    google_secret_manager_secret_version.server_secret,
-    google_secret_manager_secret_version.db_password,
-    google_secret_manager_secret_iam_member.server_secret,
-    google_secret_manager_secret_iam_member.db_password,
+    google_secret_manager_secret_iam_member.collector,
+    google_compute_router_nat.egress,
   ]
 }
 
@@ -218,4 +261,10 @@ output "instance_group" {
 
 output "service_account" {
   value = google_service_account.collector.email
+}
+
+output "egress_ip" {
+  # The reserved static address all collector egress leaves through under
+  # stable egress — the address to allowlist on IP-gated databases.
+  value = var.stable_egress ? google_compute_address.egress[0].address : ""
 }

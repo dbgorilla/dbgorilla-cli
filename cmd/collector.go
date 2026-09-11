@@ -514,7 +514,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	deploy := collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
 		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
-			func() error { return deleteStack(stackName, region) },
+			func() error { return deleteStack(stackName, region) }, nil,
 			"   Watch it with: dbg collector status\n"+
 				"   If it ends up failed, remove it with: dbg collector uninstall\n")
 		if kept {
@@ -1571,6 +1571,9 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  %v (delete deployment %s from the console)", err, st.DeploymentName)))
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Deployment %s deleted", st.DeploymentName)))
+			// The CLI owns the deployment's Secret Manager secrets (the
+			// template only reads them); remove them once nothing does.
+			deleteGcpSecretsOrWarn(st.Project, st.DeploymentName)
 		}
 	} else {
 		runner := collector.Runner{Name: st.ContainerName}
@@ -1585,7 +1588,13 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	// CLI deliberately never stores, so removal is the user's step — but a
 	// silent orphan (the machine's IP allowlisted forever) is not acceptable.
 	if st.InstaclustrClusterID != "" {
-		fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows this machine's IP."))
+		// A cloud install allowlisted the collector's egress address, a
+		// docker install this machine's — name the right one.
+		if st.IsAWS() || st.IsGCP() {
+			fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows the collector's egress IP."))
+		} else {
+			fmt.Println(style.Warn("⚠  The Instaclustr cluster's firewall still allows this machine's IP."))
+		}
 		if st.FirewallRuleID != "" {
 			fmt.Printf("   Remove rule %s on the cluster's Firewall Rules page (or via the API).\n", st.FirewallRuleID)
 		} else {

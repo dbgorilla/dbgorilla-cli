@@ -23,7 +23,6 @@ func testDeploy() GcpDeploy {
 		TemplateSource: "gs://tmpl/collector/gce/v1.0",
 		ServiceAccount: "projects/p/serviceAccounts/deployer@p.iam.gserviceaccount.com",
 		Inputs:         map[string]string{"collector_image": "img@sha256:abc"},
-		Secrets:        map[string]string{"server_secret": "s3"},
 	}
 }
 

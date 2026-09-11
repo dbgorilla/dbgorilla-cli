@@ -151,7 +151,7 @@ Secrets never go in the config: reference them as `${DBG_SERVER_SECRET}` and `${
 
 ## Collector for NetApp Instaclustr
 
-`dbg collector install --provider instaclustr --cluster-id <id>` monitors a NetApp Instaclustr managed PostgreSQL cluster. The database *source* is independent of where the collector runs — locally in Docker (the default `--target`) or on AWS Fargate.
+`dbg collector install --provider instaclustr --cluster-id <id>` monitors a NetApp Instaclustr managed PostgreSQL cluster. The database *source* is independent of where the collector runs — locally in Docker (the default `--target`), on AWS Fargate, or on Google Compute Engine.
 
 ```sh
 dbg collector install --provider instaclustr --cluster-id <id>
@@ -165,6 +165,17 @@ dbg collector install --provider instaclustr --cluster-id <id> --target aws \
 ```
 
 On the AWS path the first `--subnets` entry must be a public subnet (it hosts the NAT gateway), the security group needs egress to 443 and 5432, and the stack's `EgressIP` output is the address the install allowlists. `--stable-egress=false` skips the NAT but then requires `--allow-ip` (an address you manage), since a plain Fargate task's public IP is ephemeral.
+
+```sh
+# Or on Google Compute Engine behind a Cloud NAT with a reserved static
+# address (~USD 3-5/month plus NAT data processing):
+dbg collector install --provider instaclustr --cluster-id <id> --target gcp \
+  --deploy-service-account projects/PROJECT/serviceAccounts/EMAIL \
+  --region us-central1 --network projects/PROJECT/global/networks/NAME \
+  --nat-subnet-cidr 10.10.200.0/28
+```
+
+On the GCP path networking is explicit too (`--region`/`--network` — there is no Cloud SQL instance to discover them from). Under stable egress the template creates its own subnetwork routed through a Cloud NAT scoped to only that subnetwork, so it never collides with a NAT the VPC already has; the deployment's `egress_ip` output is the address the install allowlists. `--stable-egress=false` instead requires `--allow-ip` and a `--subnetwork` with its own internet egress.
 
 The install discovers the cluster through the Instaclustr Cluster Management API, creates a read-only `dbgorilla_monitor` role (`pg_monitor` + `pg_read_all_data` — the cluster's default user can do this itself, no support ticket), adds this machine's public IP to the cluster's firewall allowlist, and starts the collector.
 
@@ -196,7 +207,7 @@ The template creates the collector's own service account, which under IAM databa
 
 ### The Terraform template
 
-The deployment is defined by the Terraform template in [`internal/collector/terraform/collector-gce/`](internal/collector/terraform/collector-gce/), which the CLI expects at `gs://dbgorilla-collector-templates/collector/gce/v1.1/`. It is versioned like the CloudFormation template: independently of the CLI, by its input-variable contract, and a published version is never rewritten. The CLI carries no copy of its own — it deploys the directory at that address, or one you host yourself via `--template-source gs://…` — and if the address cannot be reached the install stops before creating anything. Secrets never land in instance metadata: the template stores them in Secret Manager and the instance fetches them at boot with its own service account.
+The deployment is defined by the Terraform template in [`internal/collector/terraform/collector-gce/`](internal/collector/terraform/collector-gce/), which the CLI expects at `gs://dbgorilla-collector-templates/collector/gce/v1.3/`. It is versioned like the CloudFormation template: independently of the CLI, by its input-variable contract, and a published version is never rewritten. The CLI carries no copy of its own — it deploys the directory at that address, or one you host yourself via `--template-source gs://…` — and if the address cannot be reached the install stops before creating anything. Secrets never land in instance metadata or in the deployment inputs: the CLI writes them to Secret Manager itself, and the instance fetches them at boot with its own service account.
 
 Not yet available for the gcp target: changing the monitored databases in place, and `dbg collector upgrade`. Both are `dbg collector uninstall` followed by a fresh install for now.
 

@@ -106,6 +106,11 @@ func stubGcpDeploymentStatus(t *testing.T, status string, err error) {
 type gcpDeployCall struct {
 	count  int
 	deploy collector.GcpDeploy
+	// The Secret Manager seam: what a real install would have written there,
+	// and whether the rollback removed it.
+	secretsWritten int
+	secrets        collector.GcpSecretValues
+	secretsDeleted int
 }
 
 func stubGcpDeploy(t *testing.T, err error) *gcpDeployCall {
@@ -118,7 +123,24 @@ func stubGcpDeploy(t *testing.T, err error) *gcpDeployCall {
 		return err
 	}
 	t.Cleanup(func() { runGcpDeploy = orig })
+	stubGcpSecrets(t, rec, nil)
 	return rec
+}
+
+// stubGcpSecrets fakes the Secret Manager seam, recording into rec.
+func stubGcpSecrets(t *testing.T, rec *gcpDeployCall, ensureErr error) {
+	t.Helper()
+	origEnsure, origDelete := ensureGcpSecrets, deleteGcpSecrets
+	ensureGcpSecrets = func(_, _ string, v collector.GcpSecretValues) error {
+		rec.secretsWritten++
+		rec.secrets = v
+		return ensureErr
+	}
+	deleteGcpSecrets = func(string, string) error {
+		rec.secretsDeleted++
+		return nil
+	}
+	t.Cleanup(func() { ensureGcpSecrets, deleteGcpSecrets = origEnsure, origDelete })
 }
 
 func stubDeleteGcpDeployment(t *testing.T, err error) *bool {
@@ -223,8 +245,14 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 			t.Errorf("config missing %s:\n%s", want, cfg)
 		}
 	}
-	if strings.Contains(cfg, "sek") || d.Secrets["server_secret"] != "sek" {
-		t.Error("the server secret rides its own input, never the config")
+	if strings.Contains(cfg, "sek") || deploys.secrets.ServerSecret != "sek" {
+		t.Error("the server secret goes to Secret Manager, never the config")
+	}
+	if deploys.secretsWritten != 1 {
+		t.Errorf("secrets should be written exactly once before the deploy, got %d", deploys.secretsWritten)
+	}
+	if d.Inputs["server_secret"] != "" || d.Inputs["db_password"] != "" {
+		t.Error("no credential may enter the deployment's input values")
 	}
 	if !strings.Contains(d.Inputs["collector_image"], "@sha256:") {
 		t.Errorf("image should be pinned, got %s", d.Inputs["collector_image"])
@@ -596,8 +624,11 @@ func TestRunInstallGCP_Auth(t *testing.T) {
 				t.Errorf("config missing %s:\n%s", want, cfg)
 			}
 		}
-		if deploys.deploy.Secrets["db_password"] != "s3cret" || strings.Contains(cfg, "s3cret") {
-			t.Error("the password rides its own input, never the config")
+		if deploys.secrets.DBPassword != "s3cret" || strings.Contains(cfg, "s3cret") {
+			t.Error("the password goes to Secret Manager, never the config")
+		}
+		if deploys.deploy.Inputs["db_password"] != "" {
+			t.Error("no credential may enter the deployment's input values")
 		}
 		if strings.Contains(out, "Grant the collector") {
 			t.Error("password auth needs no IAM grant guidance")
@@ -1022,6 +1053,8 @@ func TestRunUninstall_GCPDeletesTheDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	deleted := stubDeleteGcpDeployment(t, nil)
+	rec := &gcpDeployCall{}
+	stubGcpSecrets(t, rec, nil)
 	c := uninstallTestCmd()
 	mustSet(t, c, "yes", "true")
 	mustSet(t, c, "api-url", srv.URL)
@@ -1032,6 +1065,9 @@ func TestRunUninstall_GCPDeletesTheDeployment(t *testing.T) {
 	})
 	if !*deleted {
 		t.Error("the deployment must be deleted")
+	}
+	if rec.secretsDeleted != 1 {
+		t.Error("the CLI owns the deployment's secrets and must delete them with it")
 	}
 	if !strings.Contains(out, "Deployment dbg-test deleted") || !strings.Contains(out, "Identity deprovisioned") {
 		t.Errorf("want full teardown:\n%s", out)
@@ -1059,6 +1095,8 @@ func TestRunUninstall_GCPInterruptedDeleteKeepsTheIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	stubDeleteGcpDeployment(t, fmt.Errorf("%w: program was interrupted", errInterrupted))
+	rec := &gcpDeployCall{}
+	stubGcpSecrets(t, rec, nil)
 	c := uninstallTestCmd()
 	mustSet(t, c, "yes", "true")
 	mustSet(t, c, "api-url", srv.URL)
@@ -1072,5 +1110,8 @@ func TestRunUninstall_GCPInterruptedDeleteKeepsTheIdentity(t *testing.T) {
 	}
 	if st, _ := collector.LoadState(); st == nil {
 		t.Error("state must stay for the retry")
+	}
+	if rec.secretsDeleted != 0 {
+		t.Error("secrets must not be deleted while the deployment may still be reading them")
 	}
 }

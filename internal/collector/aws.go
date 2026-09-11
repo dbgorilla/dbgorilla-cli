@@ -565,19 +565,8 @@ func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err er
 // blocks — the path for sources whose components the caller constructs
 // (instaclustr), as opposed to AwsTargets rendered per RDS instance.
 func componentsConfigTOML(agentID, tenantID string, components []Component, eps Endpoints, commandsEnabled bool) (string, error) {
-	cfg := Config{
-		Dbgorilla: Dbgorilla{
-			AgentID:      agentID,
-			TenantID:     tenantID,
-			Secret:       "${" + SecretEnv + "}",
-			OpampBaseURL: eps.OpampBaseURL,
-			OtlpBaseURL:  eps.OtlpBaseURL,
-			AuthBaseURL:  eps.AuthBaseURL,
-		},
-		Component: components,
-		Topology:  Topology{Interval: "60s"},
-		Commands:  Commands{Enabled: commandsEnabled},
-	}
+	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
+	cfg.Component = components
 	return cfg.Render()
 }
 

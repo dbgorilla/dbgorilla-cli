@@ -20,7 +20,11 @@ const (
 )
 
 const (
-	computeOpTimeout = 2 * time.Minute
+	// computeOpTimeout bounds the whole operation, across several blocking
+	// /wait cycles — it must be a multiple of computeWaitTimeout, or an
+	// operation still RUNNING after the first ~2-minute /wait fails "did not
+	// finish in time" while it is progressing (a MIG recreate regularly does).
+	computeOpTimeout = 10 * time.Minute
 	// computeWaitTimeout bounds one call to the blocking /wait endpoint, which
 	// itself returns after about two minutes.
 	computeWaitTimeout = 3 * time.Minute
