@@ -470,7 +470,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// anything. Placeholder identity keeps the template shape valid.
 	if dry, _ := cmd.Flags().GetBool("dry-run"); dry {
 		image, _ := resolveImage(cmd, nil)
-		params, err := collector.AwsStackParams(collector.AwsStackInput{
+		params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:           image,
 			Region:          region,
@@ -486,9 +486,9 @@ func runInstallAWS(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Printf("\nDry run — validating the template for stack %q (%d database(s), no identity minted):\n", stackName, len(targets))
-		printAwsParams(params)
+		printAwsParams(params, secrets)
 		return runFargateDeploy(collector.FargateDeploy{
-			StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL,
+			StackName: stackName, Params: params, Secrets: secrets, DryRun: true, TemplateURL: templateURL,
 		})
 	}
 
@@ -507,7 +507,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
-	params, err := collector.AwsStackParams(collector.AwsStackInput{
+	params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 		AgentID:         creds.AgentID,
 		TenantID:        creds.TenantID,
 		Image:           image,
@@ -542,7 +542,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	})
 
 	fmt.Printf("Deploying to Fargate (stack %q, %d database(s))...\n", stackName, len(targets))
-	deploy := collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}
+	deploy := collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
 		// A timeout is not a failure — the stack is still converging, and the
 		// rollback below would deprovision the identity and delete a deploy
@@ -1071,10 +1071,15 @@ func promptPasswordOptional(label string) string {
 	return strings.TrimSpace(v)
 }
 
-// printAwsParams prints deploy parameters for dry-run, redacting the secret and
-// decoding the config so the dry run shows the TOML that would be deployed
-// rather than an opaque blob.
-func printAwsParams(params map[string]string) {
+// awsSecretParams are the stack parameters a dry run must never print.
+var awsSecretParams = []string{"ServerSecret", "DbPassword", "InstaclustrApiKey"}
+
+// printAwsParams prints deploy parameters for dry-run, decoding the config so
+// the dry run shows the TOML that would be deployed rather than an opaque
+// blob. Secrets never enter the printable params map (AwsStackParams keeps
+// them apart by construction); only their presence is shown, derived as a
+// boolean so no code path prints a credential.
+func printAwsParams(params, secrets map[string]string) {
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		keys = append(keys, k)
@@ -1082,26 +1087,21 @@ func printAwsParams(params map[string]string) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := params[k]
-		switch k {
-		case "ServerSecret", "DbPassword", "InstaclustrApiKey":
-			// Print presence only, as a fresh constant: the secret's value
-			// must never be an operand of the print call, so no code path
-			// (and no taint analysis) can put it on the terminal.
-			presence := "(not set)"
-			if v != "" {
-				presence = "<redacted>"
-			}
-			fmt.Printf("    %s = %s\n", k, presence)
-			continue
-		case "CollectorConfig":
-			decoded, err := collector.DecodeConfig(v)
-			if err == nil {
+		if k == "CollectorConfig" {
+			if decoded, err := collector.DecodeConfig(v); err == nil {
 				fmt.Printf("    %s =\n", k)
 				for _, line := range strings.Split(strings.TrimRight(decoded, "\n"), "\n") {
 					fmt.Printf("      %s\n", line)
 				}
 				continue
 			}
+		}
+		fmt.Printf("    %s = %s\n", k, v)
+	}
+	for _, k := range awsSecretParams {
+		v := "(not set)"
+		if secrets[k] != "" {
+			v = "<redacted>"
 		}
 		fmt.Printf("    %s = %s\n", k, v)
 	}

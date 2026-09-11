@@ -682,14 +682,14 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 
 	if dryRun {
 		input.AgentID, input.TenantID, input.Image = "<agent-id>", "<tenant-id>", "<image>"
-		params, err := collector.AwsStackParams(input)
+		params, secrets, err := collector.AwsStackParams(input)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("\nDry run — validating the template for stack %q (no identity minted, no firewall or role changes):\n", stackName)
-		printAwsParams(params)
+		printAwsParams(params, secrets)
 		return runFargateDeploy(collector.FargateDeploy{
-			StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL,
+			StackName: stackName, Params: params, Secrets: secrets, DryRun: true, TemplateURL: templateURL,
 		})
 	}
 
@@ -716,7 +716,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	input.ServerSecret = creds.Secret
 	input.DBPassword = monitorPassword
 	input.InstaclustrKey = in.readOnlyKey
-	params, err := collector.AwsStackParams(input)
+	params, secrets, err := collector.AwsStackParams(input)
 	if err != nil {
 		removeOperatorRule()
 		return err
@@ -739,7 +739,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	})
 
 	fmt.Printf("Deploying to Fargate (stack %q)...\n", stackName)
-	if err := deployStack(collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}, "Deploying to Fargate…"); err != nil {
+	if err := deployStack(collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}, "Deploying to Fargate…"); err != nil {
 		if errors.Is(err, collector.ErrDeployTimeout) {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The stack was NOT rolled back — "+
 				"it is most likely still converging.", collector.DeployTimeout())))

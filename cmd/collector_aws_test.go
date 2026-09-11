@@ -334,10 +334,11 @@ func TestPrintAwsParams_RedactsSecretsAndDecodesConfig(t *testing.T) {
 	}
 	out := capture(t, func() {
 		printAwsParams(map[string]string{
-			"ServerSecret":    "super-secret-value",
-			"DbPassword":      "db-secret-value",
 			"CollectorImage":  "ghcr.io/dbgorilla/collector:v1",
 			"CollectorConfig": encoded,
+		}, map[string]string{
+			"ServerSecret": "super-secret-value",
+			"DbPassword":   "db-secret-value",
 		})
 	})
 
@@ -361,7 +362,7 @@ func TestPrintAwsParams_RedactsSecretsAndDecodesConfig(t *testing.T) {
 
 func TestPrintAwsParams_UndecodableConfigFallsBackToRaw(t *testing.T) {
 	out := capture(t, func() {
-		printAwsParams(map[string]string{"CollectorConfig": "!!!not-base64!!!"})
+		printAwsParams(map[string]string{"CollectorConfig": "!!!not-base64!!!"}, nil)
 	})
 	if !strings.Contains(out, "!!!not-base64!!!") {
 		t.Errorf("an undecodable blob should still be shown, got %q", out)
@@ -372,7 +373,7 @@ func TestPrintAwsParams_EmptySecretsAreNotRedacted(t *testing.T) {
 	// Redacting an empty value would print "<redacted>" for a password that was
 	// never set, which reads as "a password is configured".
 	out := capture(t, func() {
-		printAwsParams(map[string]string{"DbPassword": ""})
+		printAwsParams(nil, map[string]string{"DbPassword": ""})
 	})
 	if strings.Contains(out, "<redacted>") {
 		t.Errorf("an unset password must not look configured, got %q", out)

@@ -220,7 +220,7 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
 	}
 	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, AwsDBPasswordEnv)
-	params, err := AwsStackParams(AwsStackInput{
+	params, secrets, err := AwsStackParams(AwsStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
 		Region: "us-east-1", AccountID: "111122223333",
 		Components:     []Component{comp},
@@ -237,9 +237,12 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if params["InstaclustrApiKey"] != "key456" || params["StableEgress"] != "ENABLED" ||
+	if secrets["InstaclustrApiKey"] != "key456" || params["StableEgress"] != "ENABLED" ||
 		params["VpcId"] != "vpc-1" || params["NatSubnetCidr"] != "10.0.200.0/28" {
-		t.Fatalf("v1.1 params wrong: %v", params)
+		t.Fatalf("v1.1 params wrong: %v %v", params, secrets)
+	}
+	if params["InstaclustrApiKey"] != "" {
+		t.Fatal("the API key must never enter the printable params map")
 	}
 	decoded, err := DecodeConfig(params["CollectorConfig"])
 	if err != nil {

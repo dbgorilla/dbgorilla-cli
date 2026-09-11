@@ -88,7 +88,7 @@ func TestRunInstallAWS_DryRunMintsNothing(t *testing.T) {
 	}
 	// The placeholder identity keeps the template shape valid without
 	// provisioning anything.
-	if deploys.params["ServerSecret"] != "" && !strings.Contains(out, "DRY-RUN") {
+	if deploys.secrets["ServerSecret"] != "" && !strings.Contains(out, "DRY-RUN") {
 		t.Error("dry run should use a placeholder identity")
 	}
 }
