@@ -674,12 +674,14 @@ func TestInstallInstaclustrGCPHappyPath(t *testing.T) {
 		t.Fatalf("role not ensured exactly once: %v", *roleRuns)
 	}
 	if rec.count != 1 || rec.deploy.Inputs["stable_egress"] != "true" ||
-		rec.deploy.Inputs["nat_subnet_cidr"] != "10.10.200.0/28" ||
-		rec.deploy.Secrets["instaclustr_api_key"] != "key456" {
+		rec.deploy.Inputs["nat_subnet_cidr"] != "10.10.200.0/28" {
 		t.Fatalf("deploy inputs wrong: count=%d inputs=%v", rec.count, rec.deploy.Inputs)
 	}
+	if rec.secretsWritten != 1 || rec.secrets.InstaclustrKey != "key456" || rec.secrets.DBPassword == "" {
+		t.Fatalf("the credentials must be written to Secret Manager before the deploy: %+v", rec.secrets)
+	}
 	if rec.deploy.Inputs["instaclustr_api_key"] != "" {
-		t.Fatal("the API key must never enter the printable inputs map")
+		t.Fatal("the API key must never enter the deployment's input values")
 	}
 	if len(cidrs) != 2 || cidrs[0] != "192.0.2.9/32" || cidrs[1] != "198.51.100.20/32" {
 		t.Fatalf("expected operator rule then egress rule, got %v", cidrs)

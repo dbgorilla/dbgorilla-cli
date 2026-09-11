@@ -36,11 +36,43 @@ func TestGcpTemplateContract_VariablesMatchInputKeys(t *testing.T) {
 		declared = append(declared, string(m[1]))
 	}
 	sort.Strings(declared)
-	contract := append(append([]string{}, gcpInputKeys...), GcpSecretInputKeys...)
+	contract := append([]string{}, gcpInputKeys...)
 	sort.Strings(contract)
 	if strings.Join(declared, ",") != strings.Join(contract, ",") {
 		t.Fatalf("template variables %v != the CLI's input keys %v — bump the template contract",
 			declared, contract)
+	}
+}
+
+// Secret values never enter the template: no secret-shaped variable, no
+// secret_data, and the boot script + IAM grants address the secrets by the
+// names EnsureGcpSecrets writes.
+func TestGcpTemplateContract_SecretsStayOut(t *testing.T) {
+	main, err := os.ReadFile("terraform/collector-gce/main.tf")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	vars, err := os.ReadFile("terraform/collector-gce/variables.tf")
+	if err != nil {
+		t.Fatalf("read variables: %v", err)
+	}
+	for _, forbidden := range []string{"secret_data", "google_secret_manager_secret_version"} {
+		if strings.Contains(string(main), forbidden) {
+			t.Errorf("main.tf must not carry secret values (%q found) — the CLI writes them to Secret Manager", forbidden)
+		}
+	}
+	if regexp.MustCompile(`(?m)^\s*sensitive\s*=`).Match(vars) {
+		t.Error("no template variable should need sensitive = true — none may carry a credential")
+	}
+	for _, id := range GcpSecretIDs("dbgorilla-collector") {
+		ref := strings.Replace(id, "dbgorilla-collector", "${local.name}", 1)
+		if !strings.Contains(string(main), ref) {
+			t.Errorf("main.tf must address secret %s (the CLI's naming contract)", ref)
+		}
+	}
+	if !strings.Contains(string(main), `secret_id = "projects/${local.project}/secrets/${each.value}"`) ||
+		!strings.Contains(string(main), "roles/secretmanager.secretAccessor") {
+		t.Error("main.tf must grant the collector's service account access to the CLI-written secrets")
 	}
 }
 
@@ -82,7 +114,7 @@ func TestGcpTemplateContract_RuntimePins(t *testing.T) {
 }
 
 func TestGcpDeployInputs_RendersTheFullContract(t *testing.T) {
-	inputs, secrets, err := GcpDeployInputs(GcpStackInput{
+	inputs, err := GcpDeployInputs(GcpStackInput{
 		AgentID: "agent123", TenantID: "tenant123",
 		Image: "example.registry/collector@sha256:abc",
 		Targets: []GcpTarget{{
@@ -94,7 +126,6 @@ func TestGcpDeployInputs_RendersTheFullContract(t *testing.T) {
 		Region:          "us-central1",
 		DeploymentName:  "dbgorilla-collector",
 		Project:         "p",
-		ServerSecret:    "secret123",
 		CommandsEnabled: true,
 	})
 	if err != nil {
@@ -108,25 +139,15 @@ func TestGcpDeployInputs_RendersTheFullContract(t *testing.T) {
 	if strings.Join(keys, ",") != strings.Join(gcpInputKeys, ",") {
 		t.Fatalf("rendered inputs %v != contract %v", keys, gcpInputKeys)
 	}
-	// Secrets live in their own map, never beside the printable inputs.
-	var skeys []string
-	for k := range secrets {
-		skeys = append(skeys, k)
-	}
-	sort.Strings(skeys)
-	if strings.Join(skeys, ",") != strings.Join(GcpSecretInputKeys, ",") {
-		t.Fatalf("rendered secrets %v != contract %v", skeys, GcpSecretInputKeys)
-	}
-	if secrets["server_secret"] != "secret123" {
-		t.Fatal("the server secret must ride the secrets map")
+	if inputs["database_roles"] != "true" {
+		t.Fatal("a Cloud SQL install needs the database roles granted")
 	}
 	decoded, err := DecodeConfig(inputs["collector_config"])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if strings.Contains(decoded, "secret123") {
-		t.Fatal("the server secret leaked into the config document")
-	}
+	// Credentials reach the config only as env-var references the boot
+	// script resolves from Secret Manager; GcpStackInput cannot carry one.
 	if !strings.Contains(decoded, "${DBG_SERVER_SECRET}") {
 		t.Fatalf("config must reference the secret env var:\n%s", decoded)
 	}

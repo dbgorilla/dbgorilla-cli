@@ -32,13 +32,12 @@ type GcpDeploy struct {
 	// ServiceAccount is the account Infrastructure Manager actuates Terraform
 	// as (projects/{p}/serviceAccounts/{email}).
 	ServiceAccount string
-	// Inputs are the template's non-secret input variables (gcpInputKeys).
+	// Inputs are the template's input variables (gcpInputKeys). None carries a
+	// credential: secret values go straight to Secret Manager
+	// (EnsureGcpSecrets) and never enter the deployment — its input values and
+	// Terraform state are readable by config.* read roles.
 	Inputs map[string]string
-	// Secrets are the credential inputs (GcpSecretInputKeys), kept apart from
-	// Inputs so nothing that prints Inputs can ever print them; the two meet
-	// only in the request body.
-	Secrets map[string]string
-	DryRun  bool
+	DryRun bool
 }
 
 // Run deploys (create, or update in place) and waits for a terminal state.
@@ -63,9 +62,6 @@ type gcpDeployment struct {
 func (d GcpDeploy) body() map[string]any {
 	inputs := map[string]any{}
 	for k, v := range d.Inputs {
-		inputs[k] = map[string]any{"inputValue": v}
-	}
-	for k, v := range d.Secrets {
 		inputs[k] = map[string]any{"inputValue": v}
 	}
 	return map[string]any{

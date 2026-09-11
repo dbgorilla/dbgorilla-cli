@@ -1571,6 +1571,9 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  %v (delete deployment %s from the console)", err, st.DeploymentName)))
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Deployment %s deleted", st.DeploymentName)))
+			// The CLI owns the deployment's Secret Manager secrets (the
+			// template only reads them); remove them once nothing does.
+			deleteGcpSecretsOrWarn(st.Project, st.DeploymentName)
 		}
 	} else {
 		runner := collector.Runner{Name: st.ContainerName}

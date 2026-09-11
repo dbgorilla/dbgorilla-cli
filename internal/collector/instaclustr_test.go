@@ -335,28 +335,27 @@ func TestGcpDeployInputsWithInstaclustrComponents(t *testing.T) {
 		ClusterID: "c-1", Name: "orders", CloudProvider: "GCP", Region: "us-central1",
 	}
 	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv)
-	inputs, secrets, err := GcpDeployInputs(GcpStackInput{
+	inputs, err := GcpDeployInputs(GcpStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
 		Components:     []Component{comp},
 		Network:        "projects/p/global/networks/default",
 		Region:         "us-central1",
 		DeploymentName: "dbgorilla-collector",
 		Project:        "p",
-		ServerSecret:   "sek",
-		DBPassword:     "monitor-pw",
-		InstaclustrKey: "key456",
 		StableEgress:   true,
 		NatSubnetCidr:  "10.10.200.0/28",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secrets["instaclustr_api_key"] != "key456" || inputs["stable_egress"] != "true" ||
-		inputs["nat_subnet_cidr"] != "10.10.200.0/28" {
-		t.Fatalf("v1.2 inputs wrong: %v %v", inputs, secrets)
+	if inputs["stable_egress"] != "true" || inputs["nat_subnet_cidr"] != "10.10.200.0/28" {
+		t.Fatalf("v1.3 inputs wrong: %v", inputs)
+	}
+	if inputs["database_roles"] != "false" {
+		t.Fatal("an instaclustr install must not grant the Cloud SQL / AlloyDB project-wide roles")
 	}
 	if inputs["instaclustr_api_key"] != "" {
-		t.Fatal("the API key must never enter the printable inputs map")
+		t.Fatal("the API key must never enter the inputs map — it lives in Secret Manager")
 	}
 	decoded, err := DecodeConfig(inputs["collector_config"])
 	if err != nil {
@@ -370,9 +369,6 @@ func TestGcpDeployInputsWithInstaclustrComponents(t *testing.T) {
 		if !strings.Contains(decoded, want) {
 			t.Fatalf("deploy config missing %q:\n%s", want, decoded)
 		}
-	}
-	if strings.Contains(decoded, "key456") || strings.Contains(decoded, "monitor-pw") {
-		t.Fatalf("a literal secret leaked into the deploy config:\n%s", decoded)
 	}
 }
 

@@ -13,14 +13,16 @@ const DefaultGcpDeploymentName = "dbgorilla-collector"
 // metadata (the per-value limit is 256KiB).
 const gceMetadataConfigLimit = 245760
 
-// gcpInputKeys and GcpSecretInputKeys together are the template's
-// input-variable contract; TestGcpTemplateContract pins their union against
-// variables.tf. They are split because the two maps GcpDeployInputs returns
-// must never mix: the non-secret map is printable (dry runs), the secret map
-// is merged into the request only at send time.
+// gcpInputKeys is the template's whole input-variable contract;
+// TestGcpTemplateContract pins it against variables.tf. No input carries a
+// credential: the CLI writes the three secrets to Secret Manager itself
+// (EnsureGcpSecrets, by the template's naming contract) and the template only
+// grants the collector's service account read access — so the map is
+// printable, and nothing secret ever reaches Infrastructure Manager.
 var gcpInputKeys = []string{
 	"collector_config",
 	"collector_image",
+	"database_roles",
 	"nat_subnet_cidr",
 	"network",
 	"region",
@@ -28,10 +30,6 @@ var gcpInputKeys = []string{
 	"stable_egress",
 	"subnetwork",
 }
-
-// GcpSecretInputKeys are the template inputs that carry credentials. A dry
-// run prints their presence, never their values.
-var GcpSecretInputKeys = []string{"db_password", "instaclustr_api_key", "server_secret"}
 
 // GcpRuntimeServiceAccountFor is the service account the template creates for
 // the collector VM. The IAM database user derives from it before it exists.
@@ -64,16 +62,13 @@ type GcpStackInput struct {
 	Region         string
 	DeploymentName string
 	Project        string
-	ServerSecret   string
-	// DBPassword may be empty when every target uses IAM auth. It rides its
-	// own input, never the config document.
-	DBPassword      string
+	// Credentials never ride the inputs: the CLI writes them to Secret
+	// Manager (EnsureGcpSecrets) and the config document references them as
+	// $${ENV} placeholders the boot script resolves.
 	CommandsEnabled bool
-	// Instaclustr source riding the gcp substrate: the READ-ONLY API key the
-	// instance keeps for discovery (its own Secret Manager secret), and the
-	// pre-rendered components (Targets stays empty — there is no Cloud SQL).
-	InstaclustrKey string
-	Components     []Component
+	// Instaclustr source riding the gcp substrate: the pre-rendered
+	// components (Targets stays empty — there is no Cloud SQL).
+	Components []Component
 	// Stable egress (template-owned subnetwork + Cloud NAT + reserved static
 	// address): the collector's outbound IP never changes, which
 	// IP-allowlist-gated databases require. NatSubnetCidr is the subnetwork's
@@ -82,12 +77,10 @@ type GcpStackInput struct {
 	NatSubnetCidr string
 }
 
-// GcpDeployInputs renders the template's input variables as two maps: the
-// printable inputs, and the secrets. Secrets are kept out of the first map by
-// construction — a dry run prints it wholesale, and a map that ever held a
-// credential can't be proven clean by inspection (or by a taint analysis) —
-// so the only place the two meet is the deploy request body.
-func GcpDeployInputs(in GcpStackInput) (inputs, secrets map[string]string, err error) {
+// GcpDeployInputs renders the template's input variables. The map is
+// printable by construction — GcpStackInput carries no credential, so no code
+// path can put one here; the secrets travel through EnsureGcpSecrets instead.
+func GcpDeployInputs(in GcpStackInput) (inputs map[string]string, err error) {
 	var configTOML string
 	if len(in.Components) > 0 {
 		// Pre-rendered components (the instaclustr source): no Cloud SQL
@@ -97,19 +90,27 @@ func GcpDeployInputs(in GcpStackInput) (inputs, secrets map[string]string, err e
 		configTOML, err = GcpConfigTOML(in.AgentID, in.TenantID, in.Targets, in.Endpoints, in.CommandsEnabled)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	encoded, err := encodeConfigLimited(configTOML, gceMetadataConfigLimit, "a GCE metadata value")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	stableEgress := "false"
 	if in.StableEgress {
 		stableEgress = "true"
 	}
+	// The Cloud SQL / AlloyDB project-wide roles only make sense when the
+	// target IS a Google-managed database; pre-rendered components (the
+	// instaclustr source) monitor something else entirely.
+	databaseRoles := "true"
+	if len(in.Components) > 0 {
+		databaseRoles = "false"
+	}
 	inputs = map[string]string{
 		"collector_config":        encoded,
 		"collector_image":         in.Image,
+		"database_roles":          databaseRoles,
 		"nat_subnet_cidr":         in.NatSubnetCidr,
 		"network":                 in.Network,
 		"region":                  in.Region,
@@ -117,10 +118,5 @@ func GcpDeployInputs(in GcpStackInput) (inputs, secrets map[string]string, err e
 		"stable_egress":           stableEgress,
 		"subnetwork":              in.Subnetwork,
 	}
-	secrets = map[string]string{
-		"db_password":         in.DBPassword,
-		"instaclustr_api_key": in.InstaclustrKey,
-		"server_secret":       in.ServerSecret,
-	}
-	return inputs, secrets, nil
+	return inputs, nil
 }

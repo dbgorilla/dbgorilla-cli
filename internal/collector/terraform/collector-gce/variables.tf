@@ -1,5 +1,7 @@
 # The template's input contract: one variable per CLI-rendered input
-# (gcpInputKeys). Changing this set is a template-version bump.
+# (gcpInputKeys). Changing this set is a template-version bump. No variable
+# carries a credential — the CLI writes the secrets to Secret Manager itself,
+# so nothing sensitive enters the deployment's input values or state.
 
 variable "collector_config" {
   description = "Base64-encoded collector.toml. Contains no secrets, only $${ENV} references."
@@ -11,11 +13,10 @@ variable "collector_image" {
   type        = string
 }
 
-variable "db_password" {
-  description = "Database password for password-auth targets; empty when every target uses IAM auth."
-  type        = string
-  sensitive   = true
-  default     = ""
+variable "database_roles" {
+  description = "Grant the collector's service account the Cloud SQL / AlloyDB viewer, client and IAM-login roles. Off for sources that are not Google-managed databases (Instaclustr), where the project-wide grants would be pure excess."
+  type        = bool
+  default     = true
 }
 
 variable "network" {
@@ -37,19 +38,6 @@ variable "region" {
 variable "runtime_service_account" {
   description = "Email of the service account this template creates for the collector VM. Its local part names the deployment's resources."
   type        = string
-}
-
-variable "server_secret" {
-  description = "The collector's DBGorilla identity secret."
-  type        = string
-  sensitive   = true
-}
-
-variable "instaclustr_api_key" {
-  description = "Read-only Instaclustr provisioning API key for node discovery; empty when no Instaclustr source is monitored."
-  type        = string
-  sensitive   = true
-  default     = ""
 }
 
 variable "stable_egress" {

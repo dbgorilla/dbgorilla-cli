@@ -27,6 +27,8 @@ var (
 	restartGcpMig        = collector.RestartGcpMig
 	tailGcpLogs          = collector.TailGcpLogs
 	runGcpDeploy         = collector.GcpDeploy.Run
+	ensureGcpSecrets     = collector.EnsureGcpSecrets
+	deleteGcpSecrets     = collector.DeleteGcpSecrets
 )
 
 var (
@@ -171,7 +173,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 
 	if dryRun {
 		image, _ := resolveImage(cmd, nil)
-		inputs, secrets, err := collector.GcpDeployInputs(collector.GcpStackInput{
+		inputs, err := collector.GcpDeployInputs(collector.GcpStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:           image,
 			Targets:         targets,
@@ -180,23 +182,14 @@ func runInstallGCP(cmd *cobra.Command) error {
 			Region:          target.Region,
 			DeploymentName:  deploymentName,
 			Project:         project,
-			DBPassword:      dbPassword,
 			CommandsEnabled: commandsEnabled,
 		})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("\nDry run — probing the template for deployment %q (no identity minted):\n", deploymentName)
+		fmt.Printf("\nDry run — probing the template for deployment %q (no identity minted, no secrets written):\n", deploymentName)
 		printDeployParams(inputs, nil, "collector_config")
-		// Secrets never enter the printed map; only their presence is shown,
-		// derived as a boolean so no code path prints a credential.
-		for _, k := range collector.GcpSecretInputKeys {
-			v := "(not set)"
-			if secrets[k] != "" {
-				v = "<redacted>"
-			}
-			fmt.Printf("    %s = %s\n", k, v)
-		}
+		printGcpSecretPlan(deploymentName)
 		return runGcpDeploy(collector.GcpDeploy{
 			Project: project, Region: target.Region, DeploymentName: deploymentName,
 			TemplateSource: templateSource, DryRun: true,
@@ -214,7 +207,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 	image = pinImageOrWarn(image, "instance")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 
-	inputs, secrets, err := collector.GcpDeployInputs(collector.GcpStackInput{
+	inputs, err := collector.GcpDeployInputs(collector.GcpStackInput{
 		AgentID:         creds.AgentID,
 		TenantID:        creds.TenantID,
 		Image:           image,
@@ -225,14 +218,25 @@ func runInstallGCP(cmd *cobra.Command) error {
 		Region:          target.Region,
 		DeploymentName:  deploymentName,
 		Project:         project,
-		ServerSecret:    creds.Secret,
-		DBPassword:      dbPassword,
 		CommandsEnabled: commandsEnabled,
 	})
 	if err != nil {
 		deprovisionOrWarn(client, creds.AgentID)
 		return err
 	}
+
+	// The credentials go straight to Secret Manager, before the deploy: the
+	// template only grants access to them, so they never reach Infrastructure
+	// Manager (whose input values and state are readable by config.* roles).
+	if err := ensureGcpSecrets(project, deploymentName, collector.GcpSecretValues{
+		ServerSecret: creds.Secret,
+		DBPassword:   dbPassword,
+	}); err != nil {
+		deleteGcpSecretsOrWarn(project, deploymentName)
+		deprovisionOrWarn(client, creds.AgentID)
+		return err
+	}
+	fmt.Println(style.Success("✓ Credentials written to Secret Manager (never sent to Infrastructure Manager)"))
 
 	saveStateOrWarn(&collector.State{
 		AgentID:        creds.AgentID,
@@ -251,14 +255,18 @@ func runInstallGCP(cmd *cobra.Command) error {
 	deploy := collector.GcpDeploy{
 		Project: project, Region: target.Region, DeploymentName: deploymentName,
 		TemplateSource: templateSource, ServiceAccount: deployServiceAccount,
-		Inputs: inputs, Secrets: secrets,
+		Inputs: inputs,
 	}
 	if err := withSpinner("Deploying to Compute Engine…", func() error { return runGcpDeploy(deploy) }); err != nil {
 		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.GcpDeployTimeout(), "deployment", deploymentName,
 			func() error {
-				return withSpinner("Deleting the deployment…", func() error {
+				if err := withSpinner("Deleting the deployment…", func() error {
 					return deleteGcpDeployment(project, target.Region, deploymentName)
-				})
+				}); err != nil {
+					return err
+				}
+				deleteGcpSecretsOrWarn(project, deploymentName)
+				return nil
 			},
 			"   Watch it with: dbg collector status\n")
 		if kept {
@@ -271,6 +279,24 @@ func runInstallGCP(cmd *cobra.Command) error {
 	printGcpGrantGuidance(target, deploymentName, project)
 	fmt.Println("\nConfirm it connected with: dbg collector status")
 	return nil
+}
+
+// printGcpSecretPlan names the Secret Manager secrets a real install writes.
+// Only names are shown — no code path on the dry run holds a credential.
+func printGcpSecretPlan(deploymentName string) {
+	fmt.Println("    Secret Manager secrets the install writes (values never reach Infrastructure Manager):")
+	for _, id := range collector.GcpSecretIDs(deploymentName) {
+		fmt.Printf("      %s\n", id)
+	}
+}
+
+// deleteGcpSecretsOrWarn is the rollback/uninstall counterpart of
+// ensureGcpSecrets: best effort, with the console fallback named.
+func deleteGcpSecretsOrWarn(project, deploymentName string) {
+	if err := deleteGcpSecrets(project, deploymentName); err != nil {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete the collector's Secret Manager secrets: %v "+
+			"(delete %s-* in the console)", err, deploymentName)))
+	}
 }
 
 // lastPathSegmentOf trims a resource path to its final name segment, for
