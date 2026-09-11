@@ -1085,7 +1085,7 @@ func printAwsParams(params map[string]string) {
 	for _, k := range keys {
 		v := params[k]
 		switch k {
-		case "ServerSecret", "DbPassword":
+		case "ServerSecret", "DbPassword", "InstaclustrApiKey":
 			if v != "" {
 				v = "<redacted>"
 			}

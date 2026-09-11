@@ -151,12 +151,20 @@ Secrets never go in the config: reference them as `${DBG_SERVER_SECRET}` and `${
 
 ## Collector for NetApp Instaclustr
 
-`dbg collector install --provider instaclustr --cluster-id <id>` monitors a NetApp Instaclustr managed PostgreSQL cluster. The database *source* is independent of where the collector runs; today the collector runs locally in Docker (the default `--target`).
+`dbg collector install --provider instaclustr --cluster-id <id>` monitors a NetApp Instaclustr managed PostgreSQL cluster. The database *source* is independent of where the collector runs — locally in Docker (the default `--target`) or on AWS Fargate.
 
 ```sh
 dbg collector install --provider instaclustr --cluster-id <id>
 dbg collector refresh-firewall     # re-allowlist after this machine's IP changes
+
+# Or run it on Fargate behind a NAT gateway with an Elastic IP, so the
+# firewall entry never goes stale (~USD 32/month for the NAT):
+dbg collector install --provider instaclustr --cluster-id <id> --target aws \
+  --subnets subnet-aaa --security-group-id sg-bbb \
+  --vpc-id vpc-ccc --nat-subnet-cidr 10.0.200.0/28
 ```
+
+On the AWS path the first `--subnets` entry must be a public subnet (it hosts the NAT gateway), the security group needs egress to 443 and 5432, and the stack's `EgressIP` output is the address the install allowlists. `--stable-egress=false` skips the NAT but then requires `--allow-ip` (an address you manage), since a plain Fargate task's public IP is ephemeral.
 
 The install discovers the cluster through the Instaclustr Cluster Management API, creates a read-only `dbgorilla_monitor` role (`pg_monitor` + `pg_read_all_data` — the cluster's default user can do this itself, no support ticket), adds this machine's public IP to the cluster's firewall allowlist, and starts the collector.
 

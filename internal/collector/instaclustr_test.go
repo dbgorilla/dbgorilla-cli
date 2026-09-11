@@ -170,7 +170,7 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv)
 	cfg := BuildInstaclustr("agent-1", "tenant-1", comp, Endpoints{})
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -198,6 +198,63 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 	// instaclustr keys must be modelled or an update would refuse them.
 	if _, err := StrictParseConfig(rendered); err != nil {
 		t.Fatalf("StrictParseConfig rejected the rendered config: %v", err)
+	}
+}
+
+func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
+	target := InstaclustrTarget{
+		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
+	}
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, AwsDBPasswordEnv)
+	params, err := AwsStackParams(AwsStackInput{
+		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
+		Region: "us-east-1", AccountID: "111122223333",
+		Components:     []Component{comp},
+		Subnets:        []string{"subnet-1"},
+		SecurityGroup:  "sg-1",
+		AssignPublicIP: "ENABLED",
+		ServerSecret:   "sek",
+		DBPassword:     "monitor-pw",
+		InstaclustrKey: "key456",
+		StableEgress:   true,
+		VpcID:          "vpc-1",
+		NatSubnetCidr:  "10.0.200.0/28",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["InstaclustrApiKey"] != "key456" || params["StableEgress"] != "ENABLED" ||
+		params["VpcId"] != "vpc-1" || params["NatSubnetCidr"] != "10.0.200.0/28" {
+		t.Fatalf("v1.1 params wrong: %v", params)
+	}
+	decoded, err := DecodeConfig(params["CollectorConfig"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`type = "instaclustr"`,
+		`api_key = "${INSTACLUSTR_API_KEY}"`,
+		`password = "${DBG_DB_PASSWORD}"`, // the Fargate task's variable name
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("stack config missing %q:\n%s", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, "key456") || strings.Contains(decoded, "monitor-pw") {
+		t.Fatalf("a literal secret leaked into the stack config:\n%s", decoded)
+	}
+	// Every param must be in fargateParamKeys or UpgradeImage drops it.
+	for k := range params {
+		found := false
+		for _, fk := range fargateParamKeys {
+			if fk == k {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("parameter %s missing from fargateParamKeys — UpgradeImage would drop it", k)
+		}
 	}
 }
 

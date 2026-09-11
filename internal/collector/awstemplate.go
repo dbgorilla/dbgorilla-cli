@@ -54,7 +54,10 @@ const templateProbeTimeout = 5 * time.Second
 // The same version is recorded in the template itself
 // (Metadata.DBGorilla.TemplateVersion) — that is what CI publishes under, and
 // TestTemplateVersionMatches keeps the two from drifting.
-const TemplateVersion = "v1.0"
+// v1.1 adds the optional InstaclustrApiKey secret parameter and the
+// StableEgress (NAT gateway + Elastic IP) option with its VpcId /
+// NatSubnetCidr parameters and EgressIP output.
+const TemplateVersion = "v1.1"
 
 // hostedTemplateURL is the published template this build deploys.
 var hostedTemplateURL = templateBaseURL + TemplateVersion + ".yaml"

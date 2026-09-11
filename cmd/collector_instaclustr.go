@@ -42,6 +42,7 @@ var (
 	deleteFirewallRule    = collector.DeleteInstaclustrFirewallRule
 	createInstaclustrRole = collector.EnsureInstaclustrRole
 	publicEgressIP        = func(ctx context.Context) (string, error) { return collector.PublicEgressIP(ctx) }
+	stackOutput           = collector.StackOutput
 )
 
 func init() {
@@ -52,6 +53,9 @@ func init() {
 	installCmd.Flags().String("instaclustr-readonly-key", "", "Instaclustr READ-ONLY provisioning API key the collector keeps for discovery (or "+instaclustrReadOnlyEnv+")")
 	installCmd.Flags().Bool("use-private-addresses", false, "Dial the cluster's private node addresses (VPC-peered collectors)")
 	installCmd.Flags().String("allow-ip", "", "Public IP the firewall should allow for the collector (default: this machine's, auto-detected)")
+	installCmd.Flags().Bool("stable-egress", true, "With --provider instaclustr --target aws: run the task behind a NAT gateway + Elastic IP so the firewall rule stays valid (adds ~USD 32/month)")
+	installCmd.Flags().String("vpc-id", "", "VPC for the stable-egress private subnet (required with --stable-egress on aws)")
+	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress private subnet, e.g. 10.0.200.0/28")
 
 	refreshFirewallCmd.Flags().String("instaclustr-user", "", "Instaclustr console username (or "+instaclustrUserEnv+")")
 	refreshFirewallCmd.Flags().String("instaclustr-api-key", "", "Instaclustr provisioning API key (or "+instaclustrProvisioningEnv+")")
@@ -66,14 +70,17 @@ func instaclustrSource(cmd *cobra.Command) bool {
 	return strings.EqualFold(p, "instaclustr")
 }
 
-// runInstallInstaclustr is the install flow for the instaclustr source. Only
-// the docker target runs it today; the aws target needs the Fargate template
-// to carry the read-only key as a third secret first.
+// runInstallInstaclustr is the install flow for the instaclustr source,
+// dispatching on the deploy substrate: docker (below) or aws
+// (runInstallInstaclustrAWS). gcp arrives with the GCP target.
 func runInstallInstaclustr(cmd *cobra.Command) error {
-	if target, _ := cmd.Flags().GetString("target"); target != "" && target != "docker" && target != "local" {
-		return fmt.Errorf("--provider instaclustr currently supports --target docker only. "+
-			"Run the collector in Docker on any host with a stable public IP (that IP goes on "+
-			"the cluster's firewall allowlist); --target %s support is coming", target)
+	switch target, _ := cmd.Flags().GetString("target"); target {
+	case "", "docker", "local":
+	case "aws", "fargate":
+		return runInstallInstaclustrAWS(cmd)
+	default:
+		return fmt.Errorf("unknown --target %q for --provider instaclustr (expected 'docker' or 'aws'; "+
+			"'gcp' arrives with the GCP target)", target)
 	}
 	// The docker CA mount replaces the container's system trust store, which
 	// the collector's own control-plane TLS relies on — so a cluster CA can't
@@ -246,7 +253,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, caCert, setupCreds.Username, usePrivate)
+	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, caCert, setupCreds.Username, usePrivate, collector.DBPasswordEnv)
 	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, comp, endpointsFor(creds, cmd))
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -346,7 +353,7 @@ func dryRunInstaclustr(cmd *cobra.Command, ict collector.InstaclustrTarget, seed
 	fmt.Println("  GRANT pg_monitor TO " + collector.InstaclustrMonitorUser)
 	fmt.Println("  GRANT pg_read_all_data TO " + collector.InstaclustrMonitorUser)
 	fmt.Println()
-	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "", apiUsername, usePrivate)
+	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "", apiUsername, usePrivate, collector.DBPasswordEnv)
 	// Empty credentials: nothing is minted on a dry run, so the endpoints are
 	// whatever the --*-url flags say (or the collector's production defaults).
 	cfg := collector.BuildInstaclustr("<agent-id>", "<tenant-id>", comp, endpointsFor(&api.CollectorCredentials{}, cmd))
@@ -462,9 +469,20 @@ func runRefreshFirewall(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	allowRaw, _ := cmd.Flags().GetString("allow-ip")
 	if allowRaw == "" {
-		allowRaw, err = publicEgressIP(ctx)
-		if err != nil {
-			return err
+		if st.IsAWS() {
+			// The collector's egress is the stack's Elastic IP, not this
+			// machine's address. A stack without the output was deployed
+			// without stable egress — then only an explicit address makes
+			// sense.
+			allowRaw, err = stackOutput(st.StackName, st.Region, "EgressIP")
+			if err != nil {
+				return fmt.Errorf("%w\n\nPass --allow-ip explicitly for a deploy without stable egress", err)
+			}
+		} else {
+			allowRaw, err = publicEgressIP(ctx)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	allowCIDR, err := collector.AllowCIDR(allowRaw)
@@ -495,5 +513,301 @@ func runRefreshFirewall(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// --- the aws substrate ------------------------------------------------------
+
+// runInstallInstaclustrAWS deploys the collector for an Instaclustr cluster
+// onto Fargate. Networking is explicit (--subnets/--security-group-id): there
+// is no RDS instance to discover it from. By default the task runs behind a
+// NAT gateway with an Elastic IP (--stable-egress), so the firewall rule
+// created for it stays valid across every task restart; --stable-egress=false
+// requires --allow-ip, because a plain Fargate task's public IP is ephemeral
+// and unknowable in advance.
+func runInstallInstaclustrAWS(cmd *cobra.Command) error {
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+	apiURL, err := requireAPIURL(cmd)
+	if err != nil {
+		return err
+	}
+	if _, err := requireLogin(); err != nil {
+		return err
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		return fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
+			st.AgentID)
+	}
+	if err := awsAvailable(); err != nil {
+		return err
+	}
+	identity, err := awsIdentity()
+	if err != nil {
+		return err
+	}
+	region := awsRegion()
+	if region == "" {
+		return errors.New("no AWS region resolved. Set AWS_REGION or configure a profile region")
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ AWS identity: %s (%s)", identity, region)))
+
+	subnetsCSV, _ := cmd.Flags().GetString("subnets")
+	subnets := splitCSV(subnetsCSV)
+	sg, _ := cmd.Flags().GetString("security-group-id")
+	if len(subnets) == 0 || sg == "" {
+		return errors.New("--subnets and --security-group-id are required with --provider instaclustr --target aws: " +
+			"there is no RDS instance to discover networking from. The security group needs egress to 443 " +
+			"(the Instaclustr and DBGorilla APIs) and 5432 (the cluster)")
+	}
+	stableEgress, _ := cmd.Flags().GetBool("stable-egress")
+	vpcID, _ := cmd.Flags().GetString("vpc-id")
+	natCidr, _ := cmd.Flags().GetString("nat-subnet-cidr")
+	allowRaw, _ := cmd.Flags().GetString("allow-ip")
+	if stableEgress {
+		if vpcID == "" || natCidr == "" {
+			return errors.New("--vpc-id and --nat-subnet-cidr are required with --stable-egress " +
+				"(the stack creates a private subnet routed through a NAT gateway with an Elastic IP; " +
+				"the FIRST --subnets entry must be a public subnet for the NAT gateway). " +
+				"Pass --stable-egress=false with --allow-ip to skip the NAT at the cost of firewall churn")
+		}
+	} else if allowRaw == "" {
+		return errors.New("--stable-egress=false needs --allow-ip: a plain Fargate task's public IP is " +
+			"ephemeral, so the firewall entry must be an address you manage (a NAT you already have)")
+	}
+
+	clusterID, _ := cmd.Flags().GetString("cluster-id")
+	if clusterID == "" {
+		return errors.New("--cluster-id is required with --provider instaclustr. " +
+			"Find it in the Instaclustr console URL or Cluster Details")
+	}
+	setupCreds, err := resolveInstaclustrCreds(cmd, "", "instaclustr-api-key", instaclustrProvisioningEnv,
+		"Instaclustr provisioning API key (setup only, never stored)")
+	if err != nil {
+		return err
+	}
+	readOnlyKey := "preview"
+	if !dryRun {
+		readOnlyKey, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv,
+			"Instaclustr READ-ONLY API key (the collector keeps this one)")
+		if err != nil {
+			return err
+		}
+	}
+
+	client := newAPIClient(cmd)
+	supported, err := client.CollectorSupported()
+	if err != nil {
+		return fmt.Errorf("cannot reach %s: %w", apiURL, err)
+	}
+	if !supported {
+		return api.ErrCollectorUnsupported
+	}
+
+	ctx := cmd.Context()
+	ict, err := discoverInstaclustr(ctx, setupCreds, clusterID)
+	if err != nil {
+		return err
+	}
+	usePrivate, _ := cmd.Flags().GetBool("use-private-addresses")
+	seedHost := ""
+	for _, n := range ict.Nodes {
+		if h := n.Host(usePrivate); h != "" {
+			seedHost = h
+			break
+		}
+	}
+	if seedHost == "" {
+		return errors.New("no node has an address on the selected network side. " +
+			"A private-network cluster needs --use-private-addresses; a public one must not set it")
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Cluster %q: %d node(s), PostgreSQL %s, %s %s",
+		ict.Name, len(ict.Nodes), ict.PostgresVersion, ict.CloudProvider, ict.Region)))
+
+	sslMode := ""
+	if cmd.Flags().Changed("ssl-mode") {
+		sslMode, _ = cmd.Flags().GetString("ssl-mode")
+	}
+	dbNames, _ := cmd.Flags().GetString("db-name")
+	databases := splitCSV(dbNames)
+	stackName, _ := cmd.Flags().GetString("stack-name")
+	templateURL, _ := cmd.Flags().GetString("template-url")
+
+	// The monitor password is generated up front so both the role step and
+	// the stack's DbPassword secret carry the same value.
+	monitorPassword, err := collector.GenerateInstaclustrPassword()
+	if err != nil {
+		return err
+	}
+	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "",
+		setupCreds.Username, usePrivate, collector.AwsDBPasswordEnv)
+	input := collector.AwsStackInput{
+		Region:          region,
+		Components:      []collector.Component{comp},
+		Subnets:         subnets,
+		SecurityGroup:   sg,
+		AssignPublicIP:  "ENABLED",
+		CommandsEnabled: false,
+		StableEgress:    stableEgress,
+		VpcID:           vpcID,
+		NatSubnetCidr:   natCidr,
+	}
+
+	if dryRun {
+		input.AgentID, input.TenantID, input.Image = "<agent-id>", "<tenant-id>", "<image>"
+		params, err := collector.AwsStackParams(input)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\nDry run — validating the template for stack %q (no identity minted, no firewall or role changes):\n", stackName)
+		printAwsParams(params)
+		return runFargateDeploy(collector.FargateDeploy{
+			StackName: stackName, Params: params, DryRun: true, TemplateURL: templateURL,
+		})
+	}
+
+	// Role first, via a temporary allowlist entry for THIS machine (the
+	// operator's IP is not the task's): create, use, and remove it unless it
+	// pre-existed.
+	operatorIP, err := publicEgressIP(ctx)
+	if err != nil {
+		return err
+	}
+	operatorCIDR, err := collector.AllowCIDR(operatorIP)
+	if err != nil {
+		return err
+	}
+	opRule, opCreated, err := ensureFirewallRule(ctx, setupCreds, clusterID, operatorCIDR)
+	if err != nil {
+		return err
+	}
+	removeOperatorRule := func() {
+		if opCreated {
+			if derr := deleteFirewallRule(ctx, setupCreds, opRule.ID); derr != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove the temporary setup rule %s: %v (remove it from the console)", operatorCIDR, derr)))
+			}
+		}
+	}
+	dsn := collector.InstaclustrAdminDSN(seedHost, 5432, ict.DefaultUserPassword)
+	if err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword); err != nil {
+		removeOperatorRule()
+		return fmt.Errorf("%w\n\nA just-created firewall rule can take ~a minute to apply; re-running is safe", err)
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Monitoring role %q ready (pg_monitor + pg_read_all_data)", collector.InstaclustrMonitorUser)))
+
+	fmt.Println(style.Info("Provisioning collector identity..."))
+	creds, err := client.ProvisionCollector()
+	if err != nil {
+		removeOperatorRule()
+		return err
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
+
+	image, imageSource := resolveImage(cmd, creds)
+	if pinned, perr := pinImageRemote(image); perr == nil {
+		image = pinned
+	} else {
+		fmt.Println(style.Warn(fmt.Sprintf(
+			"⚠  could not resolve %s to a fixed version (%v).\n"+
+				"   Deploying the tag as-is: the collector may change version when its task restarts.",
+			image, perr)))
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
+
+	input.AgentID, input.TenantID, input.Image = creds.AgentID, creds.TenantID, image
+	input.Endpoints = endpointsFor(creds, cmd)
+	input.ServerSecret = creds.Secret
+	input.DBPassword = monitorPassword
+	input.InstaclustrKey = readOnlyKey
+	params, err := collector.AwsStackParams(input)
+	if err != nil {
+		removeOperatorRule()
+		return err
+	}
+
+	// Save state BEFORE the slow deploy (the aws pattern): an interrupted
+	// install leaves a tracked collector, not an orphaned stack + identity.
+	if serr := collector.SaveState(&collector.State{
+		AgentID:              creds.AgentID,
+		TenantID:             creds.TenantID,
+		Domain:               creds.Domain,
+		Target:               "aws",
+		Image:                image,
+		TargetName:           ict.Name,
+		StackName:            stackName,
+		Region:               region,
+		InstaclustrClusterID: clusterID,
+		InstaclustrUsername:  setupCreds.Username,
+		CreatedAt:            time.Now().UTC(),
+	}); serr != nil {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not save local state: %v", serr)))
+	}
+
+	fmt.Printf("Deploying to Fargate (stack %q)...\n", stackName)
+	if err := deployStack(collector.FargateDeploy{StackName: stackName, Params: params, TemplateURL: templateURL}, "Deploying to Fargate…"); err != nil {
+		if errors.Is(err, collector.ErrDeployTimeout) {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  Still deploying after %s. The stack was NOT rolled back — "+
+				"it is most likely still converging.", collector.DeployTimeout())))
+			fmt.Printf("   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` " +
+				"once it is up (the firewall entry for the collector is not created until the stack reports its address).\n")
+			removeOperatorRule()
+			return nil
+		}
+		fmt.Println("Deploy failed; rolling back the provisioned identity and stack...")
+		if derr := client.DeleteCollector(creds.AgentID); derr != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not auto-deprovision %s: %v (remove it from the console)", creds.AgentID, derr)))
+		}
+		if derr := deleteStack(stackName, region); derr != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not delete stack %s: %v", stackName, derr)))
+		}
+		_ = collector.RemoveState()
+		removeOperatorRule()
+		return err
+	}
+
+	// Allowlist the collector's actual egress: the EIP the stack allocated
+	// (stable egress) or the operator-supplied address.
+	collectorCIDR := ""
+	if stableEgress {
+		eip, oerr := stackOutput(stackName, region, "EgressIP")
+		if oerr != nil {
+			removeOperatorRule()
+			return fmt.Errorf("the stack deployed but its EgressIP output could not be read: %w", oerr)
+		}
+		if collectorCIDR, err = collector.AllowCIDR(eip); err != nil {
+			removeOperatorRule()
+			return err
+		}
+	} else {
+		if collectorCIDR, err = collector.AllowCIDR(allowRaw); err != nil {
+			removeOperatorRule()
+			return err
+		}
+	}
+	rule, created, err := ensureFirewallRule(ctx, setupCreds, clusterID, collectorCIDR)
+	if err != nil {
+		removeOperatorRule()
+		return fmt.Errorf("the collector deployed but its firewall entry failed: %w\n\n"+
+			"Add %s to the cluster's PostgreSQL allowlist, or re-run `dbg collector refresh-firewall`", err, collectorCIDR)
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Firewall: allowlisted %s for the collector", collectorCIDR)))
+	if opRule.ID != rule.ID {
+		removeOperatorRule()
+	}
+
+	if created {
+		if st, lerr := collector.LoadState(); lerr == nil && st != nil {
+			st.FirewallRuleID = rule.ID
+			if serr := collector.SaveState(st); serr != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not record the firewall rule id: %v", serr)))
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Collector deployed. Next:")
+	fmt.Println("  dbg collector status              # stack + connection")
+	fmt.Println("  dbg collector logs -f             # CloudWatch logs")
+	fmt.Println("  dbg collector refresh-firewall    # re-assert the allowlist entry")
 	return nil
 }

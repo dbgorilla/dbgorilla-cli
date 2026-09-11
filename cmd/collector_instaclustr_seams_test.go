@@ -106,13 +106,13 @@ func icCmd(t *testing.T, apiURL string) *cobra.Command {
 	return cmd
 }
 
-func TestInstallInstaclustrRejectsNonDockerTargets(t *testing.T) {
+func TestInstallInstaclustrRejectsUnknownTargets(t *testing.T) {
 	isolate(t)
 	cmd := icCmd(t, "")
-	mustSet(t, cmd, "target", "aws")
+	mustSet(t, cmd, "target", "azure")
 	err := runInstall(cmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "--target docker only") {
-		t.Fatalf("expected the docker-only refusal, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), `unknown --target "azure"`) {
+		t.Fatalf("expected the unknown-target refusal, got %v", err)
 	}
 }
 
@@ -314,6 +314,147 @@ func TestInstallInstaclustrDiscoveryErrorSurfaces(t *testing.T) {
 	err := runInstall(cmd, nil)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
 		t.Fatalf("expected the discovery error to surface, got %v", err)
+	}
+}
+
+func stubStackOutput(t *testing.T, value string, err error) {
+	t.Helper()
+	orig := stackOutput
+	stackOutput = func(_, _, _ string) (string, error) { return value, err }
+	t.Cleanup(func() { stackOutput = orig })
+}
+
+func icAwsCmd(t *testing.T, apiURL string) *cobra.Command {
+	t.Helper()
+	cmd := icCmd(t, apiURL)
+	cmd.Flags().String("subnets", "", "")
+	cmd.Flags().String("security-group-id", "", "")
+	cmd.Flags().Bool("stable-egress", true, "")
+	cmd.Flags().String("vpc-id", "", "")
+	cmd.Flags().String("nat-subnet-cidr", "", "")
+	cmd.Flags().String("stack-name", "dbgorilla-collector", "")
+	cmd.Flags().String("template-url", "", "")
+	mustSet(t, cmd, "target", "aws")
+	mustSet(t, cmd, "cluster-id", "c-1")
+	mustSet(t, cmd, "instaclustr-user", "someone")
+	mustSet(t, cmd, "instaclustr-api-key", "key123")
+	mustSet(t, cmd, "instaclustr-readonly-key", "key456")
+	return cmd
+}
+
+func TestInstallInstaclustrAWSRequiresExplicitNetworking(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	cmd := icAwsCmd(t, "")
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--subnets and --security-group-id are required") {
+		t.Fatalf("expected the explicit-networking requirement, got %v", err)
+	}
+}
+
+func TestInstallInstaclustrAWSStableEgressNeedsVpcAndCidr(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	cmd := icAwsCmd(t, "")
+	mustSet(t, cmd, "subnets", "subnet-1")
+	mustSet(t, cmd, "security-group-id", "sg-1")
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--vpc-id and --nat-subnet-cidr are required") {
+		t.Fatalf("expected the stable-egress requirement, got %v", err)
+	}
+}
+
+func TestInstallInstaclustrAWSNoStableEgressNeedsAllowIP(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	cmd := icAwsCmd(t, "")
+	mustSet(t, cmd, "subnets", "subnet-1")
+	mustSet(t, cmd, "security-group-id", "sg-1")
+	mustSet(t, cmd, "stable-egress", "false")
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "needs --allow-ip") {
+		t.Fatalf("expected the allow-ip requirement, got %v", err)
+	}
+}
+
+func TestInstallInstaclustrAWSHappyPath(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	defer srv.Close()
+	stubAWSOK(t)
+	stubDiscoverInstaclustr(t, icTestTarget(), nil)
+	stubPublicEgressIP(t, "192.0.2.9", nil) // the operator's machine
+	rec := stubDeploy(t, nil)
+	stubStackOutput(t, "198.51.100.20", nil) // the stack's EIP
+	roleRuns := stubCreateInstaclustrRole(t, nil)
+	deleted := stubDeleteFirewallRule(t, nil)
+
+	// ensureFirewallRule is called twice: the operator's temp rule (created)
+	// and the EIP rule. Return distinct ids so the temp-rule cleanup and the
+	// ownership recording are distinguishable.
+	var cidrs []string
+	origEnsure := ensureFirewallRule
+	ensureFirewallRule = func(_ context.Context, _ collector.InstaclustrCreds, _ string, cidr string) (collector.FirewallRule, bool, error) {
+		cidrs = append(cidrs, cidr)
+		if cidr == "192.0.2.9/32" {
+			return collector.FirewallRule{ID: "r-operator", Network: cidr}, true, nil
+		}
+		return collector.FirewallRule{ID: "r-eip", Network: cidr}, true, nil
+	}
+	t.Cleanup(func() { ensureFirewallRule = origEnsure })
+
+	cmd := icAwsCmd(t, srv.URL)
+	mustSet(t, cmd, "subnets", "subnet-1")
+	mustSet(t, cmd, "security-group-id", "sg-1")
+	mustSet(t, cmd, "vpc-id", "vpc-1")
+	mustSet(t, cmd, "nat-subnet-cidr", "10.0.200.0/28")
+
+	if err := runInstall(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*roleRuns) != 1 {
+		t.Fatalf("role not ensured exactly once: %v", *roleRuns)
+	}
+	if rec.count != 1 || rec.params["StableEgress"] != "ENABLED" || rec.params["InstaclustrApiKey"] != "key456" {
+		t.Fatalf("deploy params wrong: count=%d %v", rec.count, rec.params)
+	}
+	if len(cidrs) != 2 || cidrs[0] != "192.0.2.9/32" || cidrs[1] != "198.51.100.20/32" {
+		t.Fatalf("expected operator rule then EIP rule, got %v", cidrs)
+	}
+	if len(*deleted) != 1 || (*deleted)[0] != "r-operator" {
+		t.Fatalf("operator temp rule not cleaned up: %v", *deleted)
+	}
+	st, err := collector.LoadState()
+	if err != nil || st == nil {
+		t.Fatalf("no state: %v", err)
+	}
+	if !st.IsAWS() || st.InstaclustrClusterID != "c-1" || st.FirewallRuleID != "r-eip" {
+		t.Fatalf("state wrong: %+v", st)
+	}
+}
+
+func TestRefreshFirewallOnAWSUsesTheStackEgressIP(t *testing.T) {
+	isolate(t)
+	if err := collector.SaveState(&collector.State{
+		AgentID: "a-1", Target: "aws", StackName: "s", Region: "us-east-1",
+		InstaclustrClusterID: "c-1", InstaclustrUsername: "someone",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(instaclustrProvisioningEnv, "key123")
+	stubStackOutput(t, "198.51.100.20", nil)
+	stubPublicEgressIP(t, "192.0.2.9", errors.New("must not be called for an aws install"))
+	cidrs := stubEnsureFirewallRule(t, collector.FirewallRule{ID: "r-eip", Network: "198.51.100.20/32"}, false, nil)
+
+	if err := runRefreshFirewall(refreshFirewallCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*cidrs) != 1 || (*cidrs)[0] != "198.51.100.20/32" {
+		t.Fatalf("expected the stack EIP, got %v", *cidrs)
 	}
 }
 

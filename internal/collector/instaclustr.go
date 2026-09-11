@@ -203,7 +203,10 @@ func GenerateInstaclustrPassword() (string, error) {
 // BuildInstaclustrComponent renders the [component] block for an Instaclustr
 // cluster. The api_key is an env reference — the literal key never enters
 // the config file, matching how the database password is handled.
-func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, databases []string, sslMode, caCert, apiUsername string, usePrivate bool) Component {
+// passwordEnv names the password variable of the deploy substrate: the docker
+// env-file uses COLLECTOR_DB_PASSWORD; the Fargate task definition names
+// DBG_DB_PASSWORD (fed from Secrets Manager).
+func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, databases []string, sslMode, caCert, apiUsername string, usePrivate bool, passwordEnv string) Component {
 	if sslMode == "" {
 		// `require` (encrypt, no verify): every Instaclustr node negotiates
 		// TLS, but its certificate chains to a per-cluster CA that is only
@@ -228,7 +231,7 @@ func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, d
 		Auth: Auth{
 			Method:   "password",
 			User:     InstaclustrMonitorUser,
-			Password: "${" + DBPasswordEnv + "}",
+			Password: "${" + passwordEnv + "}",
 		},
 		Connect: Connect{
 			Host:      seedHost,

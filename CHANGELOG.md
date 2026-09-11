@@ -23,7 +23,18 @@
   public IP on the Instaclustr cluster firewall and retires the stale rule
   this CLI created for the previous IP — never a rule it does not own. The
   fix for the "my ISP changed my address and the collector went quiet" day-2
-  case.
+  case. On an AWS deploy it allowlists the stack's Elastic IP instead of
+  this machine's address.
+
+- `--provider instaclustr --target aws` deploys the collector to Fargate.
+  Networking is explicit (`--subnets`/`--security-group-id` — there is no
+  RDS instance to discover it from), and by default the task runs behind a
+  NAT gateway with an Elastic IP (`--stable-egress`, requiring `--vpc-id`
+  and `--nat-subnet-cidr`), so the firewall entry the install creates stays
+  valid across every task restart. The stack's new `EgressIP` output is the
+  address on the allowlist. Template v1.1 adds the optional
+  `InstaclustrApiKey` secret parameter (the read-only key, injected as
+  `INSTACLUSTR_API_KEY`) and the stable-egress resources.
 
 ## v0.5.3
 

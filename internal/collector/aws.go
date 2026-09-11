@@ -563,6 +563,16 @@ type AwsStackInput struct {
 	CommandsEnabled bool
 	ServerSecret    string
 	DBPassword      string
+	// Instaclustr source riding the aws substrate: the READ-ONLY API key the
+	// task keeps for discovery (a third Secrets Manager secret), and the
+	// pre-rendered components (Targets stays empty — there is no RDS).
+	InstaclustrKey string
+	Components     []Component
+	// Stable egress (NAT + EIP): the collector's outbound address never
+	// changes, which IP-allowlist-gated databases require.
+	StableEgress  bool
+	VpcID         string
+	NatSubnetCidr string
 }
 
 // AwsStackParams renders the CloudFormation parameter set for the collector
@@ -570,7 +580,15 @@ type AwsStackInput struct {
 // the matching rds-db:connect grants — which is what keeps the template static
 // and publishable.
 func AwsStackParams(in AwsStackInput) (map[string]string, error) {
-	configTOML, err := awsConfigTOML(in.AgentID, in.TenantID, in.Region, in.Targets, in.Endpoints, in.CommandsEnabled)
+	var configTOML string
+	var err error
+	if len(in.Components) > 0 {
+		// Pre-rendered components (the instaclustr source): no RDS discovery,
+		// no per-target render — the caller built the component blocks.
+		configTOML, err = componentsConfigTOML(in.AgentID, in.TenantID, in.Components, in.Endpoints, in.CommandsEnabled)
+	} else {
+		configTOML, err = awsConfigTOML(in.AgentID, in.TenantID, in.Region, in.Targets, in.Endpoints, in.CommandsEnabled)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -579,16 +597,44 @@ func AwsStackParams(in AwsStackInput) (map[string]string, error) {
 		return nil, err
 	}
 	arns := rdsConnectParam(in.Targets, in.Region, in.AccountID)
+	stableEgress := "DISABLED"
+	if in.StableEgress {
+		stableEgress = "ENABLED"
+	}
 	return map[string]string{
-		configParamKey:     encoded,
-		rdsConnectParamKey: strings.Join(arns, ","),
-		"ServerSecret":     in.ServerSecret,
-		"DbPassword":       in.DBPassword,
-		"CollectorImage":   in.Image,
-		"Subnets":          strings.Join(in.Subnets, ","),
-		"SecurityGroupId":  in.SecurityGroup,
-		"AssignPublicIp":   in.AssignPublicIP,
+		configParamKey:      encoded,
+		rdsConnectParamKey:  strings.Join(arns, ","),
+		"ServerSecret":      in.ServerSecret,
+		"DbPassword":        in.DBPassword,
+		"InstaclustrApiKey": in.InstaclustrKey,
+		"CollectorImage":    in.Image,
+		"Subnets":           strings.Join(in.Subnets, ","),
+		"SecurityGroupId":   in.SecurityGroup,
+		"AssignPublicIp":    in.AssignPublicIP,
+		"StableEgress":      stableEgress,
+		"VpcId":             in.VpcID,
+		"NatSubnetCidr":     in.NatSubnetCidr,
 	}, nil
+}
+
+// componentsConfigTOML renders a stack config from pre-built component
+// blocks — the path for sources whose components the caller constructs
+// (instaclustr), as opposed to AwsTargets rendered per RDS instance.
+func componentsConfigTOML(agentID, tenantID string, components []Component, eps Endpoints, commandsEnabled bool) (string, error) {
+	cfg := Config{
+		Dbgorilla: Dbgorilla{
+			AgentID:      agentID,
+			TenantID:     tenantID,
+			Secret:       "${" + SecretEnv + "}",
+			OpampBaseURL: eps.OpampBaseURL,
+			OtlpBaseURL:  eps.OtlpBaseURL,
+			AuthBaseURL:  eps.AuthBaseURL,
+		},
+		Component: components,
+		Topology:  Topology{Interval: "60s"},
+		Commands:  Commands{Enabled: commandsEnabled},
+	}
+	return cfg.Render()
 }
 
 // CompactConfig strips whole-line comments and blank lines from a collector
@@ -781,7 +827,8 @@ const (
 // an upgrade preserves the monitored databases and their IAM grants.
 var fargateParamKeys = []string{
 	configParamKey, rdsConnectParamKey, "ServerSecret", "DbPassword",
-	"CollectorImage", "Subnets", "SecurityGroupId", "AssignPublicIp",
+	"InstaclustrApiKey", "CollectorImage", "Subnets", "SecurityGroupId",
+	"AssignPublicIp", "StableEgress", "VpcId", "NatSubnetCidr",
 }
 
 // --- helpers ---------------------------------------------------------------

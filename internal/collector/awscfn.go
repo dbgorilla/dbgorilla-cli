@@ -364,6 +364,31 @@ func stackParam(ctx context.Context, client *cloudformation.Client, stackName, k
 	return "", fmt.Errorf("stack %q has no %s parameter; it predates this CLI version. Re-run: dbg collector install --target aws", stackName, key)
 }
 
+// StackOutput reads one output value from the deployed stack — how the CLI
+// learns the EgressIP a StableEgress deploy allocated, so the firewall
+// allowlist can carry the address the database will actually see.
+func StackOutput(stackName, region, key string) (string, error) {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx, region)
+	if err != nil {
+		return "", err
+	}
+	client := cloudformation.NewFromConfig(cfg)
+	out, err := client.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)})
+	if err != nil {
+		return "", fmt.Errorf("could not describe stack %q: %w", stackName, err)
+	}
+	if len(out.Stacks) == 0 {
+		return "", fmt.Errorf("stack %q does not exist. Run: dbg collector install --target aws", stackName)
+	}
+	for _, o := range out.Stacks[0].Outputs {
+		if aws.ToString(o.OutputKey) == key {
+			return aws.ToString(o.OutputValue), nil
+		}
+	}
+	return "", fmt.Errorf("stack %q has no %s output — was it deployed with StableEgress enabled?", stackName, key)
+}
+
 // UpgradeImage rolls the collector to a new image, holding every other parameter
 // at its previous value against the stack's existing template (which carries the
 // monitored databases).
