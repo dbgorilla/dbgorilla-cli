@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
@@ -139,7 +140,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 
 	if dryRun {
-		return dryRunInstaclustr(cmd, in.ict, in.seedHost, in.databases, in.sslMode, in.setupCreds.Username, in.usePrivate, allowCIDR)
+		return dryRunInstaclustr(cmd, in, allowCIDR)
 	}
 
 	// Firewall: the collector runs on THIS machine for the docker target, so
@@ -204,7 +205,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, caCert, in.setupCreds.Username, in.usePrivate, collector.DBPasswordEnv, in.prometheusKey != "")
+	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, caCert, in.setupCreds.Username, in.usePrivate, collector.DBPasswordEnv, collector.PrometheusKeyRef(in.prometheusKey))
 	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, comp, endpointsFor(creds, cmd))
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -238,6 +239,9 @@ type instaclustrInstall struct {
 	readOnlyKey string
 	// prometheusKey is OPTIONAL (flag/env only, never prompted): absent means
 	// the platform-metrics plane stays off — database telemetry unaffected.
+	// Unlike readOnlyKey it IS resolved on a dry run (there is no prompt to
+	// skip): its presence changes the rendered config, and a preview must
+	// match the run it previews.
 	prometheusKey string
 	client        *api.Client
 	ict           collector.InstaclustrTarget
@@ -268,22 +272,23 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 		return nil, err
 	}
 	readOnlyKey := ""
-	prometheusKey := ""
 	if !dryRun {
 		if readOnlyKey, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv,
 			"Instaclustr READ-ONLY API key (the collector keeps this one)"); err != nil {
 			return nil, err
 		}
-		// The Prometheus key is optional — flag or env, never prompted: a
-		// third key kind whose absence just means no platform-metrics plane.
-		prometheusKey, _ = cmd.Flags().GetString("instaclustr-prometheus-key")
-		if prometheusKey == "" {
-			prometheusKey = os.Getenv(instaclustrPrometheusEnv)
-		}
-		if prometheusKey == "" {
-			fmt.Println(style.Info("ℹ  no Instaclustr Prometheus key given — platform host metrics stay off " +
-				"(pass --instaclustr-prometheus-key, or set " + instaclustrPrometheusEnv + ", to enable them)"))
-		}
+	}
+	// The Prometheus key is optional — flag or env, never prompted: a third
+	// key kind whose absence just means no platform-metrics plane. Resolved
+	// on a dry run too (no prompt, no side effects): its presence changes the
+	// rendered config, and a preview must match the run it previews.
+	prometheusKey, err := instaclustrFlagOrEnvKey(cmd, "instaclustr-prometheus-key", instaclustrPrometheusEnv)
+	if err != nil {
+		return nil, err
+	}
+	if prometheusKey == "" {
+		fmt.Println(style.Info("No Instaclustr Prometheus key given — platform host metrics stay off " +
+			"(pass --instaclustr-prometheus-key, or set " + instaclustrPrometheusEnv + ", to enable them)"))
 	}
 
 	client, err := requireCollectorSupport(cmd, apiURL)
@@ -418,8 +423,10 @@ func allowlistCollectorEgress(ctx context.Context, in *instaclustrInstall, stabl
 // dryRunInstaclustr previews the install with zero side effects: the only
 // remote call already made is the read-only cluster GET. It prints what the
 // real run would do — the firewall rule, the role SQL (with a placeholder
-// password), the rendered config, and the container command.
-func dryRunInstaclustr(cmd *cobra.Command, ict collector.InstaclustrTarget, seedHost string, databases []string, sslMode, apiUsername string, usePrivate bool, allowCIDR string) error {
+// password), the rendered config, and the container command. It renders from
+// the same resolved inputs as the real run (the optional Prometheus key
+// included), so what it previews is what an identical re-run deploys.
+func dryRunInstaclustr(cmd *cobra.Command, in *instaclustrInstall, allowCIDR string) error {
 	fmt.Println(style.Info("Dry run: nothing will be minted, written, allowlisted, or started."))
 	fmt.Println()
 	fmt.Printf("Would allowlist on the cluster firewall:  %s (POSTGRESQL)\n", allowCIDR)
@@ -428,7 +435,8 @@ func dryRunInstaclustr(cmd *cobra.Command, ict collector.InstaclustrTarget, seed
 	fmt.Println("  GRANT pg_monitor TO " + collector.InstaclustrMonitorUser)
 	fmt.Println("  GRANT pg_read_all_data TO " + collector.InstaclustrMonitorUser)
 	fmt.Println()
-	comp := collector.BuildInstaclustrComponent(ict, seedHost, 5432, databases, sslMode, "", apiUsername, usePrivate, collector.DBPasswordEnv, false)
+	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, "",
+		in.setupCreds.Username, in.usePrivate, collector.DBPasswordEnv, collector.PrometheusKeyRef(in.prometheusKey))
 	// Empty credentials: nothing is minted on a dry run, so the endpoints are
 	// whatever the --*-url flags say (or the collector's production defaults).
 	cfg := collector.BuildInstaclustr("<agent-id>", "<tenant-id>", comp, endpointsFor(&api.CollectorCredentials{}, cmd))
@@ -499,9 +507,9 @@ func resolveInstaclustrCreds(cmd *cobra.Command, defaultUser, keyFlag, keyEnv, k
 }
 
 func resolveInstaclustrKey(cmd *cobra.Command, flag, env, label string) (string, error) {
-	key, _ := cmd.Flags().GetString(flag)
-	if key == "" {
-		key = os.Getenv(env)
+	key, err := instaclustrFlagOrEnvKey(cmd, flag, env)
+	if err != nil {
+		return "", err
 	}
 	if key == "" {
 		if !interactiveTerminal() {
@@ -511,6 +519,28 @@ func resolveInstaclustrKey(cmd *cobra.Command, flag, env, label string) (string,
 	}
 	if key == "" {
 		return "", fmt.Errorf("%s required: pass --%s or set %s", label, flag, env)
+	}
+	return key, nil
+}
+
+// instaclustrFlagOrEnvKey is the flag-then-env half every Instaclustr key
+// resolution shares (resolveInstaclustrKey adds the prompt/require tail for
+// the mandatory keys; the optional Prometheus key is this alone), and the one
+// place a key from either source is normalized: surrounding whitespace is
+// trimmed (a secrets manager's trailing newline would otherwise ship verbatim
+// and 401 only at scrape time), and a value with an interior control
+// character is refused — the docker env-file is line-oriented, so an embedded
+// newline would smuggle a second variable into it.
+func instaclustrFlagOrEnvKey(cmd *cobra.Command, flag, env string) (string, error) {
+	key, _ := cmd.Flags().GetString(flag)
+	source := "--" + flag
+	if key == "" {
+		key = os.Getenv(env)
+		source = env
+	}
+	key = strings.TrimSpace(key)
+	if strings.ContainsFunc(key, unicode.IsControl) {
+		return "", fmt.Errorf("the %s value contains a control character (an embedded newline?) — re-copy the key", source)
 	}
 	return key, nil
 }
@@ -693,7 +723,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		assignIP = "ENABLED"
 	}
 	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, "",
-		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv, in.prometheusKey != "")
+		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv, collector.PrometheusKeyRef(in.prometheusKey))
 	input := collector.AwsStackInput{
 		Region:          region,
 		AccountID:       accountID,
@@ -705,6 +735,9 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		StableEgress:    stableEgress,
 		VpcID:           vpcID,
 		NatSubnetCidr:   natCidr,
+		// Set here, not with the post-provision secrets: the dry run's
+		// secret-presence report must show the key the real run would ship.
+		InstaclustrPromKey: in.prometheusKey,
 	}
 
 	if dryRun {
@@ -743,7 +776,6 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	input.ServerSecret = creds.Secret
 	input.DBPassword = monitorPassword
 	input.InstaclustrKey = in.readOnlyKey
-	input.InstaclustrPromKey = in.prometheusKey
 	params, secrets, err := collector.AwsStackParams(input)
 	if err != nil {
 		removeOperatorRule()
@@ -937,7 +969,7 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 		return err
 	}
 	comp := collector.BuildInstaclustrComponent(in.ict, in.seedHost, 5432, in.databases, in.sslMode, "",
-		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv, in.prometheusKey != "")
+		in.setupCreds.Username, in.usePrivate, collector.CloudDBPasswordEnv, collector.PrometheusKeyRef(in.prometheusKey))
 	input := collector.GcpStackInput{
 		Components:      []collector.Component{comp},
 		Network:         network,

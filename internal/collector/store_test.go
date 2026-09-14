@@ -276,6 +276,23 @@ func TestWriteInstaclustrEnvFile_PrometheusKeyIsOptional(t *testing.T) {
 	}
 }
 
+func TestWriteEnvFile_RefusesLineBreaksInValues(t *testing.T) {
+	// The env-file is line-oriented and docker takes the LAST line for a
+	// repeated name, so a value carrying a line break could redefine an
+	// earlier variable. The writer is the last line of defense.
+	path := filepath.Join(t.TempDir(), "collector.env")
+	err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom\n"+InstaclustrAPIKeyEnv+"=evil")
+	if err == nil || !strings.Contains(err.Error(), "line break") {
+		t.Fatalf("a value with an embedded newline must be refused, got %v", err)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Fatalf("no env-file may exist after a refused write: %v", serr)
+	}
+	if err := WriteEnvFile(path, "s3cr3t", "pg\rpass"); err == nil {
+		t.Fatal("a carriage return must be refused too")
+	}
+}
+
 func TestWriteEnvFile_error(t *testing.T) {
 	// Parent directory does not exist -> write of the tempfile fails.
 	path := filepath.Join(t.TempDir(), "missing", "collector.env")

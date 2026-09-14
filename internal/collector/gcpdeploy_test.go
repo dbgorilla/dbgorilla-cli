@@ -112,6 +112,22 @@ func TestGcpDeploy_UnreachableTemplateStopsBeforeAnyMutation(t *testing.T) {
 	}
 }
 
+// A pinned older --template-source would deploy a boot script whose secret
+// set differs from the one this CLI writes; the probe reads the marker and
+// refuses before anything is provisioned.
+func TestGcpDeploy_RefusesAMismatchedTemplateVersion(t *testing.T) {
+	f := newGCPFake(t).on("GET", probePath, 200, "# collector template\n# template-version: v1.3\n")
+	stubGCP(t, f)
+
+	err := testDeploy().Run()
+	if err == nil || !strings.Contains(err.Error(), "v1.3") || !strings.Contains(err.Error(), GcpTemplateVersion) {
+		t.Fatalf("err = %v, want the version-mismatch refusal naming both versions", err)
+	}
+	if len(f.calls) != 1 {
+		t.Errorf("only the probe may run, got %v", f.calls)
+	}
+}
+
 func TestGcpDeploy_RejectsANonGCSTemplateSource(t *testing.T) {
 	stubGCP(t, newGCPFake(t))
 	d := testDeploy()

@@ -516,6 +516,36 @@ type AwsStackInput struct {
 	NatSubnetCidr string
 }
 
+// awsSecretParams is the single source for the stack parameters that carry
+// credentials: AwsStackParams builds its secrets map from this list, and the
+// dry run redacts exactly AwsSecretParamKeys, so the two cannot drift. An
+// optional parameter is omitted from the request when its value is empty: a
+// template published before the parameter existed does not declare it, and
+// CloudFormation rejects any undeclared parameter outright — which would
+// break every install against a pinned older --template-url copy — while on
+// the current template omission and an empty value deploy identically (the
+// parameter defaults to the empty string).
+var awsSecretParams = []struct {
+	key      string
+	optional bool
+	value    func(AwsStackInput) string
+}{
+	{"ServerSecret", false, func(in AwsStackInput) string { return in.ServerSecret }},
+	{"DbPassword", false, func(in AwsStackInput) string { return in.DBPassword }},
+	{"InstaclustrApiKey", false, func(in AwsStackInput) string { return in.InstaclustrKey }},
+	{"InstaclustrPrometheusKey", true, func(in AwsStackInput) string { return in.InstaclustrPromKey }},
+}
+
+// AwsSecretParamKeys lists the secret parameter names in display order — the
+// parameters a dry run must never print (presence only).
+func AwsSecretParamKeys() []string {
+	keys := make([]string, 0, len(awsSecretParams))
+	for _, p := range awsSecretParams {
+		keys = append(keys, p.key)
+	}
+	return keys
+}
+
 // AwsStackParams renders the CloudFormation parameter set for the collector
 // stack as two maps: the printable parameters, and the secrets. The monitored
 // databases ride in two of the former — the base64 config and the matching
@@ -556,11 +586,13 @@ func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err er
 		"VpcId":            in.VpcID,
 		"NatSubnetCidr":    in.NatSubnetCidr,
 	}
-	secrets = map[string]string{
-		"ServerSecret":             in.ServerSecret,
-		"DbPassword":               in.DBPassword,
-		"InstaclustrApiKey":        in.InstaclustrKey,
-		"InstaclustrPrometheusKey": in.InstaclustrPromKey,
+	secrets = make(map[string]string, len(awsSecretParams))
+	for _, p := range awsSecretParams {
+		v := p.value(in)
+		if p.optional && v == "" {
+			continue
+		}
+		secrets[p.key] = v
 	}
 	return params, secrets, nil
 }

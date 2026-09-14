@@ -184,7 +184,7 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv, true)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv, PrometheusKeyRef("prom-key"))
 	cfg := BuildInstaclustr("agent-1", "tenant-1", comp, Endpoints{})
 	rendered, err := cfg.Render()
 	if err != nil {
@@ -209,9 +209,13 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 	if strings.Contains(rendered, "use_private_addresses") {
 		t.Fatalf("false use_private_addresses should be omitted:\n%s", rendered)
 	}
+	// The raw key never enters a rendered config — only the env reference.
+	if strings.Contains(rendered, "prom-key") {
+		t.Fatalf("the Prometheus key itself leaked into the config:\n%s", rendered)
+	}
 	// Without the Prometheus key the stanza is OMITTED — the collector builds
 	// the platform-metrics plane only when the config carries the reference.
-	without := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv, false)
+	without := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, DBPasswordEnv, PrometheusKeyRef(""))
 	renderedWithout, err := BuildInstaclustr("agent-1", "tenant-1", without, Endpoints{}).Render()
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +234,7 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv, false)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv, "")
 	params, secrets, err := AwsStackParams(AwsStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
 		Region: "us-east-1", AccountID: "111122223333",
@@ -254,6 +258,13 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 	}
 	if params["InstaclustrApiKey"] != "" || params["InstaclustrPrometheusKey"] != "" {
 		t.Fatal("no Instaclustr key may enter the printable params map")
+	}
+	// An absent Prometheus key must OMIT the parameter, not send '': a
+	// template published before v1.3 does not declare it, and CloudFormation
+	// rejects any undeclared parameter outright — sending it would break
+	// every install pinned to an older --template-url copy.
+	if _, present := secrets["InstaclustrPrometheusKey"]; present {
+		t.Fatal("an empty Prometheus key must be omitted from the secrets map, not sent as ''")
 	}
 	decoded, err := DecodeConfig(params["CollectorConfig"])
 	if err != nil {
@@ -282,6 +293,42 @@ func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("parameter %s missing from fargateParamKeys — UpgradeImage would drop it", k)
+		}
+	}
+}
+
+func TestAwsStackParamsCarriesThePrometheusKeyWhenGiven(t *testing.T) {
+	target := InstaclustrTarget{
+		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
+	}
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv, PrometheusKeyRef("prom789"))
+	params, secrets, err := AwsStackParams(AwsStackInput{
+		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
+		Region: "us-east-1", AccountID: "111122223333",
+		Components:         []Component{comp},
+		Subnets:            []string{"subnet-1"},
+		SecurityGroup:      "sg-1",
+		AssignPublicIP:     "ENABLED",
+		ServerSecret:       "sek",
+		DBPassword:         "monitor-pw",
+		InstaclustrKey:     "key456",
+		InstaclustrPromKey: "prom789",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secrets["InstaclustrPrometheusKey"] != "prom789" || params["InstaclustrPrometheusKey"] != "" {
+		t.Fatalf("the Prometheus key must ship as a secret and only as a secret: %v %v", params, secrets)
+	}
+	// The dry run's redaction list and the secrets map share one source
+	// (awsSecretParams); pin that every buildable secret is redactable.
+	redactable := map[string]bool{}
+	for _, k := range AwsSecretParamKeys() {
+		redactable[k] = true
+	}
+	for k := range secrets {
+		if !redactable[k] {
+			t.Fatalf("secret parameter %s missing from AwsSecretParamKeys — a dry run would not report it", k)
 		}
 	}
 }
@@ -345,7 +392,7 @@ func TestGcpDeployInputsWithInstaclustrComponents(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "GCP", Region: "us-central1",
 	}
-	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv, false)
+	comp := BuildInstaclustrComponent(target, "203.0.113.10", 5432, nil, "", "", "someone", false, CloudDBPasswordEnv, "")
 	inputs, err := GcpDeployInputs(GcpStackInput{
 		AgentID: "agent-1", TenantID: "tenant-1", Image: "img@sha256:x",
 		Components:     []Component{comp},

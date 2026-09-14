@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
@@ -242,25 +243,38 @@ func ClearSecrets(agentID string) {
 // Instaclustr API key (node discovery) and, when supplied, the dedicated
 // Prometheus key (platform-metrics scrape). Same file, same 0600 contract.
 func WriteInstaclustrEnvFile(path, secret, dbPassword, icReadOnlyKey, icPrometheusKey string) error {
-	content := fmt.Sprintf("%s=%s\n%s=%s\n%s=%s\n",
-		SecretEnv, secret, DBPasswordEnv, dbPassword, InstaclustrAPIKeyEnv, icReadOnlyKey)
+	pairs := [][2]string{
+		{SecretEnv, secret},
+		{DBPasswordEnv, dbPassword},
+		{InstaclustrAPIKeyEnv, icReadOnlyKey},
+	}
 	if icPrometheusKey != "" {
-		content += fmt.Sprintf("%s=%s\n", InstaclustrPromKeyEnv, icPrometheusKey)
+		pairs = append(pairs, [2]string{InstaclustrPromKeyEnv, icPrometheusKey})
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
-		return fmt.Errorf("cannot write env-file: %w", err)
-	}
-	return os.Rename(tmp, path)
+	return writeEnvFile(path, pairs)
 }
 
 // WriteEnvFile materializes the secrets into a 0600 env-file that `docker run
 // --env-file` reads. Called on install and on start; the file is the only
 // place plaintext secrets land on disk.
 func WriteEnvFile(path, secret, dbPassword string) error {
-	content := fmt.Sprintf("%s=%s\n%s=%s\n", SecretEnv, secret, DBPasswordEnv, dbPassword)
+	return writeEnvFile(path, [][2]string{{SecretEnv, secret}, {DBPasswordEnv, dbPassword}})
+}
+
+// writeEnvFile is the one place the env-file's contract lives: the file is
+// line-oriented (docker's parser takes the LAST line for a repeated name, so
+// a value smuggling a line break in could redefine an earlier variable), the
+// mode is 0600, and the write is atomic via tempfile + rename.
+func writeEnvFile(path string, pairs [][2]string) error {
+	var content strings.Builder
+	for _, p := range pairs {
+		if strings.ContainsAny(p[1], "\r\n") {
+			return fmt.Errorf("cannot write env-file: the %s value contains a line break", p[0])
+		}
+		content.WriteString(p[0] + "=" + p[1] + "\n")
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(tmp, []byte(content.String()), 0600); err != nil {
 		return fmt.Errorf("cannot write env-file: %w", err)
 	}
 	return os.Rename(tmp, path)

@@ -12,7 +12,13 @@
   Secret Manager secret). Present, the collector also scrapes Instaclustr's
   per-node platform metrics (host tiles, infra alarms) and dedupes them
   against the direct connection; absent, platform metrics stay off and
-  database telemetry is unaffected.
+  database telemetry is unaffected. `--dry-run` resolves and previews the key
+  exactly like a real run; key values from flag or env are trimmed and
+  refused if they carry control characters; an absent key omits the
+  CloudFormation parameter, so installs pinned to a pre-v1.3 `--template-url`
+  copy keep deploying; and a `--template-source` GCE template whose
+  `# template-version:` marker differs from the CLI's contract is refused
+  before anything is created.
 
 - `dbg collector install --provider instaclustr --cluster-id <id>` monitors a
   NetApp Instaclustr managed PostgreSQL cluster. The install discovers the

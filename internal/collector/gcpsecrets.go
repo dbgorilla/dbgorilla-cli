@@ -20,10 +20,21 @@ import (
 
 const secretManagerBase = "https://secretmanager.googleapis.com/v1"
 
-// gcpSecretSuffixes are the template's secret naming contract (a change is a
-// template-version bump): each secret is "<deployment-name>-<suffix>", and the
-// boot script fetches all three unconditionally.
-var gcpSecretSuffixes = []string{"server-secret", "db-password", "instaclustr-api-key", "prometheus-api-key"}
+// gcpSecrets is the template's secret naming contract, in order (a change is
+// a template-version bump): each secret is "<deployment-name>-<suffix>", the
+// boot script fetches every one of them unconditionally, and value reads the
+// credential that fills it. This one list drives create, write, and delete,
+// so a secret's name and its value can never disagree — a suffix without a
+// value, or a value without a suffix, is impossible to express.
+var gcpSecrets = []struct {
+	suffix string
+	value  func(GcpSecretValues) string
+}{
+	{"server-secret", func(v GcpSecretValues) string { return v.ServerSecret }},
+	{"db-password", func(v GcpSecretValues) string { return v.DBPassword }},
+	{"instaclustr-api-key", func(v GcpSecretValues) string { return v.InstaclustrKey }},
+	{"prometheus-api-key", func(v GcpSecretValues) string { return v.PrometheusKey }},
+}
 
 // gcpSecretPlaceholder stands in for an absent credential (IAM-auth installs
 // have no db password; cloud_sql installs no Instaclustr key), so the boot
@@ -42,27 +53,18 @@ type GcpSecretValues struct {
 	PrometheusKey string
 }
 
-func (v GcpSecretValues) bySuffix() map[string]string {
-	return map[string]string{
-		"server-secret":       v.ServerSecret,
-		"db-password":         v.DBPassword,
-		"instaclustr-api-key": v.InstaclustrKey,
-		"prometheus-api-key":  v.PrometheusKey,
-	}
-}
-
 // GcpSecretIDs lists the Secret Manager secret ids an install writes, in the
 // template's naming contract.
 func GcpSecretIDs(deploymentName string) []string {
-	ids := make([]string, 0, len(gcpSecretSuffixes))
-	for _, s := range gcpSecretSuffixes {
-		ids = append(ids, deploymentName+"-"+s)
+	ids := make([]string, 0, len(gcpSecrets))
+	for _, s := range gcpSecrets {
+		ids = append(ids, deploymentName+"-"+s.suffix)
 	}
 	return ids
 }
 
-// EnsureGcpSecrets creates the deployment's three secrets (tolerating ones
-// that already exist) and writes each value as a new version, which becomes
+// EnsureGcpSecrets creates the deployment's secrets (tolerating ones that
+// already exist) and writes each value as a new version, which becomes
 // "latest" atomically — a booting instance never observes a gap. Values
 // travel only in request bodies, never in a URL or an error.
 func EnsureGcpSecrets(project, deploymentName string, values GcpSecretValues) error {
@@ -71,8 +73,9 @@ func EnsureGcpSecrets(project, deploymentName string, values GcpSecretValues) er
 	if err != nil {
 		return gcpCredsErr(err)
 	}
-	for suffix, value := range values.bySuffix() {
-		id := deploymentName + "-" + suffix
+	for _, s := range gcpSecrets {
+		id := deploymentName + "-" + s.suffix
+		value := s.value(values)
 		if value == "" {
 			value = gcpSecretPlaceholder
 		}

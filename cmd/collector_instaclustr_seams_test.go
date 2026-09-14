@@ -85,6 +85,7 @@ func icCmd(t *testing.T, apiURL string) *cobra.Command {
 	cmd.Flags().String("instaclustr-user", "", "")
 	cmd.Flags().String("instaclustr-api-key", "", "")
 	cmd.Flags().String("instaclustr-readonly-key", "", "")
+	cmd.Flags().String("instaclustr-prometheus-key", "", "")
 	cmd.Flags().Bool("use-private-addresses", false, "")
 	cmd.Flags().String("allow-ip", "", "")
 	// Type must match the REAL registration (a plain String, CSV-split) — a
@@ -162,6 +163,9 @@ func TestInstallInstaclustrHappyPath(t *testing.T) {
 	mustSet(t, cmd, "instaclustr-user", "someone")
 	mustSet(t, cmd, "instaclustr-api-key", "key123")
 	mustSet(t, cmd, "instaclustr-readonly-key", "key456")
+	// Surrounding whitespace (a secrets manager's trailing newline) must be
+	// trimmed before the key ships anywhere.
+	mustSet(t, cmd, "instaclustr-prometheus-key", " prom789\n")
 
 	if err := runInstall(cmd, nil); err != nil {
 		t.Fatal(err)
@@ -188,7 +192,8 @@ func TestInstallInstaclustrHappyPath(t *testing.T) {
 	}
 	p := cfg.Component[0].Provider
 	if p.Type != "instaclustr" || p.ClusterID != "c-1" || p.CloudProvider != "AWS_VPC" ||
-		p.APIUsername != "someone" || p.APIKey != "${"+collector.InstaclustrAPIKeyEnv+"}" {
+		p.APIUsername != "someone" || p.APIKey != "${"+collector.InstaclustrAPIKeyEnv+"}" ||
+		p.PrometheusAPIKey != "${"+collector.InstaclustrPromKeyEnv+"}" {
 		t.Fatalf("rendered provider block wrong: %+v", p)
 	}
 	if cfg.Component[0].Auth.User != collector.InstaclustrMonitorUser {
@@ -203,8 +208,42 @@ func TestInstallInstaclustrHappyPath(t *testing.T) {
 	if !strings.Contains(string(env), collector.InstaclustrAPIKeyEnv+"=key456") {
 		t.Fatalf("env-file missing the read-only key: %s", env)
 	}
+	if !strings.Contains(string(env), collector.InstaclustrPromKeyEnv+"=prom789\n") {
+		t.Fatalf("env-file missing the trimmed Prometheus key: %s", env)
+	}
 	if strings.Contains(string(env), "key123") {
 		t.Fatalf("the writable setup key leaked into the env-file: %s", env)
+	}
+}
+
+func TestInstaclustrKeyResolutionNormalizes(t *testing.T) {
+	// One resolver serves all three key kinds; its normalization is what
+	// keeps a corrupted value from shipping (a 401 at scrape time) or from
+	// smuggling a second line into the docker env-file.
+	cmd := icCmd(t, "")
+	t.Setenv(instaclustrPrometheusEnv, "prom789\n")
+	key, err := instaclustrFlagOrEnvKey(cmd, "instaclustr-prometheus-key", instaclustrPrometheusEnv)
+	if err != nil || key != "prom789" {
+		t.Fatalf("a trailing newline must be trimmed: %q, %v", key, err)
+	}
+
+	t.Setenv(instaclustrPrometheusEnv, "prom\n789")
+	_, err = instaclustrFlagOrEnvKey(cmd, "instaclustr-prometheus-key", instaclustrPrometheusEnv)
+	if err == nil || !strings.Contains(err.Error(), instaclustrPrometheusEnv) {
+		t.Fatalf("an interior control character must be refused, naming its source: %v", err)
+	}
+
+	mustSet(t, cmd, "instaclustr-prometheus-key", "  flagkey  ")
+	key, err = instaclustrFlagOrEnvKey(cmd, "instaclustr-prometheus-key", instaclustrPrometheusEnv)
+	if err != nil || key != "flagkey" {
+		t.Fatalf("the flag must win over the env var and be trimmed: %q, %v", key, err)
+	}
+
+	// The mandatory keys route through the same normalization.
+	mustSet(t, cmd, "instaclustr-readonly-key", "ro\nkey")
+	_, err = resolveInstaclustrKey(cmd, "instaclustr-readonly-key", instaclustrReadOnlyEnv, "read-only key")
+	if err == nil || !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("the read-only key must get the same validation: %v", err)
 	}
 }
 
@@ -223,6 +262,7 @@ func TestInstallInstaclustrDryRunMutatesNothing(t *testing.T) {
 	mustSet(t, cmd, "cluster-id", "c-1")
 	mustSet(t, cmd, "instaclustr-user", "someone")
 	mustSet(t, cmd, "instaclustr-api-key", "key123")
+	mustSet(t, cmd, "instaclustr-prometheus-key", "prom789")
 	mustSet(t, cmd, "dry-run", "true")
 	mustSet(t, cmd, "db-name", "orders,billing")
 
@@ -243,8 +283,13 @@ func TestInstallInstaclustrDryRunMutatesNothing(t *testing.T) {
 	if !strings.Contains(out, `databases = ["orders", "billing"]`) {
 		t.Fatalf("preview lost --db-name (CSV on a plain String flag):\n%s", out)
 	}
-	if strings.Contains(out, "key123") {
-		t.Fatalf("the setup key leaked into the preview:\n%s", out)
+	// The preview must render the config the real run would deploy: the
+	// Prometheus key's env reference present, the key itself never.
+	if !strings.Contains(out, `prometheus_api_key = "${`+collector.InstaclustrPromKeyEnv+`}"`) {
+		t.Fatalf("preview dropped the Prometheus key's config stanza:\n%s", out)
+	}
+	if strings.Contains(out, "key123") || strings.Contains(out, "prom789") {
+		t.Fatalf("a key leaked into the preview:\n%s", out)
 	}
 }
 
@@ -412,6 +457,7 @@ func TestInstallInstaclustrAWSHappyPath(t *testing.T) {
 	mustSet(t, cmd, "security-group-id", "sg-1")
 	mustSet(t, cmd, "vpc-id", "vpc-1")
 	mustSet(t, cmd, "nat-subnet-cidr", "10.0.200.0/28")
+	mustSet(t, cmd, "instaclustr-prometheus-key", "prom789")
 
 	if err := runInstall(cmd, nil); err != nil {
 		t.Fatal(err)
@@ -419,11 +465,12 @@ func TestInstallInstaclustrAWSHappyPath(t *testing.T) {
 	if len(*roleRuns) != 1 {
 		t.Fatalf("role not ensured exactly once: %v", *roleRuns)
 	}
-	if rec.count != 1 || rec.params["StableEgress"] != "ENABLED" || rec.secrets["InstaclustrApiKey"] != "key456" {
-		t.Fatalf("deploy params wrong: count=%d %v", rec.count, rec.params)
+	if rec.count != 1 || rec.params["StableEgress"] != "ENABLED" || rec.secrets["InstaclustrApiKey"] != "key456" ||
+		rec.secrets["InstaclustrPrometheusKey"] != "prom789" {
+		t.Fatalf("deploy params wrong: count=%d %v %v", rec.count, rec.params, rec.secrets)
 	}
-	if rec.params["InstaclustrApiKey"] != "" {
-		t.Fatal("the API key must never enter the printable params map")
+	if rec.params["InstaclustrApiKey"] != "" || rec.params["InstaclustrPrometheusKey"] != "" {
+		t.Fatal("no Instaclustr key may enter the printable params map")
 	}
 	if len(cidrs) != 2 || cidrs[0] != "192.0.2.9/32" || cidrs[1] != "198.51.100.20/32" {
 		t.Fatalf("expected operator rule then EIP rule, got %v", cidrs)
@@ -666,6 +713,7 @@ func TestInstallInstaclustrGCPHappyPath(t *testing.T) {
 	mustSet(t, cmd, "region", "us-central1")
 	mustSet(t, cmd, "network", "projects/acme-prod/global/networks/default")
 	mustSet(t, cmd, "nat-subnet-cidr", "10.10.200.0/28")
+	mustSet(t, cmd, "instaclustr-prometheus-key", "prom789")
 
 	if err := runInstall(cmd, nil); err != nil {
 		t.Fatal(err)
@@ -677,7 +725,8 @@ func TestInstallInstaclustrGCPHappyPath(t *testing.T) {
 		rec.deploy.Inputs["nat_subnet_cidr"] != "10.10.200.0/28" {
 		t.Fatalf("deploy inputs wrong: count=%d inputs=%v", rec.count, rec.deploy.Inputs)
 	}
-	if rec.secretsWritten != 1 || rec.secrets.InstaclustrKey != "key456" || rec.secrets.DBPassword == "" {
+	if rec.secretsWritten != 1 || rec.secrets.InstaclustrKey != "key456" ||
+		rec.secrets.PrometheusKey != "prom789" || rec.secrets.DBPassword == "" {
 		t.Fatalf("the credentials must be written to Secret Manager before the deploy: %+v", rec.secrets)
 	}
 	if rec.deploy.Inputs["instaclustr_api_key"] != "" {
