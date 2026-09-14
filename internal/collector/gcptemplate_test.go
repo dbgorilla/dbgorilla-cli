@@ -121,17 +121,22 @@ func TestGcpTemplateContract_NamingContractHolds(t *testing.T) {
 
 // What `dbg collector logs` and the boot sequence rely on in the template.
 func TestGcpTemplateContract_RuntimePins(t *testing.T) {
-	main, err := os.ReadFile("terraform/collector-gce/main.tf")
+	raw, err := os.ReadFile("terraform/collector-gce/main.tf")
 	if err != nil {
 		t.Fatalf("read template: %v", err)
 	}
+	// `terraform fmt` aligns the `=` of a block's attributes to its longest
+	// key, so adding an unrelated attribute re-spaces the lines pinned here.
+	// Collapse runs of spaces first: these pins are about what the template
+	// says, not how it is laid out.
+	main := regexp.MustCompile(` +`).ReplaceAllString(string(raw), " ")
 	for _, want := range []string{
-		`google-logging-enabled  = "true"`,
+		`google-logging-enabled = "true"`,
 		`--name ` + gcpCollectorContainerName,
 		`subnetwork = var.stable_egress ? google_compute_subnetwork.egress[0].id : (var.subnetwork == "" ? null : var.subnetwork)`,
 		"depends_on = [",
 	} {
-		if !strings.Contains(string(main), want) {
+		if !strings.Contains(main, want) {
 			t.Errorf("main.tf must contain %q", want)
 		}
 	}

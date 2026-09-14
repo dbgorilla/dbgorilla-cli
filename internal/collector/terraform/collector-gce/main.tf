@@ -211,10 +211,10 @@ resource "google_compute_instance_template" "collector" {
   }
 
   metadata = {
-    startup-script          = local.startup_script
-    collector-config        = var.collector_config
-    google-logging-enabled  = "true"
-    cos-update-strategy     = "update_enabled"
+    startup-script         = local.startup_script
+    collector-config       = var.collector_config
+    google-logging-enabled = "true"
+    cos-update-strategy    = "update_enabled"
   }
 
   lifecycle {
