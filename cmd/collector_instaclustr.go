@@ -44,7 +44,6 @@ var (
 	ensureFirewallRule    = collector.EnsureFirewallRule
 	deleteFirewallRule    = collector.DeleteInstaclustrFirewallRule
 	ensureSGRule          = collector.EnsureSecurityGroupRule
-	removeSGRule          = collector.RemoveSecurityGroupRule
 	discoverVPCPlacement  = collector.DiscoverVPCPlacement
 	createInstaclustrRole = collector.EnsureInstaclustrRole
 	primaryHost           = collector.PrimaryHost
