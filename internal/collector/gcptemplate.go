@@ -20,9 +20,12 @@ const (
 
 // GcpTemplateVersion is the template's own version, bumped when its input
 // contract changes; a published version is never rewritten. v1.3 removed the
-// secret inputs: the CLI writes them to Secret Manager itself. v1.4 added a
-// fourth secret, <name>-prometheus-api-key, to the boot script's fetch/export
-// set (the optional Instaclustr Prometheus key).
+// secret inputs: the CLI writes them to Secret Manager itself. v1.4 both added
+// a fourth secret, <name>-prometheus-api-key, to the boot script's fetch/export
+// set (the optional Instaclustr Prometheus key), and scoped the IAM grants per
+// database service, conditioning Cloud SQL's login role on the monitored
+// instances. Both land in v1.4 because neither has been published yet; once a
+// version is out, the next change takes a new one.
 const GcpTemplateVersion = "v1.4"
 
 const gcpTemplateProbeTimeout = 5 * time.Second
