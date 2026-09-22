@@ -34,6 +34,7 @@ var gcpSecrets = []struct {
 	{"db-password", func(v GcpSecretValues) string { return v.DBPassword }},
 	{"instaclustr-api-key", func(v GcpSecretValues) string { return v.InstaclustrKey }},
 	{"prometheus-api-key", func(v GcpSecretValues) string { return v.PrometheusKey }},
+	{"provisioning-api-key", func(v GcpSecretValues) string { return v.ProvisioningKey }},
 }
 
 // gcpSecretPlaceholder stands in for an absent credential (IAM-auth installs
@@ -41,7 +42,7 @@ var gcpSecrets = []struct {
 // script never needs to know which credentials this install carries.
 const gcpSecretPlaceholder = "unused"
 
-// GcpSecretValues carries the four collector credentials. Empty fields are
+// GcpSecretValues carries the collector credentials. Empty fields are
 // written as the placeholder.
 type GcpSecretValues struct {
 	ServerSecret   string
@@ -51,6 +52,9 @@ type GcpSecretValues struct {
 	// platform-metrics scrape — a separate Instaclustr key kind (the
 	// provisioning keys 401 on monitoring surfaces).
 	PrometheusKey string
+	// ProvisioningKey is the account-wide Instaclustr Provisioning key for
+	// fast-fork operations. Opt-in (--fast-fork); empty when absent.
+	ProvisioningKey string
 }
 
 // GcpSecretIDs lists the Secret Manager secret ids an install writes, in the

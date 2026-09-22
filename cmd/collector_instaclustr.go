@@ -36,6 +36,7 @@ const (
 	instaclustrProvisioningEnv = "INSTACLUSTR_PROVISIONING_API_KEY"
 	instaclustrReadOnlyEnv     = "INSTACLUSTR_READONLY_API_KEY"
 	instaclustrPrometheusEnv   = "INSTACLUSTR_PROMETHEUS_API_KEY"
+	instaclustrFastForkEnv     = "INSTACLUSTR_FAST_FORK_KEY"
 )
 
 // Test seams, one var per side effect (the aws seams' pattern).
@@ -67,6 +68,8 @@ func init() {
 	installCmd.Flags().String("vpc-id", "", "VPC for the stable-egress private subnet (required with --stable-egress on aws)")
 	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress subnet, e.g. 10.0.200.0/28 (aws and gcp)")
 	installCmd.Flags().String("region", "", "GCP: region for the collector instance (required with --provider instaclustr --target gcp; aws reads AWS_REGION)")
+	installCmd.Flags().Bool("fast-fork", false, "Enable fast-fork sandbox operations on this collector (requires a Provisioning API key via --fast-fork-key or "+instaclustrFastForkEnv+")")
+	installCmd.Flags().String("fast-fork-key", "", "Instaclustr Provisioning API key the collector keeps for fast-fork operations — an account-wide write key (or "+instaclustrFastForkEnv+")")
 
 	refreshFirewallCmd.Flags().String("instaclustr-user", "", "Instaclustr console username (or "+instaclustrUserEnv+")")
 	refreshFirewallCmd.Flags().String("instaclustr-api-key", "", "Instaclustr provisioning API key (or "+instaclustrProvisioningEnv+")")
@@ -223,7 +226,16 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, in.component(collector.DBPasswordEnv), endpointsFor(creds, cmd))
+	comp := in.component(collector.DBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		comp.Provider.AllowNetworks = []string{allowCIDR}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
+	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, comp, endpointsFor(creds, cmd))
+	if in.fastFork {
+		cfg.Commands.Enabled = true
+	}
 	rendered, err := cfg.Render()
 	if err != nil {
 		rollbackRule()
@@ -240,7 +252,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	return finishDockerInstall(cmd, in.client, creds, rendered, monitorPassword, caCert,
 		func(envPath string) error {
-			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey, in.prometheusKey)
+			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey, in.prometheusKey, in.provisioningKey)
 		},
 		state, rollbackRule,
 		"  dbg collector status              # check connection\n"+
@@ -261,12 +273,16 @@ type instaclustrInstall struct {
 	// skip): its presence changes the rendered config, and a preview must
 	// match the run it previews.
 	prometheusKey string
-	client        *api.Client
-	ict           collector.InstaclustrTarget
-	seedHost      string
-	usePrivate    bool
-	sslMode       string
-	databases     []string
+	// provisioningKey is the account-wide Provisioning API key the collector
+	// holds for fork lifecycle operations. Present only when --fast-fork is on.
+	provisioningKey string
+	fastFork        bool
+	client          *api.Client
+	ict             collector.InstaclustrTarget
+	seedHost        string
+	usePrivate      bool
+	sslMode         string
+	databases       []string
 	// privateSrc is the address the cluster sees this machine arrive from
 	// when setup runs over a private path (VPN, peering, bastion). Empty on
 	// the public path, where the operator's public egress address is used
@@ -361,6 +377,18 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 			"(pass --instaclustr-prometheus-key, or set " + instaclustrPrometheusEnv + ", to enable them)"))
 	}
 
+	fastFork, _ := cmd.Flags().GetBool("fast-fork")
+	provisioningKey := ""
+	if fastFork {
+		provisioningKey, err = instaclustrFlagOrEnvKey(cmd, "fast-fork-key", instaclustrFastForkEnv)
+		if err != nil {
+			return nil, err
+		}
+		if provisioningKey == "" {
+			return nil, fmt.Errorf("--fast-fork requires an Instaclustr Provisioning API key: pass --fast-fork-key or set %s", instaclustrFastForkEnv)
+		}
+	}
+
 	client, err := requireCollectorSupport(cmd, apiURL)
 	if err != nil {
 		return nil, err
@@ -445,17 +473,19 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 	}
 	dbNames, _ := cmd.Flags().GetString("db-name")
 	return &instaclustrInstall{
-		clusterID:     clusterID,
-		setupCreds:    setupCreds,
-		readOnlyKey:   readOnlyKey,
-		prometheusKey: prometheusKey,
-		client:        client,
-		ict:           ict,
-		seedHost:      seedHost,
-		usePrivate:    usePrivate,
-		sslMode:       sslMode,
-		databases:     splitCSV(dbNames),
-		privateSrc:    privateSrc,
+		clusterID:       clusterID,
+		setupCreds:      setupCreds,
+		readOnlyKey:     readOnlyKey,
+		prometheusKey:   prometheusKey,
+		provisioningKey: provisioningKey,
+		fastFork:        fastFork,
+		client:          client,
+		ict:             ict,
+		seedHost:        seedHost,
+		usePrivate:      usePrivate,
+		sslMode:         sslMode,
+		databases:       splitCSV(dbNames),
+		privateSrc:      privateSrc,
 	}, nil
 }
 
@@ -573,9 +603,17 @@ func dryRunInstaclustr(cmd *cobra.Command, in *instaclustrInstall, allowCIDR str
 		"   # refused on a managed cluster; the install reports the narrowed role and continues")
 	fmt.Println()
 	comp := in.component(collector.DBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		comp.Provider.AllowNetworks = []string{allowCIDR}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
 	// Empty credentials: nothing is minted on a dry run, so the endpoints are
 	// whatever the --*-url flags say (or the collector's production defaults).
 	cfg := collector.BuildInstaclustr("<agent-id>", "<tenant-id>", comp, endpointsFor(&api.CollectorCredentials{}, cmd))
+	if in.fastFork {
+		cfg.Commands.Enabled = true
+	}
 	rendered, err := cfg.Render()
 	if err != nil {
 		return err
@@ -1128,19 +1166,34 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	comp := in.component(collector.CloudDBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		// The operator's --allow-ip, read the same way the egress allowlist
+		// reads it; the local `allowRaw` this used to close over went away with
+		// the placement refactor.
+		if allowRaw := mustString(cmd, "allow-ip"); allowRaw != "" {
+			if cidr, cerr := collector.AllowCIDR(allowRaw); cerr == nil {
+				comp.Provider.AllowNetworks = []string{cidr}
+			}
+		}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
 	input := collector.AwsStackInput{
 		Region:          region,
 		AccountID:       accountID,
+		Components:      []collector.Component{comp},
 		Subnets:         placement.subnets,
 		SecurityGroup:   placement.securityGroup,
 		AssignPublicIP:  placement.assignPublicIP,
-		CommandsEnabled: false,
+		CommandsEnabled: in.fastFork,
 		StableEgress:    placement.stableEgress,
 		VpcID:           placement.vpcID,
 		NatSubnetCidr:   placement.natSubnetCidr,
 		// Set here, not with the post-provision secrets: the dry run's
 		// secret-presence report must show the key the real run would ship.
-		InstaclustrPromKey: in.prometheusKey,
+		InstaclustrPromKey:         in.prometheusKey,
+		InstaclustrProvisioningKey: in.provisioningKey,
 	}
 
 	if dryRun {
@@ -1393,13 +1446,26 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	comp := in.component(collector.CloudDBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		// The operator's --allow-ip, read the same way the egress allowlist
+		// reads it; the local `allowRaw` this used to close over went away with
+		// the placement refactor.
+		if allowRaw := mustString(cmd, "allow-ip"); allowRaw != "" {
+			if cidr, cerr := collector.AllowCIDR(allowRaw); cerr == nil {
+				comp.Provider.AllowNetworks = []string{cidr}
+			}
+		}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
 	input := collector.GcpStackInput{
 		Network:         network,
 		Subnetwork:      subnetwork,
 		Region:          region,
 		DeploymentName:  deploymentName,
 		Project:         project,
-		CommandsEnabled: false,
+		CommandsEnabled: in.fastFork,
 		StableEgress:    stableEgress,
 		NatSubnetCidr:   natCidr,
 	}
@@ -1458,10 +1524,11 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	// template only grants access to them, so they never reach Infrastructure
 	// Manager (whose input values and state are readable by config.* roles).
 	if err := ensureGcpSecrets(project, deploymentName, collector.GcpSecretValues{
-		ServerSecret:   creds.Secret,
-		DBPassword:     monitorPassword,
-		InstaclustrKey: in.readOnlyKey,
-		PrometheusKey:  in.prometheusKey,
+		ServerSecret:    creds.Secret,
+		DBPassword:      monitorPassword,
+		InstaclustrKey:  in.readOnlyKey,
+		PrometheusKey:   in.prometheusKey,
+		ProvisioningKey: in.provisioningKey,
 	}); err != nil {
 		deleteGcpSecretsOrWarn(project, deploymentName)
 		deprovisionOrWarn(in.client, creds.AgentID)

@@ -15,12 +15,13 @@ const (
 	secDBPath     = "/v1/projects/p/secrets/dbg-db-password"
 	secKeyPath    = "/v1/projects/p/secrets/dbg-instaclustr-api-key"
 	secPromPath   = "/v1/projects/p/secrets/dbg-prometheus-api-key"
+	secProvPath   = "/v1/projects/p/secrets/dbg-provisioning-api-key"
 	secCreatePath = "/v1/projects/p/secrets"
 )
 
 func TestGcpSecretIDs_MatchTheTemplateNamingContract(t *testing.T) {
 	got := strings.Join(GcpSecretIDs("dbg"), ",")
-	if got != "dbg-server-secret,dbg-db-password,dbg-instaclustr-api-key,dbg-prometheus-api-key" {
+	if got != "dbg-server-secret,dbg-db-password,dbg-instaclustr-api-key,dbg-prometheus-api-key,dbg-provisioning-api-key" {
 		t.Fatalf("secret ids = %s — the template addresses secrets by these names", got)
 	}
 }
@@ -31,24 +32,26 @@ func TestEnsureGcpSecrets_CreatesAndWritesEachValue(t *testing.T) {
 		on("POST", secServerPath+":addVersion", 200, "{}").
 		on("POST", secDBPath+":addVersion", 200, "{}").
 		on("POST", secKeyPath+":addVersion", 200, "{}").
-		on("POST", secPromPath+":addVersion", 200, "{}")
+		on("POST", secPromPath+":addVersion", 200, "{}").
+		on("POST", secProvPath+":addVersion", 200, "{}")
 	stubGCP(t, f)
 
 	err := EnsureGcpSecrets("p", "dbg", GcpSecretValues{
-		ServerSecret:   "sek",
-		DBPassword:     "monitor-pw",
-		InstaclustrKey: "key456",
-		PrometheusKey:  "prom789",
+		ServerSecret:    "sek",
+		DBPassword:      "monitor-pw",
+		InstaclustrKey:  "key456",
+		PrometheusKey:   "prom789",
+		ProvisioningKey: "prov012",
 	})
 	if err != nil {
 		t.Fatalf("EnsureGcpSecrets: %v", err)
 	}
-	if f.called("POST", secCreatePath) != 4 {
-		t.Errorf("want 4 creates, got %d", f.called("POST", secCreatePath))
+	if f.called("POST", secCreatePath) != 5 {
+		t.Errorf("want 5 creates, got %d", f.called("POST", secCreatePath))
 	}
 	for path, value := range map[string]string{
 		secServerPath: "sek", secDBPath: "monitor-pw", secKeyPath: "key456",
-		secPromPath: "prom789",
+		secPromPath: "prom789", secProvPath: "prov012",
 	} {
 		body := f.lastBody("POST", path+":addVersion")
 		want := base64.StdEncoding.EncodeToString([]byte(value))
@@ -58,7 +61,7 @@ func TestEnsureGcpSecrets_CreatesAndWritesEachValue(t *testing.T) {
 	}
 	// Values never enter a URL: the calls list records method + path + query.
 	for _, c := range f.calls {
-		for _, secret := range []string{"sek", "monitor-pw", "key456", "prom789"} {
+		for _, secret := range []string{"sek", "monitor-pw", "key456", "prom789", "prov012"} {
 			if strings.Contains(c, secret) {
 				t.Errorf("a secret value leaked into a request URL: %s", c)
 			}
@@ -75,14 +78,15 @@ func TestEnsureGcpSecrets_WritesThePlaceholderForAbsentCredentials(t *testing.T)
 		on("POST", secServerPath+":addVersion", 200, "{}").
 		on("POST", secDBPath+":addVersion", 200, "{}").
 		on("POST", secKeyPath+":addVersion", 200, "{}").
-		on("POST", secPromPath+":addVersion", 200, "{}")
+		on("POST", secPromPath+":addVersion", 200, "{}").
+		on("POST", secProvPath+":addVersion", 200, "{}")
 	stubGCP(t, f)
 
 	if err := EnsureGcpSecrets("p", "dbg", GcpSecretValues{ServerSecret: "sek"}); err != nil {
 		t.Fatalf("EnsureGcpSecrets: %v", err)
 	}
 	placeholder := base64.StdEncoding.EncodeToString([]byte(gcpSecretPlaceholder))
-	for _, path := range []string{secDBPath, secKeyPath, secPromPath} {
+	for _, path := range []string{secDBPath, secKeyPath, secPromPath, secProvPath} {
 		if !strings.Contains(f.lastBody("POST", path+":addVersion"), placeholder) {
 			t.Errorf("%s should hold the placeholder so the boot script can always fetch it", path)
 		}
@@ -95,7 +99,8 @@ func TestEnsureGcpSecrets_ToleratesAlreadyExisting(t *testing.T) {
 		on("POST", secServerPath+":addVersion", 200, "{}").
 		on("POST", secDBPath+":addVersion", 200, "{}").
 		on("POST", secKeyPath+":addVersion", 200, "{}").
-		on("POST", secPromPath+":addVersion", 200, "{}")
+		on("POST", secPromPath+":addVersion", 200, "{}").
+		on("POST", secProvPath+":addVersion", 200, "{}")
 	stubGCP(t, f)
 
 	if err := EnsureGcpSecrets("p", "dbg", GcpSecretValues{ServerSecret: "sek"}); err != nil {
@@ -125,13 +130,14 @@ func TestDeleteGcpSecrets_ToleratesAlreadyGone(t *testing.T) {
 		on("DELETE", secServerPath, 200, "{}").
 		on("DELETE", secDBPath, 404, gcpNotFoundJSON).
 		on("DELETE", secKeyPath, 200, "{}").
-		on("DELETE", secPromPath, 200, "{}")
+		on("DELETE", secPromPath, 200, "{}").
+		on("DELETE", secProvPath, 200, "{}")
 	stubGCP(t, f)
 
 	if err := DeleteGcpSecrets("p", "dbg"); err != nil {
 		t.Fatalf("DeleteGcpSecrets: %v", err)
 	}
-	for _, path := range []string{secServerPath, secDBPath, secKeyPath, secPromPath} {
+	for _, path := range []string{secServerPath, secDBPath, secKeyPath, secPromPath, secProvPath} {
 		if f.called("DELETE", path) != 1 {
 			t.Errorf("%s not deleted", path)
 		}
@@ -143,7 +149,8 @@ func TestDeleteGcpSecrets_ReportsRealFailures(t *testing.T) {
 		on("DELETE", secServerPath, 403, `{"error":{"message":"denied","status":"PERMISSION_DENIED"}}`).
 		on("DELETE", secDBPath, 200, "{}").
 		on("DELETE", secKeyPath, 200, "{}").
-		on("DELETE", secPromPath, 200, "{}")
+		on("DELETE", secPromPath, 200, "{}").
+		on("DELETE", secProvPath, 200, "{}")
 	stubGCP(t, f)
 
 	err := DeleteGcpSecrets("p", "dbg")
