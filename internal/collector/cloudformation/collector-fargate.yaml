@@ -1,6 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  DBGorilla collector — a single AWS Fargate task that monitors one or more RDS/Aurora databases and reports telemetry to DBGorilla over OTLP/OpAMP. The whole collector configuration is one TOML document passed as the CollectorConfig parameter (base64-encoded); see the commented example at the top of this template. Deploy it with `dbg collector install --target aws`, or launch it by hand from the console.
+  DBGorilla collector — a single AWS Fargate task that monitors one or more
+  RDS/Aurora databases and reports telemetry to DBGorilla over OTLP/OpAMP. The
+  whole collector configuration is one TOML document passed as the
+  CollectorConfig parameter (base64-encoded); see the commented example at the
+  top of this template. Deploy it with `dbg collector install --target aws`, or launch it
+  by hand from the console.
 
 # This template is versioned independently of the dbg CLI: its version tracks
 # its parameter contract, which changes far more rarely than the CLI does. CI
@@ -102,7 +107,11 @@ Parameters:
     MaxLength: 4096
     AllowedPattern: '^[A-Za-z0-9+/]+={0,2}$'
     Description: >-
-      The collector's TOML config, base64-encoded on a single line (see the commented example at the top of this template). Run `dbg collector encode-config config.toml` to produce it. Contains no secrets: those are referenced as ${DBG_SERVER_SECRET} / ${DBG_DB_PASSWORD} and supplied by the two parameters below.
+      The collector's TOML config, base64-encoded on a single line (see the
+      commented example at the top of this template). Run
+      `dbg collector encode-config config.toml` to produce it. Contains no
+      secrets: those are referenced as ${DBG_SERVER_SECRET} / ${DBG_DB_PASSWORD}
+      and supplied by the two parameters below.
 
   # ── Secrets (kept out of CollectorConfig; stored in Secrets Manager) ──
   ServerSecret:
@@ -114,7 +123,8 @@ Parameters:
     NoEcho: true
     Default: ''
     Description: >-
-      Optional database password for components using password auth, referenced by the config as ${DBG_DB_PASSWORD}. Leave empty for IAM auth.
+      Optional database password for components using password auth, referenced
+      by the config as ${DBG_DB_PASSWORD}. Leave empty for IAM auth.
 
   CollectorImage:
     Type: String
@@ -129,7 +139,9 @@ Parameters:
     Type: CommaDelimitedList
     Default: 'arn:aws:rds-db:*:*:dbuser:*/*'
     Description: >-
-      rds-db:connect ARNs the collector's task role may use, e.g. arn:aws:rds-db:us-east-1:123456789012:dbuser:db-ABCDEF/dbgorilla. The default grants every database in this account; narrow it in production.
+      rds-db:connect ARNs the collector's task role may use, e.g.
+      arn:aws:rds-db:us-east-1:123456789012:dbuser:db-ABCDEF/dbgorilla. The
+      default grants every database in this account; narrow it in production.
 
   # ── Third-party monitoring credential (v1.1) ──
   # For components whose provider reads a managed platform's API (NetApp
@@ -140,7 +152,9 @@ Parameters:
     NoEcho: true
     Default: ''
     Description: >-
-      Optional READ-ONLY NetApp Instaclustr provisioning API key for instaclustr components, referenced by the config as ${INSTACLUSTR_API_KEY}. Leave empty otherwise.
+      Optional READ-ONLY NetApp Instaclustr provisioning API key for
+      instaclustr components, referenced by the config as
+      ${INSTACLUSTR_API_KEY}. Leave empty otherwise.
 
   # ── Platform-metrics credential (v1.3) ──
   # The dedicated low-privilege PROMETHEUS API key (a separate key kind — the
@@ -151,7 +165,9 @@ Parameters:
     NoEcho: true
     Default: ''
     Description: >-
-      Optional NetApp Instaclustr PROMETHEUS API key for the platform-metrics scrape, referenced by the config as ${IC_PROMETHEUS_API_KEY}. Leave empty otherwise.
+      Optional NetApp Instaclustr PROMETHEUS API key for the platform-metrics
+      scrape, referenced by the config as ${IC_PROMETHEUS_API_KEY}. Leave
+      empty otherwise.
 
   # ── Fast-fork write credential (v1.4) ──
   # The account-wide Instaclustr Provisioning key that enables the collector to
@@ -164,12 +180,14 @@ Parameters:
     NoEcho: true
     Default: ''
     Description: >-
-      Optional account-wide NetApp Instaclustr Provisioning API key for fast-fork operations, referenced by the config as ${IC_PROVISIONING_API_KEY}. Leave empty otherwise.
+      Optional account-wide NetApp Instaclustr Provisioning API key for
+      fast-fork operations, referenced by the config as
+      ${IC_PROVISIONING_API_KEY}. Leave empty otherwise.
 
   # ── Networking (discovered from the database's VPC) ──
-  Subnets: { Type: List<AWS::EC2::Subnet::Id>, Description: Subnets that can reach the RDS instance }
+  Subnets:         { Type: List<AWS::EC2::Subnet::Id>, Description: Subnets that can reach the RDS instance }
   SecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id, Description: SG allowing egress to RDS + DBGorilla }
-  AssignPublicIp: { Type: String, Default: ENABLED, AllowedValues: [ ENABLED, DISABLED ] }
+  AssignPublicIp:  { Type: String, Default: ENABLED, AllowedValues: [ENABLED, DISABLED] }
 
   # ── Stable egress (v1.1) ──
   # ENABLED runs the task in a NEW private subnet behind a NAT gateway with an
@@ -182,7 +200,7 @@ Parameters:
   StableEgress:
     Type: String
     Default: DISABLED
-    AllowedValues: [ ENABLED, DISABLED ]
+    AllowedValues: [ENABLED, DISABLED]
     Description: Run the task behind a NAT gateway with an Elastic IP (stable egress address)
   VpcId:
     Type: String
@@ -194,11 +212,11 @@ Parameters:
     Description: 'Unused CIDR in the VPC for the private subnet (required with StableEgress: ENABLED), e.g. 10.0.200.0/28'
 
 Conditions:
-  IsPasswordAuth: !Not [ !Equals [ !Ref DbPassword, '' ] ]
-  HasInstaclustrKey: !Not [ !Equals [ !Ref InstaclustrApiKey, '' ] ]
-  HasInstaclustrPromKey: !Not [ !Equals [ !Ref InstaclustrPrometheusKey, '' ] ]
-  HasInstaclustrProvisioningKey: !Not [ !Equals [ !Ref InstaclustrProvisioningKey, '' ] ]
-  UseStableEgress: !Equals [ !Ref StableEgress, ENABLED ]
+  IsPasswordAuth: !Not [!Equals [!Ref DbPassword, '']]
+  HasInstaclustrKey: !Not [!Equals [!Ref InstaclustrApiKey, '']]
+  HasInstaclustrPromKey: !Not [!Equals [!Ref InstaclustrPrometheusKey, '']]
+  HasInstaclustrProvisioningKey: !Not [!Equals [!Ref InstaclustrProvisioningKey, '']]
+  UseStableEgress: !Equals [!Ref StableEgress, ENABLED]
 
 Resources:
   LogGroup:
@@ -271,7 +289,7 @@ Resources:
     Properties:
       AllocationId: !GetAtt EgressEIP.AllocationId
       # Must be a public subnet — the parameter description says so.
-      SubnetId: !Select [ 0, !Ref Subnets ]
+      SubnetId: !Select [0, !Ref Subnets]
 
   # The AZ is the region's first — a subnet parameter's AZ is not readable in
   # CloudFormation, so it may differ from the NAT's subnet AZ. Cross-AZ
@@ -288,7 +306,7 @@ Resources:
     Properties:
       VpcId: !Ref VpcId
       CidrBlock: !Ref NatSubnetCidr
-      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      AvailabilityZone: !Select [0, !GetAZs '']
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
@@ -318,24 +336,24 @@ Resources:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
-        - Effect: Allow
-          Principal: { Service: ecs-tasks.amazonaws.com }
-          Action: sts:AssumeRole
-      ManagedPolicyArns:
-      - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Policies:
-      - PolicyName: read-server-secret
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
           - Effect: Allow
-            Action: secretsmanager:GetSecretValue
-            Resource:
-            - !Ref ServerSecretStore
-            - !If [ IsPasswordAuth, !Ref ComponentPasswordStore, !Ref AWS::NoValue ]
-            - !If [ HasInstaclustrKey, !Ref InstaclustrKeyStore, !Ref AWS::NoValue ]
-            - !If [ HasInstaclustrPromKey, !Ref InstaclustrPromKeyStore, !Ref AWS::NoValue ]
-            - !If [ HasInstaclustrProvisioningKey, !Ref InstaclustrProvisioningKeyStore, !Ref AWS::NoValue ]
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-server-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref ServerSecretStore
+                  - !If [IsPasswordAuth, !Ref ComponentPasswordStore, !Ref AWS::NoValue]
+                  - !If [HasInstaclustrKey, !Ref InstaclustrKeyStore, !Ref AWS::NoValue]
+                  - !If [HasInstaclustrPromKey, !Ref InstaclustrPromKeyStore, !Ref AWS::NoValue]
+                  - !If [HasInstaclustrProvisioningKey, !Ref InstaclustrProvisioningKeyStore, !Ref AWS::NoValue]
 
   # The collector's own runtime identity: IAM DB auth + RDS discovery, least privilege.
   TaskRole:
@@ -344,94 +362,96 @@ Resources:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
-        - Effect: Allow
-          Principal: { Service: ecs-tasks.amazonaws.com }
-          Action: sts:AssumeRole
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
       Policies:
-      - PolicyName: collector-rds
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action: rds-db:connect
-            Resource: !Ref RdsConnectResources
-          # Topology/infra discovery — read-only, describe-level.
-          - Effect: Allow
-            Action:
-            - rds:DescribeDBInstances
-            - rds:DescribeDBClusters
-            - cloudwatch:GetMetricData
-            - cloudwatch:ListMetrics
-            Resource: '*'
-          # Fork preflight (v1.4) — read-only capacity checks the
-          # collector runs before creating a fork cluster.
-          - Effect: Allow
-            Action:
-            - ec2:DescribeAddresses
-            - ec2:DescribeVpcs
-            - fsx:DescribeFileSystems
-            - fsx:DescribeVolumes
-            - servicequotas:GetServiceQuota
-            Resource: '*'
+        - PolicyName: collector-rds
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: rds-db:connect
+                Resource: !Ref RdsConnectResources
+              # Topology/infra discovery — read-only, describe-level.
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              # Fork preflight (v1.4) — read-only capacity checks the
+              # collector runs before creating a fork cluster.
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeVpcs
+                  - fsx:DescribeFileSystems
+                  - fsx:DescribeVolumes
+                  - servicequotas:GetServiceQuota
+                Resource: '*'
 
   Cluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub '${AWS::StackName}'
-      CapacityProviders: [ FARGATE ]
+      CapacityProviders: [FARGATE]
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
       Family: !Sub '${AWS::StackName}'
-      RequiresCompatibilities: [ FARGATE ]
+      RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
       Cpu: '256'
       Memory: '512'
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
-      - Name: collector
-        Image: !Ref CollectorImage
-        Essential: true
-        LogConfiguration:
-          LogDriver: awslogs
-          Options:
-            awslogs-group: !Ref LogGroup
-            awslogs-region: !Ref AWS::Region
-            awslogs-stream-prefix: collector
-        # The collector reads its config from a file (--config-file), so the
-        # task decodes the CollectorConfig parameter to /tmp before exec'ing
-        # it. /tmp is writable by the image's uid 1000. `exec` keeps the
-        # collector as PID 1 so ECS signals reach it directly.
-        EntryPoint: [ '/bin/sh', '-c' ]
-        Command:
-        - >-
-          set -e; printf '%s' "$DBG_CONFIG_B64" | base64 -d > /tmp/dbg-collector.toml; exec /usr/local/bin/dbg-collector --config-file /tmp/dbg-collector.toml
-        # DBG_SERVER_SECRET / DBG_DB_PASSWORD are injected from Secrets
-        # Manager, never from the plaintext env; the config references them
-        # as ${VAR}.
-        Secrets:
-        - Name: DBG_SERVER_SECRET
-          ValueFrom: !Ref ServerSecretStore
-        - !If
-          - IsPasswordAuth
-          - { Name: DBG_DB_PASSWORD, ValueFrom: !Ref ComponentPasswordStore }
-          - !Ref AWS::NoValue
-        - !If
-          - HasInstaclustrKey
-          - { Name: INSTACLUSTR_API_KEY, ValueFrom: !Ref InstaclustrKeyStore }
-          - !Ref AWS::NoValue
-        - !If
-          - HasInstaclustrPromKey
-          - { Name: IC_PROMETHEUS_API_KEY, ValueFrom: !Ref InstaclustrPromKeyStore }
-          - !Ref AWS::NoValue
-        - !If
-          - HasInstaclustrProvisioningKey
-          - { Name: IC_PROVISIONING_API_KEY, ValueFrom: !Ref InstaclustrProvisioningKeyStore }
-          - !Ref AWS::NoValue
-        Environment:
-        - { Name: DBG_CONFIG_B64, Value: !Ref CollectorConfig }
+        - Name: collector
+          Image: !Ref CollectorImage
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: collector
+          # The collector reads its config from a file (--config-file), so the
+          # task decodes the CollectorConfig parameter to /tmp before exec'ing
+          # it. /tmp is writable by the image's uid 1000. `exec` keeps the
+          # collector as PID 1 so ECS signals reach it directly.
+          EntryPoint: ['/bin/sh', '-c']
+          Command:
+            - >-
+              set -e;
+              printf '%s' "$DBG_CONFIG_B64" | base64 -d > /tmp/dbg-collector.toml;
+              exec /usr/local/bin/dbg-collector --config-file /tmp/dbg-collector.toml
+          # DBG_SERVER_SECRET / DBG_DB_PASSWORD are injected from Secrets
+          # Manager, never from the plaintext env; the config references them
+          # as ${VAR}.
+          Secrets:
+            - Name: DBG_SERVER_SECRET
+              ValueFrom: !Ref ServerSecretStore
+            - !If
+              - IsPasswordAuth
+              - { Name: DBG_DB_PASSWORD, ValueFrom: !Ref ComponentPasswordStore }
+              - !Ref AWS::NoValue
+            - !If
+              - HasInstaclustrKey
+              - { Name: INSTACLUSTR_API_KEY, ValueFrom: !Ref InstaclustrKeyStore }
+              - !Ref AWS::NoValue
+            - !If
+              - HasInstaclustrPromKey
+              - { Name: IC_PROMETHEUS_API_KEY, ValueFrom: !Ref InstaclustrPromKeyStore }
+              - !Ref AWS::NoValue
+            - !If
+              - HasInstaclustrProvisioningKey
+              - { Name: IC_PROVISIONING_API_KEY, ValueFrom: !Ref InstaclustrProvisioningKeyStore }
+              - !Ref AWS::NoValue
+          Environment:
+            - { Name: DBG_CONFIG_B64, Value: !Ref CollectorConfig }
 
   Service:
     Type: AWS::ECS::Service
@@ -447,15 +467,15 @@ Resources:
         MaximumPercent: 100
       NetworkConfiguration:
         AwsvpcConfiguration:
-          Subnets: !If [ UseStableEgress, [ !Ref PrivateSubnet ], !Ref Subnets ]
-          SecurityGroups: [ !Ref SecurityGroupId ]
-          AssignPublicIp: !If [ UseStableEgress, DISABLED, !Ref AssignPublicIp ]
+          Subnets: !If [UseStableEgress, [!Ref PrivateSubnet], !Ref Subnets]
+          SecurityGroups: [!Ref SecurityGroupId]
+          AssignPublicIp: !If [UseStableEgress, DISABLED, !Ref AssignPublicIp]
 
 Outputs:
-  ClusterName: { Value: !Ref Cluster }
-  ServiceName: { Value: !GetAtt Service.Name }
-  LogGroupName: { Value: !Ref LogGroup }
-  TaskRoleArn: { Value: !GetAtt TaskRole.Arn, Description: Grant this role rds_iam on the DB user }
+  ClusterName:    { Value: !Ref Cluster }
+  ServiceName:    { Value: !GetAtt Service.Name }
+  LogGroupName:   { Value: !Ref LogGroup }
+  TaskRoleArn:    { Value: !GetAtt TaskRole.Arn, Description: Grant this role rds_iam on the DB user }
   EgressIP:
     Condition: UseStableEgress
     Value: !Ref EgressEIP
