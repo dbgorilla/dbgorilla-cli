@@ -506,9 +506,10 @@ type AwsStackInput struct {
 	// platform-metrics scrape (a separate Instaclustr key kind — third and
 	// fourth Secrets Manager secrets), and the pre-rendered components
 	// (Targets stays empty — there is no RDS).
-	InstaclustrKey     string
-	InstaclustrPromKey string
-	Components         []Component
+	InstaclustrKey             string
+	InstaclustrPromKey         string
+	InstaclustrProvisioningKey string
+	Components                 []Component
 	// Stable egress (NAT + EIP): the collector's outbound address never
 	// changes, which IP-allowlist-gated databases require.
 	StableEgress  bool
@@ -534,6 +535,7 @@ var awsSecretParams = []struct {
 	{"DbPassword", false, func(in AwsStackInput) string { return in.DBPassword }},
 	{"InstaclustrApiKey", false, func(in AwsStackInput) string { return in.InstaclustrKey }},
 	{"InstaclustrPrometheusKey", true, func(in AwsStackInput) string { return in.InstaclustrPromKey }},
+	{"InstaclustrProvisioningKey", true, func(in AwsStackInput) string { return in.InstaclustrProvisioningKey }},
 }
 
 // AwsSecretParamKeys lists the secret parameter names in display order — the
@@ -805,7 +807,8 @@ const (
 // an upgrade preserves the monitored databases and their IAM grants.
 var fargateParamKeys = []string{
 	configParamKey, rdsConnectParamKey, "ServerSecret", "DbPassword",
-	"InstaclustrApiKey", "InstaclustrPrometheusKey", "CollectorImage",
+	"InstaclustrApiKey", "InstaclustrPrometheusKey", "InstaclustrProvisioningKey",
+	"CollectorImage",
 	"Subnets", "SecurityGroupId",
 	"AssignPublicIp", "StableEgress", "VpcId", "NatSubnetCidr",
 }

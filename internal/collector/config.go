@@ -42,6 +42,12 @@ const (
 	// Instaclustr partitions key types, and the provisioning keys 401 on
 	// monitoring surfaces. The name matches the collector's contract.
 	InstaclustrPromKeyEnv = "IC_PROMETHEUS_API_KEY"
+	// InstaclustrProvisioningKeyEnv is the env reference for the account-wide
+	// Instaclustr Provisioning key that the collector holds for fork lifecycle
+	// operations (create, allowlist, delete). Opt-in via --fast-fork; absent
+	// by default. The key can create, resize, delete any cluster in the
+	// account and read database credentials.
+	InstaclustrProvisioningKeyEnv = "IC_PROVISIONING_API_KEY"
 
 	// DockerHostInternal is the hostname that resolves to the Docker host from
 	// inside a container (native on Docker Desktop; on Linux we add an
@@ -111,18 +117,26 @@ type Provider struct {
 	Metrics    *MetricsConfig    `toml:"metrics,omitempty"`
 
 	// instaclustr. ClusterID (above) is the identity; CloudProvider/Region use
-	// Instaclustr's own spellings (AWS_VPC, US_EAST_1) and are UI context. The
-	// APIKey is always an env reference (${INSTACLUSTR_API_KEY}) to a READ-ONLY
-	// provisioning key — discovery is one GET, and the writable key can read
-	// database passwords, so it never belongs in a collector's configuration.
+	// Instaclustr's own spellings (AWS_VPC, US_EAST_1) and are UI context.
+	// APIKey is always an env reference to the READ-ONLY provisioning key
+	// (node discovery). ProvisioningAPIKey is opt-in (--fast-fork): it is the
+	// account-wide write key that can create, resize, delete any cluster and
+	// read database credentials — absent by default.
 	CloudProvider string `toml:"provider,omitempty"`
 	APIUsername   string `toml:"api_username,omitempty"`
 	APIKey        string `toml:"api_key,omitempty"`
 	// PrometheusAPIKey is always an env reference (${IC_PROMETHEUS_API_KEY}) to
 	// the dedicated Prometheus key; present only when the operator supplied one
 	// (absent = platform-metrics plane off, database telemetry unaffected).
-	PrometheusAPIKey    string `toml:"prometheus_api_key,omitempty"`
-	UsePrivateAddresses bool   `toml:"use_private_addresses,omitempty"`
+	PrometheusAPIKey string `toml:"prometheus_api_key,omitempty"`
+	// ProvisioningAPIKey is always an env reference
+	// (${IC_PROVISIONING_API_KEY}) to the account-wide write key. Present
+	// only when --fast-fork was given at install time.
+	ProvisioningAPIKey string `toml:"provisioning_api_key,omitempty"`
+	// AllowNetworks are the CIDRs the collector should allowlist on a fork's
+	// firewall. Written at install from the collector's own egress address.
+	AllowNetworks       []string `toml:"allow_networks,omitempty"`
+	UsePrivateAddresses bool     `toml:"use_private_addresses,omitempty"`
 }
 
 // KubernetesConfig is [component.provider.kubernetes]. Mode decides what happens
