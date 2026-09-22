@@ -165,3 +165,90 @@ jobs:
           aws s3api put-object --bucket "$BUCKET" --key collector/fargate/latest.yaml \
             --body "$TEMPLATE" --content-type text/yaml
           echo "published s3://$BUCKET/collector/fargate/latest.yaml"
+
+  # The same job for the gcp target's Terraform template. It is a DIRECTORY, not
+  # a single file: Infrastructure Manager reads the whole published prefix, so
+  # the unit that is versioned, compared and published is the directory.
+  # Everything else matches publish-template above -- independent template
+  # version, republished unchanged on most releases, and a published version
+  # that must never change underneath an already-released CLI.
+  #
+  # The identity is a workload identity federation provider and a service
+  # account, both named by repository variables so no project id is baked into
+  # this file. The service account needs, on this bucket only:
+  # storage.objects.create, storage.objects.get, storage.objects.list.
+  publish-gce-template:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # OIDC federation into the project that owns the bucket
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_TEMPLATE_PUBLISH_PROVIDER }}
+          service_account: ${{ vars.GCP_TEMPLATE_PUBLISH_SA }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+      - name: Validate the template
+        env:
+          DIR: internal/collector/terraform/collector-gce
+        run: |
+          set -euo pipefail
+          terraform -chdir="$DIR" fmt -check -diff
+          # init writes .terraform/ and a lock file into whatever directory it
+          # runs in, and the next step publishes that directory verbatim -- so
+          # type-check a throwaway copy and leave the real one untouched.
+          work=$(mktemp -d)
+          cp -R "$DIR/." "$work/"
+          # -backend=false: nothing is ever deployed from here.
+          terraform -chdir="$work" init -backend=false -input=false
+          terraform -chdir="$work" validate
+      - name: Publish
+        env:
+          BUCKET: dbgorilla-collector-templates
+          DIR: internal/collector/terraform/collector-gce
+        run: |
+          set -euo pipefail
+
+          # The version the template declares is the prefix it publishes under.
+          version=$(grep -oP '^# template-version: \K\S+' "$DIR/main.tf" || true)
+          if [ -z "$version" ]; then
+            echo "::error::$DIR/main.tf declares no '# template-version: <v>' marker"
+            exit 1
+          fi
+          # It must match what the CLI pins, or the CLI requests a prefix we never wrote.
+          pinned=$(grep -oP 'GcpTemplateVersion = "\K[^"]+' internal/collector/gcptemplate.go)
+          if [ "$version" != "$pinned" ]; then
+            echo "::error::template says $version but collector.GcpTemplateVersion says $pinned"
+            exit 1
+          fi
+
+          prefix="collector/gce/${version}"
+          # Refuse to change a version that is already published: released CLIs
+          # deploy it from this address and would silently pick up the new
+          # content. A contract change needs a GcpTemplateVersion bump instead.
+          published=$(mktemp -d)
+          if gcloud storage ls "gs://$BUCKET/$prefix/**" >/dev/null 2>&1; then
+            gcloud storage cp -r "gs://$BUCKET/$prefix/*" "$published/"
+            # -r compares the whole directory, so a file added or removed since
+            # the release counts as a difference too, not just an edited one.
+            if ! diff -r "$published" "$DIR"; then
+              echo "::error::$version is already published with different content."
+              echo "::error::Bump GcpTemplateVersion in gcptemplate.go and the main.tf marker instead of rewriting a released version."
+              exit 1
+            fi
+            echo "$version already published and identical -- nothing to do"
+          else
+            gcloud storage cp -r "$DIR/*" "gs://$BUCKET/$prefix/"
+            echo "published gs://$BUCKET/$prefix/"
+          fi
+
+          # latest/ backs the docs. The CLI never reads it -- it pins the
+          # version above.
+          gcloud storage cp -r "$DIR/*" "gs://$BUCKET/collector/gce/latest/"
+          echo "published gs://$BUCKET/collector/gce/latest/"
