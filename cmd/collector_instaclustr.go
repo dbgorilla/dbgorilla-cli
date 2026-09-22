@@ -259,11 +259,11 @@ type instaclustrInstall struct {
 	provisioningKey string
 	fastFork        bool
 	client          *api.Client
-	ict           collector.InstaclustrTarget
-	seedHost      string
-	usePrivate    bool
-	sslMode       string
-	databases     []string
+	ict             collector.InstaclustrTarget
+	seedHost        string
+	usePrivate      bool
+	sslMode         string
+	databases       []string
 }
 
 // resolveInstaclustrInstallInputs gathers everything the substrates share:
