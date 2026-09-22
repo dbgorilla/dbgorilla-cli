@@ -479,6 +479,54 @@ func UpgradeImage(stackName, region, image string) error {
 	return err
 }
 
+// ReadStackConfig returns the collector's current config from the stack's
+// CollectorConfig parameter, base64-decoded.
+func ReadStackConfig(stackName, region string) (string, error) {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx, region)
+	if err != nil {
+		return "", err
+	}
+	client := cloudformation.NewFromConfig(cfg)
+	encoded, err := stackParam(ctx, client, stackName, configParamKey)
+	if err != nil {
+		return "", err
+	}
+	return DecodeConfig(encoded)
+}
+
+// UpdateConfig pushes a new CollectorConfig to an existing stack, holding
+// every other parameter at its previous value. Used after a stable-egress
+// deploy to back-fill allow_networks once the egress address is known.
+func UpdateConfig(stackName, region, encodedConfig string) error {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx, region)
+	if err != nil {
+		return err
+	}
+	client := cloudformation.NewFromConfig(cfg)
+	declared, err := stackParamKeys(ctx, client, stackName)
+	if err != nil {
+		return err
+	}
+	params := make([]cfntypes.Parameter, 0, len(fargateParamKeys))
+	for _, k := range fargateParamKeys {
+		if !declared[k] {
+			continue
+		}
+		if k == configParamKey {
+			params = append(params, cfntypes.Parameter{ParameterKey: aws.String(k), ParameterValue: aws.String(encodedConfig)})
+		} else {
+			params = append(params, cfntypes.Parameter{ParameterKey: aws.String(k), UsePreviousValue: aws.Bool(true)})
+		}
+	}
+	err = updateStack(ctx, client, stackName, templateRef{UsePreviousTemplate: true}, params)
+	if errors.Is(err, errNoStackUpdates) {
+		return nil
+	}
+	return err
+}
+
 // TailLogs prints the collector's CloudWatch logs. follow polls for new events
 // until interrupted, mirroring `docker logs -f` for the local target.
 func TailLogs(logGroup, region string, follow bool) error {

@@ -322,6 +322,32 @@ func StrictParseConfig(s string) (Config, error) {
 	return c, nil
 }
 
+// PatchAllowNetworks updates the allow_networks field on every component that
+// already carries one (i.e. fast-fork is enabled) and re-renders the config.
+// Components without allow_networks are left alone. Returns ("", false, nil)
+// when no component had the field.
+func PatchAllowNetworks(configTOML string, cidr string) (string, bool, error) {
+	cfg, err := ParseConfig(configTOML)
+	if err != nil {
+		return "", false, err
+	}
+	patched := false
+	for i := range cfg.Component {
+		if len(cfg.Component[i].Provider.AllowNetworks) > 0 {
+			cfg.Component[i].Provider.AllowNetworks = []string{cidr}
+			patched = true
+		}
+	}
+	if !patched {
+		return "", false, nil
+	}
+	out, err := cfg.Render()
+	if err != nil {
+		return "", false, err
+	}
+	return out, true, nil
+}
+
 // DialHost reverses the container host rewrite for a HOST-side connection: a
 // config host of host.docker.internal (written so the in-container collector
 // can reach a DB on the host) maps back to localhost for this CLI process. Any
