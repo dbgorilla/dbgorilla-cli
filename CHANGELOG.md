@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.7.0
+
+### Added
+
+- `--fast-fork` and `--fast-fork-key` (or `INSTACLUSTR_FAST_FORK_KEY`): opt-in
+  fast-fork sandbox support for Instaclustr collectors. When enabled, the
+  collector carries a Provisioning API key (`IC_PROVISIONING_API_KEY`) and the
+  full fork command set (fork_preflight through fork_delete), delivered on
+  every deploy substrate (docker env-file; Fargate template v1.4's fifth
+  `NoEcho` parameter and Secrets Manager secret; GCE template v1.5's fifth
+  Secret Manager secret). The Fargate template's TaskRole also gains five
+  read-only AWS IAM actions (ec2:DescribeAddresses, ec2:DescribeVpcs,
+  fsx:DescribeFileSystems, fsx:DescribeVolumes,
+  servicequotas:GetServiceQuota) for the fork preflight check. Without
+  `--fast-fork`, the collector's output is byte-identical to v0.6.0.
+
 ## v0.6.0
 
 ### Added

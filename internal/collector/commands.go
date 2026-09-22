@@ -12,6 +12,24 @@ const (
 	CmdExplain      = "explain"       // EXPLAIN / EXPLAIN ANALYZE plans
 )
 
+// Fork commands the collector may run when the operator enables fast forks
+// (--fast-fork). These are provider commands (Instaclustr), not engine
+// commands, but the CLI writes an explicit per-component commands list and
+// the collector clamps to engine ∪ provider — so omitting them silently
+// drops fork capability.
+var ForkCommands = []string{
+	"fork_preflight",
+	"fork_snapshot_trigger",
+	"fork_create",
+	"fork_status",
+	"fork_list",
+	"fork_allowlist",
+	"fork_connection_info",
+	"fork_delete",
+	"fork_execute_query",
+	"fork_execute_statement",
+}
+
 // componentEngine is the collector engine for every AWS target — RDS and Aurora
 // are both Postgres to the collector.
 const componentEngine = "postgres"

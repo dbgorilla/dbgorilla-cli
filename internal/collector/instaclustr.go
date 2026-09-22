@@ -274,6 +274,15 @@ func PrometheusKeyRef(prometheusKey string) string {
 	return "${" + InstaclustrPromKeyEnv + "}"
 }
 
+// ProvisioningKeyRef converts a resolved Provisioning key into the env
+// reference the provider block carries, or empty when fast-fork is off.
+func ProvisioningKeyRef(provisioningKey string) string {
+	if provisioningKey == "" {
+		return ""
+	}
+	return "${" + InstaclustrProvisioningKeyEnv + "}"
+}
+
 // BuildInstaclustr assembles the full collector config for one Instaclustr
 // cluster. Kept separate from Build (the self-hosted docker path) so the two
 // evolve independently.

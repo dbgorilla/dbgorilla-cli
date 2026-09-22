@@ -239,10 +239,10 @@ func ClearSecrets(agentID string) {
 	}
 }
 
-// WriteInstaclustrEnvFile is WriteEnvFile plus the collector's read-only
-// Instaclustr API key (node discovery) and, when supplied, the dedicated
-// Prometheus key (platform-metrics scrape). Same file, same 0600 contract.
-func WriteInstaclustrEnvFile(path, secret, dbPassword, icReadOnlyKey, icPrometheusKey string) error {
+// WriteInstaclustrEnvFile is WriteEnvFile plus the collector's Instaclustr
+// keys: the read-only key (node discovery), and optionally the Prometheus key
+// (platform-metrics) and the Provisioning key (fast-fork operations).
+func WriteInstaclustrEnvFile(path, secret, dbPassword, icReadOnlyKey, icPrometheusKey, icProvisioningKey string) error {
 	pairs := [][2]string{
 		{SecretEnv, secret},
 		{DBPasswordEnv, dbPassword},
@@ -250,6 +250,9 @@ func WriteInstaclustrEnvFile(path, secret, dbPassword, icReadOnlyKey, icPromethe
 	}
 	if icPrometheusKey != "" {
 		pairs = append(pairs, [2]string{InstaclustrPromKeyEnv, icPrometheusKey})
+	}
+	if icProvisioningKey != "" {
+		pairs = append(pairs, [2]string{InstaclustrProvisioningKeyEnv, icProvisioningKey})
 	}
 	return writeEnvFile(path, pairs)
 }
