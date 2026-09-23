@@ -14,7 +14,7 @@ Description: >-
 # against collector.TemplateVersion by TestTemplateVersionMatches.
 Metadata:
   DBGorilla:
-    TemplateVersion: 'v1.3'
+    TemplateVersion: 'v1.4'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CollectorConfig — the collector's TOML config, base64-encoded.
@@ -169,6 +169,21 @@ Parameters:
       scrape, referenced by the config as ${IC_PROMETHEUS_API_KEY}. Leave
       empty otherwise.
 
+  # ── Fast-fork write credential (v1.4) ──
+  # The account-wide Instaclustr Provisioning key that enables the collector to
+  # create, allowlist and delete fork clusters. Opt-in: absent by default, and
+  # the collector advertises fork commands only when it is present. The key can
+  # create, resize, delete any cluster in the account and read database
+  # credentials — only ship it when fast forks are wanted.
+  InstaclustrProvisioningKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >-
+      Optional account-wide NetApp Instaclustr Provisioning API key for
+      fast-fork operations, referenced by the config as
+      ${IC_PROVISIONING_API_KEY}. Leave empty otherwise.
+
   # ── Networking (discovered from the database's VPC) ──
   Subnets:         { Type: List<AWS::EC2::Subnet::Id>, Description: Subnets that can reach the RDS instance }
   SecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id, Description: SG allowing egress to RDS + DBGorilla }
@@ -200,6 +215,7 @@ Conditions:
   IsPasswordAuth: !Not [!Equals [!Ref DbPassword, '']]
   HasInstaclustrKey: !Not [!Equals [!Ref InstaclustrApiKey, '']]
   HasInstaclustrPromKey: !Not [!Equals [!Ref InstaclustrPrometheusKey, '']]
+  HasInstaclustrProvisioningKey: !Not [!Equals [!Ref InstaclustrProvisioningKey, '']]
   UseStableEgress: !Equals [!Ref StableEgress, ENABLED]
 
 Resources:
@@ -250,6 +266,15 @@ Resources:
     Properties:
       Description: !Sub 'DBGorilla collector Instaclustr Prometheus API key for ${AWS::StackName}'
       SecretString: !Ref InstaclustrPrometheusKey
+
+  # Optional Provisioning key for fast-fork operations, injected as
+  # IC_PROVISIONING_API_KEY. Unnamed for the same reason as ServerSecretStore.
+  InstaclustrProvisioningKeyStore:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasInstaclustrProvisioningKey
+    Properties:
+      Description: !Sub 'DBGorilla collector Instaclustr Provisioning API key for ${AWS::StackName}'
+      SecretString: !Ref InstaclustrProvisioningKey
 
   # ── Stable egress: EIP + NAT + a private subnet the task runs in ──
   EgressEIP:
@@ -328,6 +353,7 @@ Resources:
                   - !If [IsPasswordAuth, !Ref ComponentPasswordStore, !Ref AWS::NoValue]
                   - !If [HasInstaclustrKey, !Ref InstaclustrKeyStore, !Ref AWS::NoValue]
                   - !If [HasInstaclustrPromKey, !Ref InstaclustrPromKeyStore, !Ref AWS::NoValue]
+                  - !If [HasInstaclustrProvisioningKey, !Ref InstaclustrProvisioningKeyStore, !Ref AWS::NoValue]
 
   # The collector's own runtime identity: IAM DB auth + RDS discovery, least privilege.
   TaskRole:
@@ -354,6 +380,16 @@ Resources:
                   - rds:DescribeDBClusters
                   - cloudwatch:GetMetricData
                   - cloudwatch:ListMetrics
+                Resource: '*'
+              # Fork preflight (v1.4) — read-only capacity checks the
+              # collector runs before creating a fork cluster.
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeVpcs
+                  - fsx:DescribeFileSystems
+                  - fsx:DescribeVolumes
+                  - servicequotas:GetServiceQuota
                 Resource: '*'
 
   Cluster:
@@ -409,6 +445,10 @@ Resources:
             - !If
               - HasInstaclustrPromKey
               - { Name: IC_PROMETHEUS_API_KEY, ValueFrom: !Ref InstaclustrPromKeyStore }
+              - !Ref AWS::NoValue
+            - !If
+              - HasInstaclustrProvisioningKey
+              - { Name: IC_PROVISIONING_API_KEY, ValueFrom: !Ref InstaclustrProvisioningKeyStore }
               - !Ref AWS::NoValue
           Environment:
             - { Name: DBG_CONFIG_B64, Value: !Ref CollectorConfig }

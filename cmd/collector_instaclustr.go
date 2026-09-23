@@ -36,6 +36,7 @@ const (
 	instaclustrProvisioningEnv = "INSTACLUSTR_PROVISIONING_API_KEY"
 	instaclustrReadOnlyEnv     = "INSTACLUSTR_READONLY_API_KEY"
 	instaclustrPrometheusEnv   = "INSTACLUSTR_PROMETHEUS_API_KEY"
+	instaclustrFastForkEnv     = "INSTACLUSTR_FAST_FORK_KEY"
 )
 
 // Test seams, one var per side effect (the aws seams' pattern).
@@ -67,6 +68,8 @@ func init() {
 	installCmd.Flags().String("vpc-id", "", "VPC for the stable-egress private subnet (required with --stable-egress on aws)")
 	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress subnet, e.g. 10.0.200.0/28 (aws and gcp)")
 	installCmd.Flags().String("region", "", "GCP: region for the collector instance (required with --provider instaclustr --target gcp; aws reads AWS_REGION)")
+	installCmd.Flags().Bool("fast-fork", false, "Enable fast-fork sandbox operations on this collector. Turns on the commands system with only fork commands in scope — engine commands (execute_query, explain) stay disabled. Requires a Provisioning API key via --fast-fork-key or "+instaclustrFastForkEnv)
+	installCmd.Flags().String("fast-fork-key", "", "Instaclustr Provisioning API key the collector keeps for fast-fork operations — an account-wide write key (or "+instaclustrFastForkEnv+")")
 
 	refreshFirewallCmd.Flags().String("instaclustr-user", "", "Instaclustr console username (or "+instaclustrUserEnv+")")
 	refreshFirewallCmd.Flags().String("instaclustr-api-key", "", "Instaclustr provisioning API key (or "+instaclustrProvisioningEnv+")")
@@ -223,7 +226,16 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, in.component(collector.DBPasswordEnv), endpointsFor(creds, cmd))
+	comp := in.component(collector.DBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		comp.Provider.AllowNetworks = []string{allowCIDR}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
+	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, comp, endpointsFor(creds, cmd))
+	if in.fastFork {
+		cfg.Commands.Enabled = true
+	}
 	rendered, err := cfg.Render()
 	if err != nil {
 		rollbackRule()
@@ -240,7 +252,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	}
 	return finishDockerInstall(cmd, in.client, creds, rendered, monitorPassword, caCert,
 		func(envPath string) error {
-			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey, in.prometheusKey)
+			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey, in.prometheusKey, in.provisioningKey)
 		},
 		state, rollbackRule,
 		"  dbg collector status              # check connection\n"+
@@ -261,12 +273,16 @@ type instaclustrInstall struct {
 	// skip): its presence changes the rendered config, and a preview must
 	// match the run it previews.
 	prometheusKey string
-	client        *api.Client
-	ict           collector.InstaclustrTarget
-	seedHost      string
-	usePrivate    bool
-	sslMode       string
-	databases     []string
+	// provisioningKey is the account-wide Provisioning API key the collector
+	// holds for fork lifecycle operations. Present only when --fast-fork is on.
+	provisioningKey string
+	fastFork        bool
+	client          *api.Client
+	ict             collector.InstaclustrTarget
+	seedHost        string
+	usePrivate      bool
+	sslMode         string
+	databases       []string
 	// privateSrc is the address the cluster sees this machine arrive from
 	// when setup runs over a private path (VPN, peering, bastion). Empty on
 	// the public path, where the operator's public egress address is used
@@ -361,6 +377,18 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 			"(pass --instaclustr-prometheus-key, or set " + instaclustrPrometheusEnv + ", to enable them)"))
 	}
 
+	fastFork, _ := cmd.Flags().GetBool("fast-fork")
+	provisioningKey := ""
+	if fastFork {
+		provisioningKey, err = instaclustrFlagOrEnvKey(cmd, "fast-fork-key", instaclustrFastForkEnv)
+		if err != nil {
+			return nil, err
+		}
+		if provisioningKey == "" {
+			return nil, fmt.Errorf("--fast-fork requires an Instaclustr Provisioning API key: pass --fast-fork-key or set %s", instaclustrFastForkEnv)
+		}
+	}
+
 	client, err := requireCollectorSupport(cmd, apiURL)
 	if err != nil {
 		return nil, err
@@ -445,17 +473,19 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 	}
 	dbNames, _ := cmd.Flags().GetString("db-name")
 	return &instaclustrInstall{
-		clusterID:     clusterID,
-		setupCreds:    setupCreds,
-		readOnlyKey:   readOnlyKey,
-		prometheusKey: prometheusKey,
-		client:        client,
-		ict:           ict,
-		seedHost:      seedHost,
-		usePrivate:    usePrivate,
-		sslMode:       sslMode,
-		databases:     splitCSV(dbNames),
-		privateSrc:    privateSrc,
+		clusterID:       clusterID,
+		setupCreds:      setupCreds,
+		readOnlyKey:     readOnlyKey,
+		prometheusKey:   prometheusKey,
+		provisioningKey: provisioningKey,
+		fastFork:        fastFork,
+		client:          client,
+		ict:             ict,
+		seedHost:        seedHost,
+		usePrivate:      usePrivate,
+		sslMode:         sslMode,
+		databases:       splitCSV(dbNames),
+		privateSrc:      privateSrc,
 	}, nil
 }
 
@@ -507,28 +537,29 @@ func setupMonitoringRole(ctx context.Context, in *instaclustrInstall, monitorPas
 // cloud deploy — the stable-egress address the deployment reserved (read via
 // deployedEgressIP, whose error names the substrate) or the operator-supplied
 // one — retires the operator's temporary rule unless it IS the collector's,
-// and records rule ownership so refresh-firewall can retire it later.
+// and records rule ownership so refresh-firewall can retire it later. Returns
+// the resolved CIDR so the caller can back-fill it into the collector config.
 func allowlistCollectorEgress(ctx context.Context, in *instaclustrInstall, stableEgress bool,
 	deployedEgressIP func() (string, error), allowRaw string,
-	opRule collector.FirewallRule, opCreated bool, removeOperatorRule func()) error {
+	opRule collector.FirewallRule, opCreated bool, removeOperatorRule func()) (string, error) {
 
 	source := allowRaw
 	if stableEgress {
 		var err error
 		if source, err = deployedEgressIP(); err != nil {
 			removeOperatorRule()
-			return err
+			return "", err
 		}
 	}
 	collectorCIDR, err := collector.AllowCIDR(source)
 	if err != nil {
 		removeOperatorRule()
-		return err
+		return "", err
 	}
 	rule, created, err := ensureFirewallRule(ctx, in.setupCreds, in.clusterID, collectorCIDR)
 	if err != nil {
 		removeOperatorRule()
-		return fmt.Errorf("the collector deployed but its firewall entry failed: %w\n\n"+
+		return "", fmt.Errorf("the collector deployed but its firewall entry failed: %w\n\n"+
 			"Add %s to the cluster's PostgreSQL allowlist, or re-run `dbg collector refresh-firewall`", err, collectorCIDR)
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Firewall: allowlisted %s for the collector", collectorCIDR)))
@@ -549,7 +580,7 @@ func allowlistCollectorEgress(ctx context.Context, in *instaclustrInstall, stabl
 			}
 		}
 	}
-	return nil
+	return collectorCIDR, nil
 }
 
 // dryRunInstaclustr previews the install with zero side effects: the only
@@ -573,9 +604,17 @@ func dryRunInstaclustr(cmd *cobra.Command, in *instaclustrInstall, allowCIDR str
 		"   # refused on a managed cluster; the install reports the narrowed role and continues")
 	fmt.Println()
 	comp := in.component(collector.DBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		comp.Provider.AllowNetworks = []string{allowCIDR}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
 	// Empty credentials: nothing is minted on a dry run, so the endpoints are
 	// whatever the --*-url flags say (or the collector's production defaults).
 	cfg := collector.BuildInstaclustr("<agent-id>", "<tenant-id>", comp, endpointsFor(&api.CollectorCredentials{}, cmd))
+	if in.fastFork {
+		cfg.Commands.Enabled = true
+	}
 	rendered, err := cfg.Render()
 	if err != nil {
 		return err
@@ -962,6 +1001,51 @@ func runRefreshFirewall(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
+
+	// Update allow_networks in the collector config so fork allowlisting
+	// uses the refreshed address. Only touches configs that already carry
+	// the field (fast-fork was enabled at install time).
+	switch {
+	case st.IsAWS():
+		if configTOML, rerr := collector.ReadStackConfig(st.StackName, st.Region); rerr == nil {
+			if patched, ok, perr := collector.PatchAllowNetworks(configTOML, allowCIDR); perr == nil && ok {
+				if encoded, eerr := collector.EncodeConfig(patched); eerr == nil {
+					if uerr := collector.UpdateConfig(st.StackName, st.Region, encoded); uerr != nil {
+						fmt.Println(style.Warn(fmt.Sprintf("⚠  firewall updated but config allow_networks could not be refreshed: %v", uerr)))
+					} else {
+						fmt.Println(style.Success("✓ Config allow_networks updated"))
+					}
+				}
+			}
+		}
+	case st.IsGCP():
+		// GCP deployments require the full input set for an update; reading
+		// it back from the revision is not wired yet. The firewall rule was
+		// updated, but allow_networks in the collector config may be stale.
+		// The collector still reaches forks through the updated rule; a
+		// re-install would refresh the config.
+	default:
+		if cp, perr := collector.ConfigPath(); perr == nil {
+			if cfg, lerr := collector.LoadConfig(cp); lerr == nil {
+				patched := false
+				for i := range cfg.Component {
+					if len(cfg.Component[i].Provider.AllowNetworks) > 0 {
+						cfg.Component[i].Provider.AllowNetworks = []string{allowCIDR}
+						patched = true
+					}
+				}
+				if patched {
+					if rendered, rerr := cfg.Render(); rerr == nil {
+						if werr := collector.WriteConfig(cp, rendered); werr != nil {
+							fmt.Println(style.Warn(fmt.Sprintf("⚠  firewall updated but config allow_networks could not be refreshed: %v", werr)))
+						} else {
+							fmt.Println(style.Success("✓ Config allow_networks updated — restart the collector for it to take effect"))
+						}
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -1090,6 +1174,17 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	// customer's own account names the VPC the collector belongs in, and that
 	// changes which flags are required and which are refused. Nothing here
 	// mutates anything.
+
+	// Validate --allow-ip up front rather than after the role and firewall work
+	// is already done, and keep the result for the component's allow_networks.
+	// Empty when the operator supplied none, which stable egress allows.
+	allowCIDR := ""
+	if allowRaw := mustString(cmd, "allow-ip"); allowRaw != "" {
+		var cerr error
+		if allowCIDR, cerr = collector.AllowCIDR(allowRaw); cerr != nil {
+			return cerr
+		}
+	}
 	in, err := resolveInstaclustrInstallInputs(cmd, apiURL, dryRun)
 	if err != nil {
 		return err
@@ -1128,19 +1223,29 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	comp := in.component(collector.CloudDBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		if allowCIDR != "" {
+			comp.Provider.AllowNetworks = []string{allowCIDR}
+		}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
 	input := collector.AwsStackInput{
 		Region:          region,
 		AccountID:       accountID,
+		Components:      []collector.Component{comp},
 		Subnets:         placement.subnets,
 		SecurityGroup:   placement.securityGroup,
 		AssignPublicIP:  placement.assignPublicIP,
-		CommandsEnabled: false,
+		CommandsEnabled: in.fastFork,
 		StableEgress:    placement.stableEgress,
 		VpcID:           placement.vpcID,
 		NatSubnetCidr:   placement.natSubnetCidr,
 		// Set here, not with the post-provision secrets: the dry run's
 		// secret-presence report must show the key the real run would ship.
-		InstaclustrPromKey: in.prometheusKey,
+		InstaclustrPromKey:         in.prometheusKey,
+		InstaclustrProvisioningKey: in.provisioningKey,
 	}
 
 	if dryRun {
@@ -1234,18 +1339,47 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	// security group, which a redeploy cannot invalidate; outside it, the entry
 	// has to name an address — the EIP the stack allocated under stable egress,
 	// or the one the operator supplied.
+	//
+	// egressCIDR is that address, and is deliberately empty on the VPC-resident
+	// path: a security group is not a CIDR, and the fork allowlist speaks only
+	// CIDRs, so a VPC-resident collector cannot pre-authorise itself on a fork
+	// yet. Teaching the fork allowlist to take a security group is the fix
+	// (furiousengineering/dbgorilla#7767); putting a subnet CIDR here instead
+	// would admit the whole subnet to every fork.
+	var egressCIDR string
 	if placement.vpcResident() {
 		if err := allowlistCollectorSecurityGroup(ctx, in, placement, opCreated, removeOperatorRule); err != nil {
 			return err
 		}
-	} else if err := allowlistCollectorEgress(ctx, in, placement.stableEgress, func() (string, error) {
-		eip, oerr := stackOutput(stackName, region, "EgressIP")
-		if oerr != nil {
-			return "", fmt.Errorf("the stack deployed but its EgressIP output could not be read: %w", oerr)
+	} else {
+		cidr, aerr := allowlistCollectorEgress(ctx, in, placement.stableEgress, func() (string, error) {
+			eip, oerr := stackOutput(stackName, region, "EgressIP")
+			if oerr != nil {
+				return "", fmt.Errorf("the stack deployed but its EgressIP output could not be read: %w", oerr)
+			}
+			return eip, nil
+		}, mustString(cmd, "allow-ip"), opRule, opCreated, removeOperatorRule)
+		if aerr != nil {
+			return aerr
 		}
-		return eip, nil
-	}, mustString(cmd, "allow-ip"), opRule, opCreated, removeOperatorRule); err != nil {
-		return err
+		egressCIDR = cidr
+	}
+
+	// Back-fill allow_networks: the stable-egress address was unknowable at
+	// initial render time. Now that the stack allocated it, re-render the
+	// config and push a parameter-only update so the collector can allowlist
+	// itself on fork clusters.
+	if in.fastFork && placement.stableEgress && egressCIDR != "" {
+		comp.Provider.AllowNetworks = []string{egressCIDR}
+		input.Components = []collector.Component{comp}
+		updatedParams, _, err := collector.AwsStackParams(input)
+		if err != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not re-render config with allow_networks: %v", err)))
+		} else if err := collector.UpdateConfig(stackName, region, updatedParams["CollectorConfig"]); err != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not update config with allow_networks: %v (run refresh-firewall after)", err)))
+		} else {
+			fmt.Println(style.Success("✓ Config updated with the collector's egress for fork allowlisting"))
+		}
 	}
 
 	fmt.Println()
@@ -1377,6 +1511,13 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 				subnetPath, lastPathSegmentOf(subnetPath), region)))
 		}
 	}
+	allowCIDR := ""
+	if allowRaw != "" {
+		var cerr error
+		if allowCIDR, cerr = collector.AllowCIDR(allowRaw); cerr != nil {
+			return cerr
+		}
+	}
 	if err := requireNoRuntime(dryRun,
 		func() (string, error) { return gcpDeploymentStatus(project, region, deploymentName) },
 		"deployment", deploymentName, "--deployment-name"); err != nil {
@@ -1393,13 +1534,21 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	comp := in.component(collector.CloudDBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		if allowCIDR != "" {
+			comp.Provider.AllowNetworks = []string{allowCIDR}
+		}
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
 	input := collector.GcpStackInput{
 		Network:         network,
 		Subnetwork:      subnetwork,
 		Region:          region,
 		DeploymentName:  deploymentName,
 		Project:         project,
-		CommandsEnabled: false,
+		CommandsEnabled: in.fastFork,
 		StableEgress:    stableEgress,
 		NatSubnetCidr:   natCidr,
 	}
@@ -1458,10 +1607,11 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	// template only grants access to them, so they never reach Infrastructure
 	// Manager (whose input values and state are readable by config.* roles).
 	if err := ensureGcpSecrets(project, deploymentName, collector.GcpSecretValues{
-		ServerSecret:   creds.Secret,
-		DBPassword:     monitorPassword,
-		InstaclustrKey: in.readOnlyKey,
-		PrometheusKey:  in.prometheusKey,
+		ServerSecret:    creds.Secret,
+		DBPassword:      monitorPassword,
+		InstaclustrKey:  in.readOnlyKey,
+		PrometheusKey:   in.prometheusKey,
+		ProvisioningKey: in.provisioningKey,
 	}); err != nil {
 		deleteGcpSecretsOrWarn(project, deploymentName)
 		deprovisionOrWarn(in.client, creds.AgentID)
@@ -1520,14 +1670,35 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 
 	// Allowlist the collector's actual egress: the static address the
 	// deployment reserved (stable egress) or the operator-supplied address.
-	if err := allowlistCollectorEgress(ctx, in, stableEgress, func() (string, error) {
+	egressCIDR, err := allowlistCollectorEgress(ctx, in, stableEgress, func() (string, error) {
 		eip, oerr := gcpDeploymentOutput(project, region, deploymentName, "egress_ip")
 		if oerr != nil {
 			return "", fmt.Errorf("the collector deployed but its egress_ip output could not be read: %w", oerr)
 		}
 		return eip, nil
-	}, allowRaw, opRule, opCreated, removeOperatorRule); err != nil {
+	}, allowRaw, opRule, opCreated, removeOperatorRule)
+	if err != nil {
 		return err
+	}
+
+	// Back-fill allow_networks: the stable-egress address was unknowable at
+	// initial render time. Now that the deployment allocated it, re-render
+	// the config and push an update so the collector can allowlist itself on
+	// fork clusters.
+	if in.fastFork && stableEgress && egressCIDR != "" {
+		comp.Provider.AllowNetworks = []string{egressCIDR}
+		input.Components = []collector.Component{comp}
+		updatedInputs, err := collector.GcpDeployInputs(input)
+		if err != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not re-render config with allow_networks: %v", err)))
+		} else {
+			deploy.Inputs = updatedInputs
+			if err := withSpinner("Updating config with egress address…", func() error { return runGcpDeploy(deploy) }); err != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not update config with allow_networks: %v (run refresh-firewall after)", err)))
+			} else {
+				fmt.Println(style.Success("✓ Config updated with the collector's egress for fork allowlisting"))
+			}
+		}
 	}
 
 	fmt.Println()

@@ -22,8 +22,7 @@ const (
 // contract changes; a published version is never rewritten. v1.3 removed the
 // secret inputs: the CLI writes them to Secret Manager itself. v1.4 added a
 // fourth secret, <name>-prometheus-api-key, to the boot script's fetch/export
-// set (the optional Instaclustr Prometheus key).
-const GcpTemplateVersion = "v1.4"
+const GcpTemplateVersion = "v1.5"
 
 const gcpTemplateProbeTimeout = 5 * time.Second
 

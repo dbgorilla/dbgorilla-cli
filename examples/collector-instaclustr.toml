@@ -30,6 +30,13 @@ api_key      = "${INSTACLUSTR_API_KEY}"
 # scrapes Instaclustr's per-node platform metrics; absent = database
 # telemetry only.
 #prometheus_api_key = "${IC_PROMETHEUS_API_KEY}"
+# Optional: the account-wide Provisioning key for fast-fork sandbox
+# operations (create, allowlist, delete forks). Opt-in via --fast-fork;
+# absent by default — the key can create/delete any cluster in the account.
+#provisioning_api_key = "${IC_PROVISIONING_API_KEY}"
+# CIDRs the collector should allowlist on a fork cluster's firewall, so the
+# collector can reach the fork. Written at install from the collector's egress.
+#allow_networks = ["203.0.113.10/32"]
 # Dial private node addresses instead of public ones (VPC-peered collectors).
 #use_private_addresses = true
 
