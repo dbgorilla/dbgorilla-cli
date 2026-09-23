@@ -60,7 +60,12 @@ const templateProbeTimeout = 5 * time.Second
 //
 // v1.2 corrects the install command in the template's own header comment;
 // no parameter contract change.
-const TemplateVersion = "v1.2"
+//
+// v1.3 adds the optional InstaclustrPrometheusKey secret parameter
+// (defaulting to the empty string, with its Secrets Manager secret and task
+// injection behind a condition); AwsStackParams omits the parameter when the
+// key is absent, so older self-hosted --template-url copies keep deploying.
+const TemplateVersion = "v1.3"
 
 // hostedTemplateURL is the published template this build deploys.
 var hostedTemplateURL = templateBaseURL + TemplateVersion + ".yaml"

@@ -3,7 +3,9 @@ package collector
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -18,8 +20,10 @@ const (
 
 // GcpTemplateVersion is the template's own version, bumped when its input
 // contract changes; a published version is never rewritten. v1.3 removed the
-// secret inputs: the CLI writes them to Secret Manager itself.
-const GcpTemplateVersion = "v1.3"
+// secret inputs: the CLI writes them to Secret Manager itself. v1.4 added a
+// fourth secret, <name>-prometheus-api-key, to the boot script's fetch/export
+// set (the optional Instaclustr Prometheus key).
+const GcpTemplateVersion = "v1.4"
 
 const gcpTemplateProbeTimeout = 5 * time.Second
 
@@ -27,7 +31,16 @@ const gcpTemplateProbeTimeout = 5 * time.Second
 // deploys.
 func HostedGcpTemplateSource() string { return gcpTemplateBase + GcpTemplateVersion }
 
-// probeGcpTemplate confirms the template is reachable before any mutation.
+// probeGcpTemplate confirms the template is reachable before any mutation,
+// and — when its main.tf carries the `# template-version:` marker every
+// published version does — that it declares the contract version this CLI
+// deploys. Without the check, a --template-source pinned to another version
+// fails only after everything is provisioned, or not visibly at all: the CLI
+// writes this version's secret set and renders a config referencing it, and
+// a boot script from another version fetches a different set (an older one
+// silently strands the Prometheus key; a newer one blocks the boot waiting
+// on a secret this CLI never wrote). A template without the marker (a fork
+// the operator owns) is deployed as given.
 func probeGcpTemplate(ctx context.Context, cfg gcpConfig, source string) error {
 	rest, ok := strings.CutPrefix(source, "gs://")
 	if !ok {
@@ -43,6 +56,27 @@ func probeGcpTemplate(ctx context.Context, cfg gcpConfig, source string) error {
 			"(check egress to storage.googleapis.com, or pass --template-source): %w",
 			probeURL, err)
 	}
-	_ = resp.Body.Close()
-	return nil
+	defer func() { _ = resp.Body.Close() }()
+	main, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		// Reachability is already proven; an unreadable body only forfeits
+		// the version check.
+		return nil
+	}
+	return checkGcpTemplateVersion(source, main)
+}
+
+var gcpTemplateVersionMarker = regexp.MustCompile(`(?m)^# template-version: (\S+)$`)
+
+// checkGcpTemplateVersion refuses a template that declares a contract version
+// other than the one this CLI speaks. Absent marker = no check.
+func checkGcpTemplateVersion(source string, mainTF []byte) error {
+	m := gcpTemplateVersionMarker.FindSubmatch(mainTF)
+	if m == nil || string(m[1]) == GcpTemplateVersion {
+		return nil
+	}
+	return fmt.Errorf("the template at %s declares template-version %s, but this CLI deploys the %s contract "+
+		"(the secrets it writes and the config it renders match %s only). "+
+		"Host a copy of the %s template there, or drop --template-source to deploy the published one",
+		source, m[1], GcpTemplateVersion, GcpTemplateVersion, GcpTemplateVersion)
 }

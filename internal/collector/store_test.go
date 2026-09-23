@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,6 +249,47 @@ func TestWriteEnvFile(t *testing.T) {
 	info, _ := os.Stat(path)
 	if perm := info.Mode().Perm(); perm != 0600 {
 		t.Errorf("env-file mode = %o, want 600", perm)
+	}
+}
+
+func TestWriteInstaclustrEnvFile_PrometheusKeyIsOptional(t *testing.T) {
+	// With the key: a fourth line under the collector's contract name.
+	path := filepath.Join(t.TempDir(), "collector.env")
+	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom-key"); err != nil {
+		t.Fatalf("WriteInstaclustrEnvFile: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	want := SecretEnv + "=s3cr3t\n" + DBPasswordEnv + "=pgpass\n" +
+		InstaclustrAPIKeyEnv + "=ro-key\n" + InstaclustrPromKeyEnv + "=prom-key\n"
+	if string(data) != want {
+		t.Errorf("env-file content = %q, want %q", data, want)
+	}
+
+	// Without it: the phase-1 three-line file, no empty-valued var that a
+	// config stanza could accidentally reference.
+	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", ""); err != nil {
+		t.Fatalf("WriteInstaclustrEnvFile: %v", err)
+	}
+	data, _ = os.ReadFile(path)
+	if strings.Contains(string(data), InstaclustrPromKeyEnv) {
+		t.Errorf("absent key must omit the line: %q", data)
+	}
+}
+
+func TestWriteEnvFile_RefusesLineBreaksInValues(t *testing.T) {
+	// The env-file is line-oriented and docker takes the LAST line for a
+	// repeated name, so a value carrying a line break could redefine an
+	// earlier variable. The writer is the last line of defense.
+	path := filepath.Join(t.TempDir(), "collector.env")
+	err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom\n"+InstaclustrAPIKeyEnv+"=evil")
+	if err == nil || !strings.Contains(err.Error(), "line break") {
+		t.Fatalf("a value with an embedded newline must be refused, got %v", err)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Fatalf("no env-file may exist after a refused write: %v", serr)
+	}
+	if err := WriteEnvFile(path, "s3cr3t", "pg\rpass"); err == nil {
+		t.Fatal("a carriage return must be refused too")
 	}
 }
 

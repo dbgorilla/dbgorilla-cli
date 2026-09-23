@@ -26,6 +26,30 @@ func TestGcpTemplateContract_VersionMatches(t *testing.T) {
 	}
 }
 
+// The probe refuses a --template-source whose main.tf declares another
+// contract version: the CLI writes this version's secret set and renders a
+// config referencing it, so a mismatched template fails only after
+// everything is provisioned — or not visibly at all (an older boot script
+// silently strands the Prometheus key). A fork without the marker is the
+// operator's own and deploys as given.
+func TestCheckGcpTemplateVersion(t *testing.T) {
+	if err := checkGcpTemplateVersion("gs://mine/gce/x", []byte("# template-version: "+GcpTemplateVersion+"\nresource {}")); err != nil {
+		t.Fatalf("the matching version must deploy: %v", err)
+	}
+	if err := checkGcpTemplateVersion("gs://mine/gce/x", []byte("# a fork without the marker")); err != nil {
+		t.Fatalf("a template without the marker must deploy as given: %v", err)
+	}
+	err := checkGcpTemplateVersion("gs://mine/gce/v1.3", []byte("# header\n# template-version: v1.3\n"))
+	if err == nil {
+		t.Fatal("a mismatched template version must be refused before anything is created")
+	}
+	for _, want := range []string{"v1.3", GcpTemplateVersion, "--template-source"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %q so the operator can act on it: %v", want, err)
+		}
+	}
+}
+
 func TestGcpTemplateContract_VariablesMatchInputKeys(t *testing.T) {
 	raw, err := os.ReadFile("terraform/collector-gce/variables.tf")
 	if err != nil {

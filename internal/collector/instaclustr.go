@@ -221,7 +221,11 @@ func GenerateInstaclustrPassword() (string, error) {
 // passwordEnv names the password variable of the deploy substrate: the docker
 // env-file uses COLLECTOR_DB_PASSWORD; the Fargate task definition names
 // DBG_DB_PASSWORD (fed from Secrets Manager).
-func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, databases []string, sslMode, caCert, apiUsername string, usePrivate bool, passwordEnv string) Component {
+// prometheusKeyRef is the provider block's prometheus_api_key value: the env
+// reference PrometheusKeyRef renders when the operator supplied the key, or
+// empty (the stanza is omitted from the rendered TOML) — the collector builds
+// the platform-metrics plane only when the config carries the reference.
+func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, databases []string, sslMode, caCert, apiUsername string, usePrivate bool, passwordEnv, prometheusKeyRef string) Component {
 	if sslMode == "" {
 		// `require` (encrypt, no verify): every Instaclustr node negotiates
 		// TLS, but its certificate chains to a per-cluster CA that is only
@@ -241,6 +245,7 @@ func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, d
 			Region:              t.Region,
 			APIUsername:         apiUsername,
 			APIKey:              "${" + InstaclustrAPIKeyEnv + "}",
+			PrometheusAPIKey:    prometheusKeyRef,
 			UsePrivateAddresses: usePrivate,
 		},
 		Auth: Auth{
@@ -256,6 +261,17 @@ func BuildInstaclustrComponent(t InstaclustrTarget, seedHost string, port int, d
 			CACert:    caCert,
 		},
 	}
+}
+
+// PrometheusKeyRef converts a resolved Prometheus key into the value
+// BuildInstaclustrComponent's prometheusKeyRef parameter wants: the env
+// reference when the operator supplied a key, empty otherwise. Only the
+// reference exists here — the raw key never enters a rendered config.
+func PrometheusKeyRef(prometheusKey string) string {
+	if prometheusKey == "" {
+		return ""
+	}
+	return "${" + InstaclustrPromKeyEnv + "}"
 }
 
 // BuildInstaclustr assembles the full collector config for one Instaclustr

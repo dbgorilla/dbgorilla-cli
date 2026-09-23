@@ -37,6 +37,11 @@ const (
 	// database password. The writable provisioning key never reaches either —
 	// the install uses it transiently and discards it.
 	InstaclustrAPIKeyEnv = "INSTACLUSTR_API_KEY"
+	// InstaclustrPromKeyEnv is the env reference for the dedicated low-privilege
+	// PROMETHEUS API key (the platform-metrics scrape). A third key kind:
+	// Instaclustr partitions key types, and the provisioning keys 401 on
+	// monitoring surfaces. The name matches the collector's contract.
+	InstaclustrPromKeyEnv = "IC_PROMETHEUS_API_KEY"
 
 	// DockerHostInternal is the hostname that resolves to the Docker host from
 	// inside a container (native on Docker Desktop; on Linux we add an
@@ -110,9 +115,13 @@ type Provider struct {
 	// APIKey is always an env reference (${INSTACLUSTR_API_KEY}) to a READ-ONLY
 	// provisioning key — discovery is one GET, and the writable key can read
 	// database passwords, so it never belongs in a collector's configuration.
-	CloudProvider       string `toml:"provider,omitempty"`
-	APIUsername         string `toml:"api_username,omitempty"`
-	APIKey              string `toml:"api_key,omitempty"`
+	CloudProvider string `toml:"provider,omitempty"`
+	APIUsername   string `toml:"api_username,omitempty"`
+	APIKey        string `toml:"api_key,omitempty"`
+	// PrometheusAPIKey is always an env reference (${IC_PROMETHEUS_API_KEY}) to
+	// the dedicated Prometheus key; present only when the operator supplied one
+	// (absent = platform-metrics plane off, database telemetry unaffected).
+	PrometheusAPIKey    string `toml:"prometheus_api_key,omitempty"`
 	UsePrivateAddresses bool   `toml:"use_private_addresses,omitempty"`
 }
 

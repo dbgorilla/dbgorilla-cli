@@ -999,17 +999,16 @@ func promptPasswordOptional(label string) string {
 	return strings.TrimSpace(v)
 }
 
-// awsSecretParams are the stack parameters a dry run must never print.
-var awsSecretParams = []string{"ServerSecret", "DbPassword", "InstaclustrApiKey"}
-
 // printAwsParams prints the stack's deploy parameters for a dry run, decoding
 // the config so it shows the TOML that would be deployed rather than an opaque
 // blob. Secrets never enter the printable params map (AwsStackParams keeps them
 // apart by construction); only their presence is shown, derived as a boolean so
-// no code path prints a credential.
+// no code path prints a credential. The list of secret parameters comes from
+// the same source AwsStackParams builds its map from, so a secret added there
+// can never be missing from this report.
 func printAwsParams(params, secrets map[string]string) {
 	printDeployParams(params, nil, "CollectorConfig")
-	printSecretPresence(awsSecretParams, secrets)
+	printSecretPresence(collector.AwsSecretParamKeys(), secrets)
 }
 
 func splitCSV(s string) []string {

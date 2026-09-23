@@ -25,6 +25,11 @@ provider     = "AWS_VPC"
 region       = "US_EAST_1"
 api_username = "you@example.com"
 api_key      = "${INSTACLUSTR_API_KEY}"
+# Optional: the dedicated low-privilege PROMETHEUS key (a third key kind —
+# provisioning keys 401 on monitoring surfaces). Present = the collector also
+# scrapes Instaclustr's per-node platform metrics; absent = database
+# telemetry only.
+#prometheus_api_key = "${IC_PROMETHEUS_API_KEY}"
 # Dial private node addresses instead of public ones (VPC-peered collectors).
 #use_private_addresses = true
 

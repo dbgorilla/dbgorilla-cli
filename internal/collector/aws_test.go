@@ -487,9 +487,22 @@ func TestAwsStackParams_CarriesDatabasesAsParameters(t *testing.T) {
 	}
 	// Every template parameter the CLI is responsible for must be present —
 	// in exactly one of the two maps (secrets stay out of the printable one).
+	// The exception is an OPTIONAL secret with no value: it must be omitted
+	// entirely, or CloudFormation would reject deploys against the older
+	// templates that do not declare it.
+	optional := map[string]bool{}
+	for _, p := range awsSecretParams {
+		optional[p.key] = p.optional
+	}
 	for _, k := range fargateParamKeys {
 		_, inParams := params[k]
 		_, inSecrets := secrets[k]
+		if optional[k] {
+			if inParams || inSecrets {
+				t.Errorf("optional secret %q must be omitted when its value is empty", k)
+			}
+			continue
+		}
 		if inParams == inSecrets {
 			t.Errorf("stack parameter %q: inParams=%v inSecrets=%v (want exactly one)", k, inParams, inSecrets)
 		}

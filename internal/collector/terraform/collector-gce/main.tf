@@ -2,7 +2,7 @@
 # instance group running the collector container on Container-Optimized OS,
 # deployed by Infrastructure Manager (or plain Terraform).
 #
-# template-version: v1.3
+# template-version: v1.4
 #
 # This file is published, never embedded in the CLI. Secret values never reach
 # it: the CLI writes them to Secret Manager before deploying (v1.2 passed them
@@ -14,9 +14,9 @@
 #
 # Naming contract with the CLI (a change is a version bump): every resource is
 # named by the local part of var.runtime_service_account, which the CLI sets to
-# the deployment name — including the three secrets the CLI creates before
+# the deployment name — including the four secrets the CLI creates before
 # deploying: <name>-server-secret, <name>-db-password,
-# <name>-instaclustr-api-key.
+# <name>-instaclustr-api-key, <name>-prometheus-api-key.
 #
 # The instance has no public IP. Image pulls and the collector's connection to
 # DBGorilla need egress from the VPC (Cloud NAT, or an equivalent route).
@@ -82,6 +82,7 @@ locals {
     "${local.name}-server-secret",
     "${local.name}-db-password",
     "${local.name}-instaclustr-api-key",
+    "${local.name}-prometheus-api-key",
   ]
 }
 
@@ -171,7 +172,8 @@ locals {
     DBG_SERVER_SECRET=$(retry 30 secret "${local.name}-server-secret")
     DBG_DB_PASSWORD=$(retry 30 secret "${local.name}-db-password")
     INSTACLUSTR_API_KEY=$(retry 30 secret "${local.name}-instaclustr-api-key")
-    export DBG_SERVER_SECRET DBG_DB_PASSWORD INSTACLUSTR_API_KEY
+    IC_PROMETHEUS_API_KEY=$(retry 30 secret "${local.name}-prometheus-api-key")
+    export DBG_SERVER_SECRET DBG_DB_PASSWORD INSTACLUSTR_API_KEY IC_PROMETHEUS_API_KEY
     mkdir -p /var/lib/dbgorilla
     retry 30 metadata instance/attributes/collector-config | base64 -d > /var/lib/dbgorilla/collector.toml
     docker run -d --name dbg-collector --restart=always --network=host \
@@ -179,6 +181,7 @@ locals {
       -e DBG_SERVER_SECRET \
       -e DBG_DB_PASSWORD \
       -e INSTACLUSTR_API_KEY \
+      -e IC_PROMETHEUS_API_KEY \
       "${var.collector_image}" --config-file /etc/dbgorilla/collector.toml
   EOT
 }

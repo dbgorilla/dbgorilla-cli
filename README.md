@@ -184,7 +184,9 @@ Two Instaclustr API keys with two fates (create both in the Instaclustr console 
 - a **provisioning key** does the setup from your machine — discovery, the firewall rule, the role — and is never stored;
 - a **read-only provisioning key** is the only one the collector keeps, for node discovery.
 
-Flags or env vars supply them: `--instaclustr-user`/`INSTACLUSTR_USERNAME`, `--instaclustr-api-key`/`INSTACLUSTR_PROVISIONING_API_KEY`, `--instaclustr-readonly-key`/`INSTACLUSTR_READONLY_API_KEY`. See [`examples/collector-instaclustr.toml`](examples/collector-instaclustr.toml) for the config the install renders.
+Flags or env vars supply them: `--instaclustr-user`/`INSTACLUSTR_USERNAME`, `--instaclustr-api-key`/`INSTACLUSTR_PROVISIONING_API_KEY`, `--instaclustr-readonly-key`/`INSTACLUSTR_READONLY_API_KEY`.
+
+An optional **third key** enables Instaclustr's platform host metrics (node CPU/memory/disk tiles and infra alarms): their dedicated low-privilege *Prometheus* key, via `--instaclustr-prometheus-key`/`INSTACLUSTR_PROMETHEUS_API_KEY`. It ships with the collector like the read-only key (`IC_PROMETHEUS_API_KEY` on every substrate). Key kinds are partitioned on their side — a provisioning key cannot scrape metrics — so this one really is separate. Omit it and platform metrics stay off; database telemetry is unaffected. See [`examples/collector-instaclustr.toml`](examples/collector-instaclustr.toml) for the config the install renders.
 
 The firewall allows *IP addresses*, so the collector host wants a stable public IP; when it changes anyway, `dbg collector refresh-firewall` re-allowlists the current one and retires the stale rule the CLI created (never one it didn't).
 ## Collector on Google Cloud
@@ -207,7 +209,7 @@ The template creates the collector's own service account, which under IAM databa
 
 ### The Terraform template
 
-The deployment is defined by the Terraform template in [`internal/collector/terraform/collector-gce/`](internal/collector/terraform/collector-gce/), which the CLI expects at `gs://dbgorilla-collector-templates/collector/gce/v1.3/`. It is versioned like the CloudFormation template: independently of the CLI, by its input-variable contract, and a published version is never rewritten. The CLI carries no copy of its own — it deploys the directory at that address, or one you host yourself via `--template-source gs://…` — and if the address cannot be reached the install stops before creating anything. Secrets never land in instance metadata or in the deployment inputs: the CLI writes them to Secret Manager itself, and the instance fetches them at boot with its own service account.
+The deployment is defined by the Terraform template in [`internal/collector/terraform/collector-gce/`](internal/collector/terraform/collector-gce/), which the CLI expects at `gs://dbgorilla-collector-templates/collector/gce/v1.4/`. It is versioned like the CloudFormation template: independently of the CLI, by its input-variable contract, and a published version is never rewritten. The CLI carries no copy of its own — it deploys the directory at that address, or one you host yourself via `--template-source gs://…` — and if the address cannot be reached the install stops before creating anything. Secrets never land in instance metadata or in the deployment inputs: the CLI writes them to Secret Manager itself, and the instance fetches them at boot with its own service account.
 
 Not yet available for the gcp target: changing the monitored databases in place, and `dbg collector upgrade`. Both are `dbg collector uninstall` followed by a fresh install for now.
 
