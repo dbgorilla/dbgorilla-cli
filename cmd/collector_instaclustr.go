@@ -1343,9 +1343,9 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	// egressCIDR is that address, and is deliberately empty on the VPC-resident
 	// path: a security group is not a CIDR, and the fork allowlist speaks only
 	// CIDRs, so a VPC-resident collector cannot pre-authorise itself on a fork
-	// yet. Teaching the fork allowlist to take a security group is the fix and
-	// is tracked separately; putting a subnet CIDR here instead would admit the
-	// whole subnet to every fork.
+	// yet. Teaching the fork allowlist to take a security group is the fix
+	// (furiousengineering/dbgorilla#7767); putting a subnet CIDR here instead
+	// would admit the whole subnet to every fork.
 	var egressCIDR string
 	if placement.vpcResident() {
 		if err := allowlistCollectorSecurityGroup(ctx, in, placement, opCreated, removeOperatorRule); err != nil {
