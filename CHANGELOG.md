@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.6.1
+
+### Fixed
+
+- `dbg collector install --provider instaclustr` now connects to the cluster's
+  primary to create the `dbgorilla_monitor` role. It previously used whichever
+  node the cluster API listed first; that API reports the same role for every
+  PostgreSQL node, so on a multi-node cluster the install failed about half the
+  time with `cannot execute CREATE ROLE in a read-only transaction`. The
+  primary is identified by `pg_is_in_recovery()`, as the collector already does
+  during discovery.
+
+- On a cluster created without public addresses, the temporary firewall rule
+  names the address the cluster sees this machine arrive from, rather than its
+  public egress address — which admitted the wrong host and still left setup
+  unable to connect.
+
+- The install no longer aborts when the cluster's default user cannot grant
+  `pg_read_all_data`. On a managed cluster that grant is refused outright —
+  PostgreSQL 16 and later require ADMIN OPTION on a role to grant it, and the
+  default user holds no membership in it — so the install used to fail at the
+  last statement of role setup, having already created a perfectly usable role.
+  It now warns and continues, and says what the narrowed role costs: metrics
+  are unaffected, because `pg_monitor` already carries the statistics views,
+  while schema and topology capture — and running a query or an EXPLAIN against
+  a table — need SELECT on the tables involved.
+
+- `dbg collector refresh-firewall` no longer breaks a collector that dials the
+  cluster's private addresses. It allowlisted this machine's public egress
+  address unconditionally and then retired the recorded rule as stale, which on
+  a private path deleted the entry the collector was connecting through. It now
+  resolves the same address the install did, and refuses to guess when a
+  collector known to be private cannot be resolved.
+
+### Added
+
+- The install reports where a cluster runs and how it is reachable: the
+  provider account it belongs to, its own VPC, its network blocks, and whether
+  it was created without public addresses. Account residency and address side
+  are independent — a cluster in your own cloud account still has public
+  addresses unless it was created private, and is dialled publicly from outside
+  its VPC. The VPC is read on AWS, GCP and Azure alike.
+
+- A cluster created without public addresses can only be set up from inside its
+  network, so the install checks the route first and says what would make it
+  work — the VPN, a peered VPC, or a bastion — instead of timing out. An
+  unrecognised route warns and continues, because a route out the same
+  interface is indistinguishable from no route at all.
+
 ## v0.6.0
 
 ### Added

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -36,7 +37,67 @@ type InstaclustrTarget struct {
 	// cluster-detail call. Used transiently to create the monitoring role;
 	// never persisted, never rendered into any config.
 	DefaultUserPassword string
-	Nodes               []InstaclustrNode
+	// ProviderAccountName names the cloud account the substrate runs in:
+	// literally "INSTACLUSTR" for Instaclustr's own accounts, the customer's
+	// provider account name when the account is linked. Read from the primary
+	// data centre.
+	ProviderAccountName string
+	// DataCentreID names the cluster's own AWS security group, which is
+	// "ic-<DataCentreID>-<suffix>". That group is where Instaclustr's firewall
+	// rules actually land, so it is what a static reachability check reads.
+	DataCentreID string
+	// VpcID is the cluster's own VPC. Reported only for a linked account, and
+	// only once provisioning has created it — empty while the cluster is in
+	// GENESIS, which is why it corroborates residency rather than deciding it.
+	VpcID string
+	// NetworkCIDRs are the primary data centre's network blocks, for
+	// reachability preflight and peering.
+	NetworkCIDRs []string
+	// PrivateNetworkCluster is true when the cluster was created without
+	// public addresses. This — not residency — is what forces private
+	// addressing, because there is no public address to dial.
+	PrivateNetworkCluster bool
+	Nodes                 []InstaclustrNode
+}
+
+// instaclustrOwnAccount is the provider account name the API reports for a
+// cluster running in Instaclustr's own cloud accounts.
+const instaclustrOwnAccount = "INSTACLUSTR"
+
+// LinkedAccount reports whether the substrate runs in the customer's own
+// cloud account (BYOC) rather than Instaclustr's.
+//
+// providerAccountName is the signal; the VPC id only corroborates it, and
+// stands in while a freshly created cluster has not reported an account name
+// yet. Residency says nothing about which addresses to dial: a linked-account
+// cluster keeps public addresses unless PrivateNetworkCluster says otherwise,
+// which is why the two are read as independent axes.
+func (t InstaclustrTarget) LinkedAccount() bool {
+	if t.ProviderAccountName != "" {
+		return !strings.EqualFold(t.ProviderAccountName, instaclustrOwnAccount)
+	}
+	return t.VpcID != ""
+}
+
+// AddressOn returns the address of whichever node carries host, on the
+// requested side.
+//
+// The operator resolves the primary over the side THIS machine can reach, which
+// for a public-address cluster is the public one — but a collector running
+// inside the cluster's VPC has to seed from that same node's private address,
+// or its first connection leaves the VPC and fails to match a security-group
+// allowlist. Empty when no node carries host, or carries no address on the
+// requested side.
+func (t InstaclustrTarget) AddressOn(host string, private bool) string {
+	if host == "" {
+		return ""
+	}
+	for _, n := range t.Nodes {
+		if n.PublicAddress == host || n.PrivateAddress == host {
+			return n.Host(private)
+		}
+	}
+	return ""
 }
 
 // InstaclustrNode is one addressable node.
@@ -55,6 +116,28 @@ func (n InstaclustrNode) Host(private bool) string {
 	return n.PublicAddress
 }
 
+// icNetworkSettings is a data centre's per-cloud settings block. AWS, GCP and
+// Azure each spell the cluster's own network the same way —
+// customVirtualNetworkId — populated once provisioning creates it and null
+// before that.
+type icNetworkSettings struct {
+	CustomVirtualNetworkID *string `json:"customVirtualNetworkId"`
+}
+
+// customVirtualNetworkID returns the first network id any of the per-cloud
+// settings blocks reports. At most one block is ever populated, so the order
+// of the arguments carries no preference.
+func customVirtualNetworkID(blocks ...[]icNetworkSettings) string {
+	for _, block := range blocks {
+		for _, s := range block {
+			if s.CustomVirtualNetworkID != nil && *s.CustomVirtualNetworkID != "" {
+				return *s.CustomVirtualNetworkID
+			}
+		}
+	}
+	return ""
+}
+
 // instaclustrClusterDetail mirrors the fields this CLI reads from
 // GET /cluster-management/v2/resources/applications/postgresql/clusters/v2/{id}.
 type instaclustrClusterDetail struct {
@@ -63,10 +146,33 @@ type instaclustrClusterDetail struct {
 	Status              string `json:"status"`
 	PostgresqlVersion   string `json:"postgresqlVersion"`
 	DefaultUserPassword string `json:"defaultUserPassword"`
-	DataCentres         []struct {
+	// PrivateNetworkCluster is a cluster-wide property, not a per-DC one.
+	PrivateNetworkCluster bool `json:"privateNetworkCluster"`
+	DataCentres           []struct {
+		// ID names the cluster's own AWS security group, which is
+		// "ic-<id>-<suffix>" — the enforcement point the firewall rules
+		// materialise into, and so what a reachability preflight has to read.
+		ID            string `json:"id"`
 		CloudProvider string `json:"cloudProvider"`
 		Region        string `json:"region"`
-		Nodes         []struct {
+		// ProviderAccountName is "INSTACLUSTR" on their own accounts and the
+		// customer's provider account name on a linked one.
+		ProviderAccountName *string `json:"providerAccountName"`
+		// One settings block per cloud, and the API sends at most one of them.
+		// All three are read, or the VPC would be silently empty on every
+		// cluster that is not on AWS.
+		AwsSettings   []icNetworkSettings `json:"awsSettings"`
+		GcpSettings   []icNetworkSettings `json:"gcpSettings"`
+		AzureSettings []icNetworkSettings `json:"azureSettings"`
+		Networks      []struct {
+			CIDR string `json:"cidr"`
+		} `json:"networks"`
+		// The primary flag lives under the replication block rather than on
+		// the data centre itself.
+		InterDataCentreReplication []struct {
+			IsPrimaryDataCentre bool `json:"isPrimaryDataCentre"`
+		} `json:"interDataCentreReplication"`
+		Nodes []struct {
 			ID             string  `json:"id"`
 			PublicAddress  *string `json:"publicAddress"`
 			PrivateAddress *string `json:"privateAddress"`
@@ -85,17 +191,67 @@ func DiscoverInstaclustrCluster(ctx context.Context, creds InstaclustrCreds, clu
 		return InstaclustrTarget{}, err
 	}
 	t := InstaclustrTarget{
-		ClusterID:           detail.ID,
-		Name:                detail.Name,
-		Status:              detail.Status,
-		PostgresVersion:     detail.PostgresqlVersion,
-		DefaultUserPassword: detail.DefaultUserPassword,
+		ClusterID:             detail.ID,
+		Name:                  detail.Name,
+		Status:                detail.Status,
+		PostgresVersion:       detail.PostgresqlVersion,
+		DefaultUserPassword:   detail.DefaultUserPassword,
+		PrivateNetworkCluster: detail.PrivateNetworkCluster,
 	}
-	for _, dc := range detail.DataCentres {
-		if t.CloudProvider == "" {
-			t.CloudProvider = dc.CloudProvider
-			t.Region = dc.Region
+	// Cloud, region, residency and networking all describe the PRIMARY data
+	// centre: on a multi-region cluster the others hold no writer, and the
+	// provider crate reads them the same way. A single-DC cluster may flag no
+	// DC at all, so the first one stands in.
+	if len(detail.DataCentres) > 0 {
+		// FIRST flagged data centre wins. A cluster should flag exactly one, but
+		// without the break a second flag would silently decide the cluster's
+		// cloud, region and network blocks.
+		primary := 0
+	flagged:
+		for i, dc := range detail.DataCentres {
+			for _, r := range dc.InterDataCentreReplication {
+				if r.IsPrimaryDataCentre {
+					primary = i
+					break flagged
+				}
+			}
 		}
+		dc := detail.DataCentres[primary]
+		t.DataCentreID = dc.ID
+		t.CloudProvider = dc.CloudProvider
+		t.Region = dc.Region
+		if dc.ProviderAccountName != nil {
+			t.ProviderAccountName = *dc.ProviderAccountName
+		}
+		// A data centre still being provisioned can report an empty cloud and
+		// region; a sibling that has them is better than rendering a collector
+		// config with neither.
+		//
+		// Only a sibling that actually reports a cloud is worth copying, and its
+		// region is taken only to fill a gap: the primary's own region, when it
+		// has one, is the accurate answer and a sibling must never overwrite it.
+		// Copying unconditionally erased a region the API had already given us.
+		for _, other := range detail.DataCentres {
+			if t.CloudProvider != "" {
+				break
+			}
+			if other.CloudProvider == "" {
+				continue
+			}
+			t.CloudProvider = other.CloudProvider
+			if t.Region == "" {
+				t.Region = other.Region
+			}
+		}
+		t.VpcID = customVirtualNetworkID(dc.AwsSettings, dc.GcpSettings, dc.AzureSettings)
+		for _, n := range dc.Networks {
+			if n.CIDR != "" {
+				t.NetworkCIDRs = append(t.NetworkCIDRs, n.CIDR)
+			}
+		}
+	}
+	// Nodes are flattened across every data centre, primary or not.
+	for _, dc := range detail.DataCentres {
 		for _, n := range dc.Nodes {
 			if n.DeletionTime != nil && *n.DeletionTime != "" {
 				continue
@@ -135,10 +291,10 @@ func DiscoverInstaclustrCluster(ctx context.Context, creds InstaclustrCreds, clu
 //
 // Error messages never include statement text: the CREATE/ALTER statements
 // carry the live password, and these errors reach terminals and CI logs.
-func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) error {
+func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) (warnings []string, err error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return fmt.Errorf("%w to create the monitoring role: %w", errClusterUnreachable, err)
+		return nil, fmt.Errorf("%w to create the monitoring role: %w", errClusterUnreachable, err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
 	// The role name is quoted as an identifier: every caller passes the
@@ -147,24 +303,66 @@ func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) erro
 	quoted := strings.ReplaceAll(password, "'", "''")
 	if _, err := conn.Exec(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", role, quoted)); err != nil {
 		if !isBenignGrantErr(err) {
-			return fmt.Errorf("creating role %s failed: %w", user, redactPassword(err, quoted, password))
+			return nil, fmt.Errorf("creating role %s failed: %w", user, redactPassword(err, quoted, password))
 		}
 		if _, aerr := conn.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", role, quoted)); aerr != nil {
-			return fmt.Errorf("updating role %s's password failed: %w", user, redactPassword(aerr, quoted, password))
+			return nil, fmt.Errorf("updating role %s's password failed: %w", user, redactPassword(aerr, quoted, password))
 		}
 	}
 	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_monitor TO %s", role)); err != nil && !isBenignGrantErr(err) {
-		return fmt.Errorf("granting pg_monitor to %s failed: %w", user, err)
+		return nil, fmt.Errorf("granting pg_monitor to %s failed: %w", user, err)
 	}
 	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_read_all_data TO %s", role)); err != nil && !isBenignGrantErr(err) {
-		// 42704 undefined_object: the role does not exist before PG 14 — the
-		// monitor grant above still stands, so degrade rather than fail.
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "42704" {
-			return fmt.Errorf("granting pg_read_all_data to %s failed: %w", user, err)
+		warning, fatal := classifyReadAllDataGrant(err, user)
+		if fatal {
+			return warnings, fmt.Errorf("granting pg_read_all_data to %s failed: %w", user, err)
 		}
+		warnings = append(warnings, warning)
 	}
-	return nil
+	return warnings, nil
+}
+
+// classifyReadAllDataGrant decides whether a refused pg_read_all_data grant
+// ends the install or merely narrows the role, and says what was lost.
+//
+// Two refusals are legitimate, and neither is a reason to abandon a role that
+// is otherwise ready:
+//
+//	42704 undefined_object       the role predates PostgreSQL 14.
+//	42501 insufficient_privilege PG 16+ requires ADMIN OPTION on a role to
+//	                             grant it, and Instaclustr's default user holds
+//	                             no membership in pg_read_all_data at all. No
+//	                             install can clear that, so failing would block
+//	                             every install rather than report a reduced one.
+//
+// Anything else is a real failure.
+//
+// What the warning must NOT claim is that monitoring is degraded: pg_monitor
+// already carries the statistics views, so metrics are unaffected, and naming
+// the wrong casualty would send an operator looking for a monitoring fault that
+// isn't there. Nor may it claim that everything ELSE is unaffected. The grant
+// buys SELECT on user tables, and preflight's CheckTopologyGrants reports the
+// pg_dump topology scrape failing without exactly that — so the warning names
+// the loss rather than ruling it out, and on the docker path the preflight
+// below measures how many tables it actually costs.
+func classifyReadAllDataGrant(err error, user string) (warning string, fatal bool) {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return "", true
+	}
+	const consequence = "Metrics are unaffected — pg_monitor already carries the statistics views. What the " +
+		"grant buys is SELECT on user tables, so schema and topology capture, and running a query or an " +
+		"EXPLAIN against a table, are what the narrowed role gives up until SELECT is granted directly."
+	switch pgErr.Code {
+	case "42704":
+		return fmt.Sprintf("this server predates the pg_read_all_data role (PostgreSQL 14 introduced it), so %s "+
+			"can read statistics but not table contents. %s", user, consequence), false
+	case "42501":
+		return fmt.Sprintf("the cluster's default user cannot grant pg_read_all_data, so %s can read statistics "+
+			"but not table contents. %s", user, consequence), false
+	default:
+		return "", true
+	}
 }
 
 // redactPassword scrubs the role password (raw and SQL-quoted forms) from an
@@ -191,9 +389,13 @@ var errClusterUnreachable = errors.New("cannot connect to the cluster")
 // timeout or refusal. SQL-level failures are deterministic; retrying them
 // just multiplies the wait before the user sees the real error.
 func RetriableRoleError(err error) bool {
-	if !errors.Is(err, errClusterUnreachable) {
-		return false
-	}
+	return errors.Is(err, errClusterUnreachable) && retriableConnError(err)
+}
+
+// retriableConnError recognizes the shapes a blocked-by-firewall dial takes.
+// Shared by the role step and the primary probe, which face the same latency
+// for the same reason.
+func retriableConnError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out") ||
 		strings.Contains(msg, "connection refused") || strings.Contains(msg, "i/o") ||
@@ -295,6 +497,17 @@ func BuildInstaclustr(agentID, tenantID string, comp Component, eps Endpoints) C
 
 // InstaclustrAdminDSN is the connection string for the transient
 // role-creation step: the cluster's default user against one node.
+// sslrootcert is pinned empty on purpose. pgx follows libpq: when
+// ~/.postgresql/root.crt exists it defaults sslrootcert to that file, and a
+// non-empty sslrootcert silently promotes sslmode=require to verify-ca. The
+// promoted verification then fails against Instaclustr's per-cluster CA, which
+// that bundle does not sign — so an operator who has ever configured a Postgres
+// client CA sees the install die on "x509: certificate signed by unknown
+// authority" from a connection that never asked to verify anything. Setting the
+// parameter explicitly beats the default, because the connection string is
+// merged last. This connection is a transient setup probe, not the collector's
+// own link.
+//
 // sslmode=require always works — Instaclustr nodes negotiate TLS even on
 // clusters provisioned without client-to-cluster encryption; connect_timeout
 // keeps a firewalled node from hanging the install.
@@ -304,7 +517,7 @@ func InstaclustrAdminDSN(host string, port int, password string) string {
 		User:     url.UserPassword("icpostgresql", password),
 		Host:     fmt.Sprintf("%s:%d", host, port),
 		Path:     "/postgres",
-		RawQuery: "sslmode=require&connect_timeout=8",
+		RawQuery: "sslmode=require&sslrootcert=&connect_timeout=8",
 	}
 	return u.String()
 }
@@ -318,9 +531,163 @@ func InstaclustrAdminDSNAs(user, password, host string, port int) string {
 		User:     url.UserPassword(user, password),
 		Host:     fmt.Sprintf("%s:%d", host, port),
 		Path:     "/postgres",
-		RawQuery: "sslmode=require&connect_timeout=8",
+		RawQuery: "sslmode=require&sslrootcert=&connect_timeout=8",
 	}
 	return u.String()
+}
+
+// PrimaryHost picks the cluster's primary out of candidate addresses by
+// asking each one pg_is_in_recovery().
+//
+// The cluster API cannot answer this: every PostgreSQL node reports the same
+// nodeRoles, and the listing order carries no meaning, so the first node is a
+// standby about as often as not. Setup only works against the primary —
+// CREATE ROLE and ALTER ROLE both fail on a standby with SQLSTATE 25006 — so
+// the address is settled by protocol, exactly as the collector settles node
+// roles during discovery.
+//
+// A lone candidate is returned unprobed: a single-node cluster is its own
+// primary, and probing would only add a round trip to the common case.
+// Multi-region clusters need no data-centre preference either, because only
+// the primary data centre holds a writer; the probe finds it wherever it is.
+func PrimaryHost(ctx context.Context, hosts []string, port int, password string) (string, error) {
+	switch len(hosts) {
+	case 0:
+		return "", errors.New("no addressable node to probe for the cluster primary")
+	case 1:
+		return hosts[0], nil
+	}
+	attempts := make([]string, 0, len(hosts))
+	unreachable := false
+	for _, h := range hosts {
+		inRecovery, err := hostInRecovery(ctx, h, port, password)
+		if err != nil {
+			attempts = append(attempts, fmt.Sprintf("%s: %v", h, err))
+			unreachable = unreachable || retriableConnError(err)
+			continue
+		}
+		if !inRecovery {
+			return h, nil
+		}
+		attempts = append(attempts, h+": standby")
+	}
+	return "", &primaryProbeError{
+		msg: fmt.Sprintf("no node answered as the cluster primary — %s. "+
+			"The cluster API reports the same role for every node, so the primary is "+
+			"identified by pg_is_in_recovery(); a cluster mid-failover briefly has none, "+
+			"and re-running is safe", strings.Join(attempts, "; ")),
+		unreachable: unreachable,
+	}
+}
+
+// primaryProbeError carries the aggregate "no primary" failure along with
+// whether any candidate was unreachable, so a caller can retry propagation
+// delay without retrying an answer that is already final.
+type primaryProbeError struct {
+	msg         string
+	unreachable bool
+}
+
+func (e *primaryProbeError) Error() string { return e.msg }
+
+// RetriableProbeError reports whether a PrimaryHost failure is worth another
+// attempt. Only an unreachable node is: a firewall rule created seconds ago
+// may not pass packets yet, and until it does every node looks unreachable
+// rather than simply unelected. A cluster that answered on every node and
+// elected none has given a complete answer — retrying it dials every node
+// again, at connect_timeout each, before showing an error that was already
+// final.
+func RetriableProbeError(err error) bool {
+	var pe *primaryProbeError
+	return errors.As(err, &pe) && pe.unreachable
+}
+
+// localSourceFor returns the local address the OS would send from to reach
+// addr. A UDP "connection" only performs the route lookup — no packet leaves
+// the machine — which makes it a cheap way to ask the routing table a
+// question Go's standard library otherwise cannot. A package-level var so
+// tests can answer for a machine they are not running on.
+var localSourceFor = func(addr string) (net.IP, error) {
+	c, err := net.Dial("udp", net.JoinHostPort(addr, "53"))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = c.Close() }()
+	ua, ok := c.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil, errors.New("could not read the local address for the route")
+	}
+	return ua.IP, nil
+}
+
+// PrivatePathToCluster reports what this machine would use to reach the
+// cluster's own network, and whether that route is recognisably a private one.
+//
+// A private-network cluster has no public address, so the install only works
+// from inside the network: on the VPN, in a peered VPC, or on a bastion. Two
+// signals recognise that without sending a packet — this machine already
+// holding an address inside the cluster's CIDR, or traffic to that CIDR
+// leaving from a different source address than traffic to the open internet.
+//
+// Neither signal is conclusive the other way. A more specific route out the
+// SAME interface — an on-prem VPN appliance, a LAN gateway onto a peered
+// network — reaches the cluster without changing the source address, and Go
+// cannot read the routing table portably to tell that apart from having no
+// route at all. So a false result means "not recognised", never "unreachable",
+// and callers should warn rather than refuse and let the connection itself
+// settle it.
+//
+// The returned address is the source the OS picked for the cluster network
+// whenever a lookup succeeded, recognised or not. On a private-network cluster
+// that is the address the cluster sees, which makes it the right thing to
+// allowlist — the machine's public egress address would be the wrong host.
+func PrivatePathToCluster(cidrs []string) (net.IP, string, bool) {
+	defaultSrc, defaultErr := localSourceFor("1.1.1.1")
+	var routed net.IP
+	for _, c := range cidrs {
+		_, network, err := net.ParseCIDR(c)
+		if err != nil {
+			continue
+		}
+		// Probe a host inside the block. Setting the low bit lands on the
+		// first host for any prefix that has one, and never walks outside the
+		// network the way an increment would on a block ending in .255; a
+		// host route (/32) is already the address to probe.
+		probe := append(net.IP(nil), network.IP...)
+		if ones, bits := network.Mask.Size(); ones < bits {
+			probe[len(probe)-1] |= 1
+		}
+		src, err := localSourceFor(probe.String())
+		if err != nil {
+			continue
+		}
+		if routed == nil {
+			routed = src
+		}
+		if network.Contains(src) {
+			return src, fmt.Sprintf("this machine holds %s inside the cluster network %s", src, c), true
+		}
+		if defaultErr == nil && !src.Equal(defaultSrc) {
+			return src, fmt.Sprintf("traffic to %s leaves from %s rather than the default route's %s", c, src, defaultSrc), true
+		}
+	}
+	return routed, "", false
+}
+
+// hostInRecovery answers pg_is_in_recovery() for one node. A standby says
+// true; the primary says false. A package-level var so tests can settle roles
+// without a live cluster, the same seam as instaclustrClient.
+var hostInRecovery = func(ctx context.Context, host string, port int, password string) (bool, error) {
+	conn, err := pgx.Connect(ctx, InstaclustrAdminDSN(host, port, password))
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var inRecovery bool
+	if err := conn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {
+		return false, err
+	}
+	return inRecovery, nil
 }
 
 // AllowCIDR normalizes a user-supplied allow address into the single-host

@@ -71,9 +71,39 @@ type State struct {
 	// operates on; FirewallRuleID is the rule the install created for the
 	// collector's egress IP (empty when the rule pre-existed, so uninstall
 	// never removes an allowlist entry it does not own).
-	InstaclustrClusterID string `json:"instaclustr_cluster_id,omitempty"`
-	InstaclustrUsername  string `json:"instaclustr_username,omitempty"`
-	FirewallRuleID       string `json:"firewall_rule_id,omitempty"`
+	//
+	// UsePrivate records that the install dialled the cluster's private
+	// addresses, so refresh-firewall allowlists this machine's address on the
+	// cluster's network instead of its public egress address — which would
+	// admit the wrong host and then retire the rule the collector is actually
+	// connecting through. A private-network cluster is re-derived from
+	// discovery, so this field only has to carry the case where
+	// --use-private-addresses chose the private side on a public cluster.
+	InstaclustrClusterID  string `json:"instaclustr_cluster_id,omitempty"`
+	InstaclustrUsername   string `json:"instaclustr_username,omitempty"`
+	InstaclustrUsePrivate bool   `json:"instaclustr_use_private,omitempty"`
+	FirewallRuleID        string `json:"firewall_rule_id,omitempty"`
+
+	// A VPC-resident collector is allowlisted by security group instead of by
+	// address, so there is nothing to re-detect when it redeploys.
+	// CollectorSecurityGroupID selects that mode; SecurityGroupRuleID is the
+	// rule the install created, empty when the rule pre-existed so uninstall
+	// never retires an entry it does not own.
+	CollectorSecurityGroupID string `json:"collector_security_group_id,omitempty"`
+	SecurityGroupRuleID      string `json:"security_group_rule_id,omitempty"`
+	// CollectorSecurityGroupCreated records that the install made the group,
+	// so uninstall removes only a group this CLI is responsible for.
+	CollectorSecurityGroupCreated bool `json:"collector_security_group_created,omitempty"`
+	// CollectorSubnetCIDRs is the fallback: the networks a VPC-resident
+	// collector was allowlisted by when the security-group rule could not be
+	// used. It selects that mode the way CollectorSecurityGroupID selects the
+	// other, so refresh-firewall re-asserts these networks rather than
+	// detecting an address — the task's address is inside the VPC and means
+	// nothing to the address-detection path.
+	CollectorSubnetCIDRs []string `json:"collector_subnet_cidrs,omitempty"`
+	// CollectorFirewallRuleIDs are the rules the install created for those
+	// networks, empty for any that already existed.
+	CollectorFirewallRuleIDs []string `json:"collector_firewall_rule_ids,omitempty"`
 
 	// gcp target (Region above is shared with aws).
 	Project        string `json:"project,omitempty"`
