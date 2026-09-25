@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ func endpointFlagCmd() *cobra.Command {
 	c.Flags().String("keycloak-url", "", "")
 	c.Flags().String("otlp-url", "", "")
 	c.Flags().String("opamp-url", "", "")
+	c.Flags().String("api-url", "", "")
 	return c
 }
 
@@ -90,6 +92,69 @@ func TestEndpointsFor(t *testing.T) {
 		e := endpointsFor(creds, endpointFlagCmd())
 		if e.OtlpBaseURL != "https://otlp.internal:443" {
 			t.Errorf("otlp = %q", e.OtlpBaseURL)
+		}
+	})
+}
+
+// An endpoint the deployment does not advertise falls back to the collector's built-in default,
+// which is the PRODUCTION control plane. Against a dev or PR deployment that is almost never what
+// the operator wants, and the failure it produces — a 401 from a host they never named — says
+// nothing about the cause. The install has to say so out loud.
+func TestWarnIfFallingBackToProd(t *testing.T) {
+	capture := func(fn func()) string {
+		orig := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		fn()
+		_ = w.Close()
+		os.Stdout = orig
+		out, _ := io.ReadAll(r)
+		return string(out)
+	}
+
+	t.Run("warns for a non-production api-url with nothing advertised", func(t *testing.T) {
+		c := endpointFlagCmd()
+		_ = c.Flags().Set("api-url", "https://pr-dbgorilla-7765.internal.dbgorilla.com")
+		out := capture(func() { endpointsFor(&api.CollectorCredentials{}, c) })
+		if !strings.Contains(out, "PRODUCTION") || !strings.Contains(out, "--opamp-url") {
+			t.Errorf("expected a production-fallback warning naming the flag, got %q", out)
+		}
+	})
+
+	t.Run("silent when the deployment advertises its own endpoints", func(t *testing.T) {
+		c := endpointFlagCmd()
+		_ = c.Flags().Set("api-url", "https://pr-dbgorilla-7765.internal.dbgorilla.com")
+		creds := &api.CollectorCredentials{
+			OtlpBaseURL:  "https://otlp.internal:4317",
+			OpampBaseURL: "wss://opamp.internal/v1/opamp",
+		}
+		if out := capture(func() { endpointsFor(creds, c) }); strings.Contains(out, "PRODUCTION") {
+			t.Errorf("warned despite advertised endpoints: %q", out)
+		}
+	})
+
+	// A substring test on the URL would call this production and withhold the warning, which is
+	// the one outcome the warning exists to prevent.
+	t.Run("a host that merely mentions the production domain still warns", func(t *testing.T) {
+		for _, u := range []string{
+			"https://evil.example/?ref=dbgorilla.com",
+			"https://dbgorilla.com.evil.example",
+			"not a url at all",
+		} {
+			c := endpointFlagCmd()
+			_ = c.Flags().Set("api-url", u)
+			out := capture(func() { endpointsFor(&api.CollectorCredentials{}, c) })
+			if !strings.Contains(out, "PRODUCTION") {
+				t.Errorf("%s: expected a warning, got %q", u, out)
+			}
+		}
+	})
+
+	t.Run("silent for production, where the defaults are correct", func(t *testing.T) {
+		c := endpointFlagCmd()
+		_ = c.Flags().Set("api-url", "https://app.dbgorilla.com")
+		if out := capture(func() { endpointsFor(&api.CollectorCredentials{}, c) }); strings.Contains(out, "PRODUCTION") {
+			t.Errorf("warned about production while installing against production: %q", out)
 		}
 	})
 }
