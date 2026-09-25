@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
+	"github.com/dbgorilla/dbgorilla-cli/internal/config"
 	"github.com/dbgorilla/dbgorilla-cli/internal/preflight"
 	"github.com/dbgorilla/dbgorilla-cli/internal/style"
 	"github.com/spf13/cobra"
@@ -1863,8 +1864,17 @@ func endpointsFor(creds *api.CollectorCredentials, cmd *cobra.Command) collector
 // "opamp authorization rejected" while pointed at wss://otlp.dbgorilla.com.
 func warnIfFallingBackToProd(e collector.Endpoints, cmd *cobra.Command) {
 	apiURL, _ := cmd.Flags().GetString("api-url")
-	if apiURL == "" || strings.Contains(apiURL, "dbgorilla.com") && !strings.Contains(apiURL, ".internal.") {
-		return // production, or unset and therefore production by default
+	if apiURL == "" {
+		return // unset, and therefore the production deployment by default
+	}
+	// Compare the parsed HOST against production's, not the string against a substring: a
+	// substring test calls "https://evil.example/?ref=dbgorilla.com" production and silently
+	// withholds the warning, which is the one outcome this must not produce. Anything that does
+	// not parse, or does not match, is treated as not-production and warns.
+	prod, perr := url.Parse(config.DefaultAPIURL)
+	got, gerr := url.Parse(apiURL)
+	if perr == nil && gerr == nil && got.Hostname() == prod.Hostname() {
+		return
 	}
 	var missing []string
 	if e.OpampBaseURL == "" {

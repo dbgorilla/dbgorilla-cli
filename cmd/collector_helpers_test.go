@@ -133,6 +133,23 @@ func TestWarnIfFallingBackToProd(t *testing.T) {
 		}
 	})
 
+	// A substring test on the URL would call this production and withhold the warning, which is
+	// the one outcome the warning exists to prevent.
+	t.Run("a host that merely mentions the production domain still warns", func(t *testing.T) {
+		for _, u := range []string{
+			"https://evil.example/?ref=dbgorilla.com",
+			"https://dbgorilla.com.evil.example",
+			"not a url at all",
+		} {
+			c := endpointFlagCmd()
+			_ = c.Flags().Set("api-url", u)
+			out := capture(func() { endpointsFor(&api.CollectorCredentials{}, c) })
+			if !strings.Contains(out, "PRODUCTION") {
+				t.Errorf("%s: expected a warning, got %q", u, out)
+			}
+		}
+	})
+
 	t.Run("silent for production, where the defaults are correct", func(t *testing.T) {
 		c := endpointFlagCmd()
 		_ = c.Flags().Set("api-url", "https://app.dbgorilla.com")
