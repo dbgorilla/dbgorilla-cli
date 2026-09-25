@@ -135,10 +135,46 @@ func DiscoverInstaclustrCluster(ctx context.Context, creds InstaclustrCreds, clu
 //
 // Error messages never include statement text: the CREATE/ALTER statements
 // carry the live password, and these errors reach terminals and CI logs.
-func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) error {
+// WriterHost picks the node that accepts writes, given one DSN per candidate.
+//
+// Creating the monitoring role is a write, and an Instaclustr cluster lists its nodes in no
+// particular order — so taking the first one is a coin flip on a two-node cluster. A standby
+// refuses with "cannot execute CREATE ROLE in a read-only transaction", which says nothing about
+// the real problem and, next to the install's own retry advice, reads as a firewall delay that
+// waiting will not fix. `pg_is_in_recovery()` is definitive and needs no privilege.
+//
+// Returns the first host that answers false. Unreachable candidates are skipped, not fatal: only
+// one node has to answer for the install to proceed.
+func WriterHost(ctx context.Context, dsnFor func(host string) string, hosts []string) (string, error) {
+	var lastErr error
+	for _, host := range hosts {
+		conn, err := pgx.Connect(ctx, dsnFor(host))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var inRecovery bool
+		err = conn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&inRecovery)
+		_ = conn.Close(ctx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !inRecovery {
+			return host, nil
+		}
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("%w to find the cluster's writer: %w", errClusterUnreachable, lastErr)
+	}
+	return "", fmt.Errorf("no node accepts writes: every node reported itself in recovery")
+}
+
+// The bool reports whether pg_read_all_data was granted; see the grant below for when it is not.
+func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) (bool, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return fmt.Errorf("%w to create the monitoring role: %w", errClusterUnreachable, err)
+		return false, fmt.Errorf("%w to create the monitoring role: %w", errClusterUnreachable, err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
 	// The role name is quoted as an identifier: every caller passes the
@@ -147,24 +183,34 @@ func EnsureInstaclustrRole(ctx context.Context, dsn, user, password string) erro
 	quoted := strings.ReplaceAll(password, "'", "''")
 	if _, err := conn.Exec(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", role, quoted)); err != nil {
 		if !isBenignGrantErr(err) {
-			return fmt.Errorf("creating role %s failed: %w", user, redactPassword(err, quoted, password))
+			return false, fmt.Errorf("creating role %s failed: %w", user, redactPassword(err, quoted, password))
 		}
 		if _, aerr := conn.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", role, quoted)); aerr != nil {
-			return fmt.Errorf("updating role %s's password failed: %w", user, redactPassword(aerr, quoted, password))
+			return false, fmt.Errorf("updating role %s's password failed: %w", user, redactPassword(aerr, quoted, password))
 		}
 	}
 	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_monitor TO %s", role)); err != nil && !isBenignGrantErr(err) {
-		return fmt.Errorf("granting pg_monitor to %s failed: %w", user, err)
+		return false, fmt.Errorf("granting pg_monitor to %s failed: %w", user, err)
 	}
 	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT pg_read_all_data TO %s", role)); err != nil && !isBenignGrantErr(err) {
-		// 42704 undefined_object: the role does not exist before PG 14 — the
-		// monitor grant above still stands, so degrade rather than fail.
+		// Two ways this grant is refused for reasons the operator cannot fix, and neither is worth
+		// failing an install over — the pg_monitor grant above already carries the metrics the
+		// collector exists for:
+		//
+		//   42704 undefined_object   the role does not exist before PG 14.
+		//   42501 insufficient_privilege   granting a predefined role needs ADMIN OPTION on it,
+		//     and a managed platform hands out its default user with admin on pg_monitor and not
+		//     on pg_read_all_data (observed on Instaclustr, PostgreSQL 18).
+		//
+		// Both degrade the same way: schema capture reads only what the role can already see. The
+		// caller is told, so its success line does not claim a grant that did not happen.
 		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "42704" {
-			return fmt.Errorf("granting pg_read_all_data to %s failed: %w", user, err)
+		if !errors.As(err, &pgErr) || (pgErr.Code != "42704" && pgErr.Code != "42501") {
+			return false, fmt.Errorf("granting pg_read_all_data to %s failed: %w", user, err)
 		}
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // redactPassword scrubs the role password (raw and SQL-quoted forms) from an

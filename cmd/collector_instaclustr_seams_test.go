@@ -50,12 +50,27 @@ func stubCreateInstaclustrRole(t *testing.T, err error) *[]string {
 	t.Helper()
 	var runs []string
 	orig := createInstaclustrRole
-	createInstaclustrRole = func(_ context.Context, dsn, _, _ string) error {
+	createInstaclustrRole = func(_ context.Context, dsn, _, _ string) (bool, error) {
 		runs = append(runs, dsn)
-		return err
+		return true, err
 	}
 	t.Cleanup(func() { createInstaclustrRole = orig })
 	return &runs
+}
+
+// stubWriterHost fixes which candidate answers as the writer, and records what it was offered —
+// the probe dials Postgres, so every install test needs it stubbed. `writer` empty stands for "no
+// node answered", the case where the install falls back to the seed.
+func stubWriterHost(t *testing.T, writer string, err error) *[][]string {
+	t.Helper()
+	var offered [][]string
+	orig := writerHost
+	writerHost = func(_ context.Context, _ func(string) string, hosts []string) (string, error) {
+		offered = append(offered, hosts)
+		return writer, err
+	}
+	t.Cleanup(func() { writerHost = orig })
+	return &offered
 }
 
 func stubPublicEgressIP(t *testing.T, ip string, err error) {
@@ -147,6 +162,74 @@ func TestInstallInstaclustrRequiresCredsNonInteractively(t *testing.T) {
 	}
 }
 
+// The monitoring role is created on the node that accepts writes, not on whichever the platform
+// listed first. Instaclustr returns nodes in no particular order, so on a two-node cluster the
+// seed is a coin flip, and a standby answers CREATE ROLE with "cannot execute ... in a read-only
+// transaction" — which, beside the install's own "a firewall rule can take a minute" advice,
+// reads as a delay that waiting will fix. It never does.
+func TestInstallInstaclustrCreatesTheRoleOnTheWriter(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	defer srv.Close()
+	setInstallStubs(t, nil, cleanReport(), nil)
+	target := icTestTarget()
+	// Two nodes, the standby listed first — the shape that fails without the probe.
+	target.Nodes = []collector.InstaclustrNode{
+		{ID: "standby", PublicAddress: "203.0.113.10", PrivateAddress: "10.0.0.10"},
+		{ID: "writer", PublicAddress: "203.0.113.11", PrivateAddress: "10.0.0.11"},
+	}
+	stubDiscoverInstaclustr(t, target, nil)
+	stubPublicEgressIP(t, "192.0.2.9", nil)
+	stubEnsureFirewallRule(t, collector.FirewallRule{ID: "r-1", Network: "192.0.2.9/32"}, true, nil)
+	roleRuns := stubCreateInstaclustrRole(t, nil)
+	offered := stubWriterHost(t, "203.0.113.11", nil)
+
+	cmd := icCmd(t, srv.URL)
+	mustSet(t, cmd, "cluster-id", "c-1")
+	mustSet(t, cmd, "instaclustr-user", "someone")
+	mustSet(t, cmd, "instaclustr-api-key", "key123")
+	mustSet(t, cmd, "instaclustr-readonly-key", "key456")
+	if err := runInstall(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*offered) != 1 || len((*offered)[0]) != 2 || (*offered)[0][0] != "203.0.113.10" {
+		t.Fatalf("the probe was not offered every node in order: %v", *offered)
+	}
+	if len(*roleRuns) != 1 || !strings.Contains((*roleRuns)[0], "@203.0.113.11:5432") {
+		t.Fatalf("role creation did not use the writer: %v", *roleRuns)
+	}
+}
+
+// With no node answering, the install still tries the seed: the error from actually attempting the
+// write says more than one invented here, and a single-node cluster whose probe is merely
+// unreachable must not be blocked by the probe.
+func TestInstallInstaclustrFallsBackToTheSeedWhenNoWriterAnswers(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	defer srv.Close()
+	setInstallStubs(t, nil, cleanReport(), nil)
+	stubDiscoverInstaclustr(t, icTestTarget(), nil)
+	stubPublicEgressIP(t, "192.0.2.9", nil)
+	stubEnsureFirewallRule(t, collector.FirewallRule{ID: "r-1", Network: "192.0.2.9/32"}, true, nil)
+	roleRuns := stubCreateInstaclustrRole(t, nil)
+	stubWriterHost(t, "", errors.New("every node unreachable"))
+
+	cmd := icCmd(t, srv.URL)
+	mustSet(t, cmd, "cluster-id", "c-1")
+	mustSet(t, cmd, "instaclustr-user", "someone")
+	mustSet(t, cmd, "instaclustr-api-key", "key123")
+	mustSet(t, cmd, "instaclustr-readonly-key", "key456")
+	if err := runInstall(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*roleRuns) != 1 || !strings.Contains((*roleRuns)[0], "@203.0.113.10:5432") {
+		t.Fatalf("expected the seed host: %v", *roleRuns)
+	}
+}
+
 func TestInstallInstaclustrHappyPath(t *testing.T) {
 	isolate(t)
 	writeTokens(t)
@@ -157,6 +240,7 @@ func TestInstallInstaclustrHappyPath(t *testing.T) {
 	stubPublicEgressIP(t, "192.0.2.9", nil)
 	cidrs := stubEnsureFirewallRule(t, collector.FirewallRule{ID: "r-1", Network: "192.0.2.9/32"}, true, nil)
 	roleRuns := stubCreateInstaclustrRole(t, nil)
+	stubWriterHost(t, "", nil) // no probe in unit tests; the install falls back to the seed
 
 	cmd := icCmd(t, srv.URL)
 	mustSet(t, cmd, "cluster-id", "c-1")
@@ -257,6 +341,7 @@ func TestInstallInstaclustrDryRunMutatesNothing(t *testing.T) {
 	stubPublicEgressIP(t, "192.0.2.9", nil)
 	cidrs := stubEnsureFirewallRule(t, collector.FirewallRule{}, false, errors.New("must not be called"))
 	roleRuns := stubCreateInstaclustrRole(t, errors.New("must not be called"))
+	stubWriterHost(t, "", nil) // no probe in unit tests; the install falls back to the seed
 
 	cmd := icCmd(t, srv.URL)
 	mustSet(t, cmd, "cluster-id", "c-1")
@@ -303,6 +388,7 @@ func TestInstallInstaclustrRollsBackTheRuleWhenTheContainerFails(t *testing.T) {
 	stubPublicEgressIP(t, "192.0.2.9", nil)
 	stubEnsureFirewallRule(t, collector.FirewallRule{ID: "r-1", Network: "192.0.2.9/32"}, true, nil)
 	stubCreateInstaclustrRole(t, nil)
+	stubWriterHost(t, "", nil) // no probe in unit tests; the install falls back to the seed
 	deleted := stubDeleteFirewallRule(t, nil)
 
 	cmd := icCmd(t, srv.URL)
@@ -436,6 +522,7 @@ func TestInstallInstaclustrAWSHappyPath(t *testing.T) {
 	rec := stubDeploy(t, nil)
 	stubStackOutput(t, "198.51.100.20", nil) // the stack's EIP
 	roleRuns := stubCreateInstaclustrRole(t, nil)
+	stubWriterHost(t, "", nil) // no probe in unit tests; the install falls back to the seed
 	deleted := stubDeleteFirewallRule(t, nil)
 
 	// ensureFirewallRule is called twice: the operator's temp rule (created)
@@ -693,6 +780,7 @@ func TestInstallInstaclustrGCPHappyPath(t *testing.T) {
 	rec := stubGcpDeploy(t, nil)
 	stubGcpDeploymentOutput(t, "198.51.100.20", nil) // the reserved static address
 	roleRuns := stubCreateInstaclustrRole(t, nil)
+	stubWriterHost(t, "", nil) // no probe in unit tests; the install falls back to the seed
 	deleted := stubDeleteFirewallRule(t, nil)
 
 	// ensureFirewallRule is called twice: the operator's temp rule (created)
@@ -758,6 +846,7 @@ func TestInstallInstaclustrGCPDryRunMutatesNothing(t *testing.T) {
 	rec := stubGcpDeploy(t, nil)
 	cidrs := stubEnsureFirewallRule(t, collector.FirewallRule{}, false, errors.New("must not be called"))
 	roleRuns := stubCreateInstaclustrRole(t, errors.New("must not be called"))
+	stubWriterHost(t, "", nil) // no probe in unit tests; the install falls back to the seed
 
 	cmd := icGcpCmd(t, srv.URL)
 	mustSet(t, cmd, "region", "us-central1")

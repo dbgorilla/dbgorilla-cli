@@ -45,6 +45,7 @@ var (
 	ensureFirewallRule    = collector.EnsureFirewallRule
 	deleteFirewallRule    = collector.DeleteInstaclustrFirewallRule
 	createInstaclustrRole = collector.EnsureInstaclustrRole
+	writerHost            = collector.WriterHost
 	publicEgressIP        = func(ctx context.Context) (string, error) { return collector.PublicEgressIP(ctx) }
 	stackOutput           = collector.StackOutput
 	gcpDeploymentOutput   = collector.GcpDeploymentOutput
@@ -177,12 +178,18 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 		rollbackRule()
 		return err
 	}
-	dsn := collector.InstaclustrAdminDSN(in.seedHost, 5432, in.ict.DefaultUserPassword)
-	if err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword); err != nil {
+	// Create the role on the node that accepts writes. The platform lists nodes in no particular
+	// order, so the seed is as likely to be a standby, and a standby answers a CREATE ROLE with a
+	// bare "read-only transaction" — indistinguishable, next to the retry advice below, from a
+	// firewall rule that has not applied yet. Fall back to the seed when no node answers: the
+	// error from actually trying is more useful than one invented here.
+	dsn := collector.InstaclustrAdminDSN(writerOrSeed(ctx, in), 5432, in.ict.DefaultUserPassword)
+	readAll, err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword)
+	if err != nil {
 		rollbackRule()
 		return fmt.Errorf("%w\n\nA just-created firewall rule can take ~a minute to apply; re-running is safe", err)
 	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Monitoring role %q ready (pg_monitor + pg_read_all_data)", collector.InstaclustrMonitorUser)))
+	printRoleReady(readAll)
 
 	// Deep DB preflight with the monitoring role itself — the same gate the
 	// local path runs, so a cluster missing pg_stat_statements is a warning
@@ -390,13 +397,14 @@ func setupMonitoringRole(ctx context.Context, in *instaclustrInstall, monitorPas
 			}
 		}
 	}
-	dsn := collector.InstaclustrAdminDSN(in.seedHost, 5432, in.ict.DefaultUserPassword)
-	if err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword); err != nil {
+	dsn := collector.InstaclustrAdminDSN(writerOrSeed(ctx, in), 5432, in.ict.DefaultUserPassword)
+	readAll, err := ensureRoleWithRetry(ctx, dsn, collector.InstaclustrMonitorUser, monitorPassword)
+	if err != nil {
 		removeOperatorRule()
 		return collector.FirewallRule{}, false, nil,
 			fmt.Errorf("%w\n\nA just-created firewall rule can take ~a minute to apply; re-running is safe", err)
 	}
-	fmt.Println(style.Success(fmt.Sprintf("✓ Monitoring role %q ready (pg_monitor + pg_read_all_data)", collector.InstaclustrMonitorUser)))
+	printRoleReady(readAll)
 	return opRule, opCreated, removeOperatorRule, nil
 }
 
@@ -497,24 +505,63 @@ func dryRunInstaclustr(cmd *cobra.Command, in *instaclustrInstall, allowCIDR str
 // seconds ago may not pass packets yet, and the symptom is a dial timeout or
 // refusal. Only connection failures retry — SQL failures are deterministic
 // and retrying them just delays the real error.
-func ensureRoleWithRetry(ctx context.Context, dsn, user, password string) error {
+// writerOrSeed picks the node that accepts writes, falling back to the seed.
+//
+// Creating the monitoring role is a write, and Instaclustr lists a cluster's nodes in no
+// particular order — so taking the first is a coin flip on a two-node cluster. A standby refuses
+// with "cannot execute CREATE ROLE in a read-only transaction", which beside this install's own
+// "a firewall rule can take a minute" advice reads as a delay that waiting will fix. It never
+// does. Falling back to the seed keeps a cluster whose nodes merely cannot be probed installable:
+// the error from actually attempting the write says more than one invented here.
+func writerOrSeed(ctx context.Context, in *instaclustrInstall) string {
+	dsnFor := func(host string) string {
+		return collector.InstaclustrAdminDSN(host, 5432, in.ict.DefaultUserPassword)
+	}
+	candidates := make([]string, 0, len(in.ict.Nodes))
+	for _, n := range in.ict.Nodes {
+		if h := n.Host(in.usePrivate); h != "" {
+			candidates = append(candidates, h)
+		}
+	}
+	if host, err := writerHost(ctx, dsnFor, candidates); err == nil && host != "" {
+		return host
+	}
+	return in.seedHost
+}
+
+// printRoleReady states which grants actually landed — see EnsureInstaclustrRole for why
+// pg_read_all_data may not.
+func printRoleReady(readAll bool) {
+	grants := "pg_monitor + pg_read_all_data"
+	if !readAll {
+		grants = "pg_monitor only"
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Monitoring role %q ready (%s)", collector.InstaclustrMonitorUser, grants)))
+	if !readAll {
+		fmt.Println(style.Warn("⚠  pg_read_all_data was not granted — this platform's default user cannot grant it. " +
+			"Metrics are unaffected; schema capture reads only what that role can already see."))
+	}
+}
+
+func ensureRoleWithRetry(ctx context.Context, dsn, user, password string) (bool, error) {
 	var err error
+	var readAll bool
 	for attempt := 0; attempt < 4; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return false, ctx.Err()
 			case <-time.After(8 * time.Second):
 			}
 		}
-		if err = createInstaclustrRole(ctx, dsn, user, password); err == nil {
-			return nil
+		if readAll, err = createInstaclustrRole(ctx, dsn, user, password); err == nil {
+			return readAll, nil
 		}
 		if !collector.RetriableRoleError(err) {
-			return err
+			return false, err
 		}
 	}
-	return err
+	return false, err
 }
 
 // resolveInstaclustrCreds gathers the username + one API key: flag, env,
