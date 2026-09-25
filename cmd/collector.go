@@ -1848,7 +1848,38 @@ func endpointsFor(creds *api.CollectorCredentials, cmd *cobra.Command) collector
 	// (no port) makes otelcol fail with "missing port in address". Default to
 	// the scheme's standard port when the endpoint omits one.
 	e.OtlpBaseURL = withDefaultPort(e.OtlpBaseURL)
+	warnIfFallingBackToProd(e, cmd)
 	return e
+}
+
+// warnIfFallingBackToProd says so when an endpoint is left to the collector's built-in defaults
+// while the install is pointed somewhere that is plainly not production.
+//
+// Those defaults are the production control plane. A deployment that advertises its own endpoints
+// overrides them, which every production install does — but a dev or PR deployment that advertises
+// none leaves the collector dialling production with a credential minted elsewhere. That fails with
+// a bare 401 from a host the operator never named, and nothing in the install output mentions it.
+// Observed against a PR environment on 2026-09-24: the collector spent three restarts reporting
+// "opamp authorization rejected" while pointed at wss://otlp.dbgorilla.com.
+func warnIfFallingBackToProd(e collector.Endpoints, cmd *cobra.Command) {
+	apiURL, _ := cmd.Flags().GetString("api-url")
+	if apiURL == "" || strings.Contains(apiURL, "dbgorilla.com") && !strings.Contains(apiURL, ".internal.") {
+		return // production, or unset and therefore production by default
+	}
+	var missing []string
+	if e.OpampBaseURL == "" {
+		missing = append(missing, "--opamp-url")
+	}
+	if e.OtlpBaseURL == "" {
+		missing = append(missing, "--otlp-url")
+	}
+	if len(missing) == 0 {
+		return
+	}
+	fmt.Println(style.Warn(fmt.Sprintf(
+		"⚠  %s advertises no %s endpoint, so the collector will use its built-in default — the "+
+			"PRODUCTION control plane. Pass %s to point it at this deployment.",
+		apiURL, strings.Join(missing, " / "), strings.Join(missing, " and "))))
 }
 
 // withDefaultPort adds the scheme's standard port to a URL whose host omits one.
