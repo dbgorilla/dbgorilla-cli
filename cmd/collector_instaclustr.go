@@ -1200,6 +1200,11 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	// Inside the cluster's VPC the collector takes the private path, whatever
 	// side the operator had to use to reach the cluster from here.
 	in.collectorPrivate = placement.collectorUsePrivate
+	if placement.fastForkUnavailable(in.fastFork, allowCIDR) {
+		fmt.Println(style.Warn("⚠  Fast forks will not be available on this install: the collector runs inside the cluster's VPC " +
+			"and is allowlisted by security group, which a fork's firewall cannot name yet (furiousengineering/dbgorilla#7767). " +
+			"Existing forks and snapshots stay usable; the install continues."))
+	}
 
 	// The collector's security group is created before the role, the identity
 	// and the stack, so every failure from here on has to hand it back — an
