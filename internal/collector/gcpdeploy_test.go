@@ -29,7 +29,10 @@ func testDeploy() GcpDeploy {
 func TestGcpDeploy_CreatesWhenAbsent(t *testing.T) {
 	f := newGCPFake(t).
 		on("GET", probePath, 200, "# template").
-		on("GET", depPath, 404, gcpNotFoundJSON).
+		// Absent before the create; ACTIVE when read back after the operation.
+		onSeq("GET", depPath,
+			gcpFakeResp{404, gcpNotFoundJSON},
+			gcpFakeResp{200, deploymentJSON("ACTIVE", "")}).
 		on("POST", depsPath, 200, operationJSON(opResource, false, "")).
 		onSeq("GET", opPath,
 			gcpFakeResp{200, operationJSON(opResource, false, "")},
@@ -64,7 +67,10 @@ func TestGcpDeploy_SettledDeploymentsUpdateInPlace(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			f := newGCPFake(t).
 				on("GET", probePath, 200, "# template").
-				on("GET", depPath, 200, deploymentJSON(state, "")).
+				// The settled state before; ACTIVE once the re-apply lands.
+				onSeq("GET", depPath,
+					gcpFakeResp{200, deploymentJSON(state, "")},
+					gcpFakeResp{200, deploymentJSON("ACTIVE", "")}).
 				on("PATCH", depPath, 200, operationJSON(opResource, true, ""))
 			stubGCP(t, f)
 			if err := testDeploy().Run(); err != nil {
@@ -77,6 +83,27 @@ func TestGcpDeploy_SettledDeploymentsUpdateInPlace(t *testing.T) {
 				t.Errorf("the update must mask to the fields it sends, got %s", c)
 			}
 		})
+	}
+}
+
+// An update whose revision fails at terraform apply completes its operation
+// with no error payload; the deployment's own state says FAILED.
+func TestGcpDeploy_FailedRevisionBehindACleanOperation(t *testing.T) {
+	f := newGCPFake(t).
+		on("GET", probePath, 200, "# template").
+		onSeq("GET", depPath,
+			gcpFakeResp{200, deploymentJSON("ACTIVE", "")},
+			gcpFakeResp{200, `{"name":"projects/p/locations/us-central1/deployments/dbg","state":"FAILED",` +
+				`"stateDetail":"Revision failed: the apply build failed while running: tf-apply.","errorLogs":"gs://logs/dbg/r-2/errors/tf-error.ndjson"}`}).
+		on("PATCH", depPath, 200, operationJSON(opResource, true, ""))
+	stubGCP(t, f)
+	err := testDeploy().Run()
+	if err == nil || !strings.Contains(err.Error(), "did not apply cleanly") ||
+		!strings.Contains(err.Error(), "tf-apply") || !strings.Contains(err.Error(), "gs://logs/dbg/r-2") {
+		t.Fatalf("err = %v, want the failed state with its reason and log", err)
+	}
+	if errors.Is(err, ErrDeployTimeout) || errors.Is(err, ErrDeployUnknown) || errors.Is(err, ErrDeployBusy) {
+		t.Fatalf("a failed apply is a plain failure, got %v", err)
 	}
 }
 
@@ -251,5 +278,90 @@ func TestGcpCredentialFailuresNameTheFix(t *testing.T) {
 		if err := call(); err == nil || !strings.Contains(err.Error(), "gcloud auth application-default login") {
 			t.Errorf("%s: err = %v, want the ADC remediation", name, err)
 		}
+	}
+}
+
+// What an update or upgrade starts from: the deployment as it was applied.
+const specJSON = `{"name":"projects/p/locations/us-central1/deployments/dbg","state":"ACTIVE",
+  "serviceAccount":"projects/p/serviceAccounts/deployer@p.iam.gserviceaccount.com",
+  "terraformBlueprint":{"gcsSource":"gs://tmpl/collector/gce/v1.0","inputValues":{
+    "collector_image":{"inputValue":"img@sha256:old"},
+    "network":{"inputValue":"projects/p/global/networks/default"},
+    "stable_egress":{"inputValue":true},
+    "nat_subnet_cidr":{"inputValue":""}}}}`
+
+func TestGetGcpDeploymentSpec_ReadsWhatWasApplied(t *testing.T) {
+	stubGCP(t, newGCPFake(t).on("GET", depPath, 200, specJSON))
+	spec, err := GetGcpDeploymentSpec("p", "us-central1", "dbg")
+	if err != nil || spec == nil {
+		t.Fatalf("spec = %+v, err = %v", spec, err)
+	}
+	if spec.State != "ACTIVE" || spec.TemplateSource != "gs://tmpl/collector/gce/v1.0" ||
+		spec.ServiceAccount != "projects/p/serviceAccounts/deployer@p.iam.gserviceaccount.com" {
+		t.Errorf("spec = %+v", spec)
+	}
+	// Values come back as the CLI sends them — strings — even when the
+	// deployment carries a typed one.
+	if spec.Inputs["collector_image"] != "img@sha256:old" || spec.Inputs["stable_egress"] != "true" || spec.Inputs["nat_subnet_cidr"] != "" {
+		t.Errorf("inputs = %v", spec.Inputs)
+	}
+
+	stubGCP(t, newGCPFake(t).on("GET", depPath, 404, gcpNotFoundJSON))
+	if spec, err := GetGcpDeploymentSpec("p", "us-central1", "dbg"); err != nil || spec != nil {
+		t.Fatalf("an absent deployment is (nil, nil), got %+v, %v", spec, err)
+	}
+}
+
+func TestUpgradeGcpImage_ChangesOnlyTheImage(t *testing.T) {
+	f := newGCPFake(t).
+		on("GET", depPath, 200, specJSON).
+		on("GET", probePath, 200, "# template").
+		on("PATCH", depPath, 200, operationJSON(opResource, true, ""))
+	stubGCP(t, f)
+	if err := UpgradeGcpImage("p", "us-central1", "dbg", "img@sha256:new"); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	body := f.lastBody("PATCH", depPath)
+	for _, want := range []string{
+		`"gcsSource":"gs://tmpl/collector/gce/v1.0"`, // the deployment's own template, never swapped
+		`"serviceAccount":"projects/p/serviceAccounts/deployer@p.iam.gserviceaccount.com"`,
+		`"collector_image":{"inputValue":"img@sha256:new"}`,
+		`"network":{"inputValue":"projects/p/global/networks/default"}`,
+		`"stable_egress":{"inputValue":"true"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("update body missing %s:\n%s", want, body)
+		}
+	}
+	if f.called("POST", depsPath) != 0 {
+		t.Error("an upgrade never creates a deployment")
+	}
+}
+
+func TestUpgradeGcpImage_AlreadyOnTheImageTouchesNothing(t *testing.T) {
+	f := newGCPFake(t).on("GET", depPath, 200, specJSON)
+	stubGCP(t, f)
+	err := UpgradeGcpImage("p", "us-central1", "dbg", "img@sha256:old")
+	if err == nil || !strings.Contains(err.Error(), "nothing to upgrade") {
+		t.Fatalf("err = %v", err)
+	}
+	if m := f.mutations(); len(m) != 0 {
+		t.Errorf("no mutation expected, got %v", m)
+	}
+}
+
+func TestGcpDeploy_RequireExistingNeverCreates(t *testing.T) {
+	f := newGCPFake(t).
+		on("GET", probePath, 200, "# template").
+		on("GET", depPath, 404, gcpNotFoundJSON)
+	stubGCP(t, f)
+	d := testDeploy()
+	d.RequireExisting = true
+	err := d.Run()
+	if err == nil || !strings.Contains(err.Error(), "no longer exists") {
+		t.Fatalf("err = %v", err)
+	}
+	if m := f.mutations(); len(m) != 0 {
+		t.Errorf("an update of a vanished deployment must not create one, got %v", m)
 	}
 }

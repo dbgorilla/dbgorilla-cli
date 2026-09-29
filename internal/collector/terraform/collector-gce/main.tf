@@ -12,6 +12,13 @@
 # the instance fetches the values at boot, so they never appear in instance
 # metadata either.
 #
+# v1.4 scopes the IAM grants: each database service's roles only when it hosts
+# the target (cloud_sql_roles / alloydb_roles), and Cloud SQL's IAM database
+# login only to the monitored instances (login_instances, an IAM Condition).
+# It also leaves the group's size alone on re-apply, so `dbg collector
+# install` (update) and `upgrade` keep a stopped collector stopped, and pulls
+# an Artifact Registry image as the VM's own service account.
+#
 # Naming contract with the CLI (a change is a version bump): every resource is
 # named by the local part of var.runtime_service_account, which the CLI sets to
 # the deployment name — including the four secrets the CLI creates before
@@ -47,21 +54,39 @@ resource "google_service_account" "collector" {
   display_name = "DBGorilla collector"
 }
 
-# Read-only monitoring plus log writing for `dbg collector logs` always; the
-# connect and IAM-login roles of both database services only when a
-# Google-managed database is the target — they are project-wide grants
-# (instanceUser permits IAM database login to ANY Cloud SQL instance in the
-# project), so a source that is not a Google database must not carry them.
+# Read-only monitoring plus log writing for `dbg collector logs` always. The
+# viewer, connect and IAM-login roles of a database service only when that
+# service hosts the target: they are project-wide grants, so a source that is
+# not a Google database (the instaclustr source) carries neither set, and a
+# Cloud SQL target does not carry AlloyDB's.
+#
+# IAM database login is scoped one step further. On Cloud SQL,
+# roles/cloudsql.instanceUser carries an IAM Condition naming the monitored
+# instance and its read replicas (var.login_instances), so the collector's
+# service account can log in nowhere else in the project. AlloyDB's login
+# check exposes no resource name an IAM Condition can match, so
+# roles/alloydb.databaseUser stays project-wide; the CLI says so when it
+# deploys one. Either way the account only logs in where it has been
+# registered as a database user.
+locals {
+  login_instances = compact(split(",", var.login_instances))
+  login_condition = join(" || ", [
+    for i in local.login_instances : "resource.name == \"projects/${local.project}/instances/${i}\""
+  ])
+}
+
 resource "google_project_iam_member" "collector" {
   for_each = toset(concat(
     [
       "roles/monitoring.viewer",
       "roles/logging.logWriter",
     ],
-    var.database_roles ? [
+    var.cloud_sql_roles ? [
       "roles/cloudsql.viewer",
       "roles/cloudsql.client",
       "roles/cloudsql.instanceUser",
+    ] : [],
+    var.alloydb_roles ? [
       "roles/alloydb.viewer",
       "roles/alloydb.client",
       "roles/alloydb.databaseUser",
@@ -70,6 +95,15 @@ resource "google_project_iam_member" "collector" {
   project = local.project
   role    = each.value
   member  = "serviceAccount:${google_service_account.collector.email}"
+
+  dynamic "condition" {
+    for_each = each.value == "roles/cloudsql.instanceUser" && length(local.login_instances) > 0 ? [1] : []
+    content {
+      title       = "${local.name}-login"
+      description = "DBGorilla collector: IAM database login only to the instances it monitors"
+      expression  = "resource.type == \"sqladmin.googleapis.com/Instance\" && (${local.login_condition})"
+    }
+  }
 }
 
 # --- secrets ----------------------------------------------------------------
@@ -169,6 +203,7 @@ locals {
         "https://secretmanager.googleapis.com/v1/projects/${local.project}/secrets/$1/versions/latest:access" \
         | python3 -c 'import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)["payload"]["data"]).decode())'
     }
+    IMAGE="${var.collector_image}"
     DBG_SERVER_SECRET=$(retry 30 secret "${local.name}-server-secret")
     DBG_DB_PASSWORD=$(retry 30 secret "${local.name}-db-password")
     INSTACLUSTR_API_KEY=$(retry 30 secret "${local.name}-instaclustr-api-key")
@@ -176,13 +211,24 @@ locals {
     export DBG_SERVER_SECRET DBG_DB_PASSWORD INSTACLUSTR_API_KEY IC_PROMETHEUS_API_KEY
     mkdir -p /var/lib/dbgorilla
     retry 30 metadata instance/attributes/collector-config | base64 -d > /var/lib/dbgorilla/collector.toml
+    # An image in Artifact Registry or Container Registry pulls as the VM's
+    # own service account (which needs roles/artifactregistry.reader on the
+    # repository); any other registry is pulled anonymously. Docker's config
+    # goes under /var/lib: /root is read-only on Container-Optimized OS.
+    export HOME=/var/lib/dbgorilla DOCKER_CONFIG=/var/lib/dbgorilla/.docker
+    mkdir -p "$DOCKER_CONFIG"
+    registry="$${IMAGE%%/*}"
+    case "$registry" in
+      *-docker.pkg.dev|docker.pkg.dev|gcr.io|*.gcr.io)
+        docker-credential-gcr configure-docker --registries="$registry" ;;
+    esac
     docker run -d --name dbg-collector --restart=always --network=host \
       -v /var/lib/dbgorilla/collector.toml:/etc/dbgorilla/collector.toml:ro \
       -e DBG_SERVER_SECRET \
       -e DBG_DB_PASSWORD \
       -e INSTACLUSTR_API_KEY \
       -e IC_PROMETHEUS_API_KEY \
-      "${var.collector_image}" --config-file /etc/dbgorilla/collector.toml
+      "$IMAGE" --config-file /etc/dbgorilla/collector.toml
   EOT
 }
 
@@ -245,6 +291,12 @@ resource "google_compute_region_instance_group_manager" "collector" {
     max_surge_fixed       = 0
     max_unavailable_fixed = 3
     replacement_method    = "RECREATE"
+  }
+
+  # `dbg collector stop` resizes the group to 0 and `start` back to 1. An
+  # update or upgrade re-applies this template and must not undo that.
+  lifecycle {
+    ignore_changes = [target_size]
   }
 
   # The instance reads its secrets at boot; do not start it before it may
