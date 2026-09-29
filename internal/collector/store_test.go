@@ -255,7 +255,7 @@ func TestWriteEnvFile(t *testing.T) {
 func TestWriteInstaclustrEnvFile_PrometheusKeyIsOptional(t *testing.T) {
 	// With the key: a fourth line under the collector's contract name.
 	path := filepath.Join(t.TempDir(), "collector.env")
-	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom-key"); err != nil {
+	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom-key", ""); err != nil {
 		t.Fatalf("WriteInstaclustrEnvFile: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -267,7 +267,7 @@ func TestWriteInstaclustrEnvFile_PrometheusKeyIsOptional(t *testing.T) {
 
 	// Without it: the phase-1 three-line file, no empty-valued var that a
 	// config stanza could accidentally reference.
-	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", ""); err != nil {
+	if err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "", ""); err != nil {
 		t.Fatalf("WriteInstaclustrEnvFile: %v", err)
 	}
 	data, _ = os.ReadFile(path)
@@ -281,7 +281,7 @@ func TestWriteEnvFile_RefusesLineBreaksInValues(t *testing.T) {
 	// repeated name, so a value carrying a line break could redefine an
 	// earlier variable. The writer is the last line of defense.
 	path := filepath.Join(t.TempDir(), "collector.env")
-	err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom\n"+InstaclustrAPIKeyEnv+"=evil")
+	err := WriteInstaclustrEnvFile(path, "s3cr3t", "pgpass", "ro-key", "prom\n"+InstaclustrAPIKeyEnv+"=evil", "")
 	if err == nil || !strings.Contains(err.Error(), "line break") {
 		t.Fatalf("a value with an embedded newline must be refused, got %v", err)
 	}

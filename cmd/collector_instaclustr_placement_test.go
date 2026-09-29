@@ -352,6 +352,30 @@ func TestFallbackRefusesWhenThereIsNoNetwork(t *testing.T) {
 	}
 }
 
+// Fast forks are unavailable only when a VPC-resident collector ends up with no
+// allow_networks; an operator-supplied --allow-ip still gives it one.
+func TestFastForkUnavailableOnlyOnTheVPCResidentPathWithoutACIDR(t *testing.T) {
+	vpc := awsPlacement{vpc: &collector.VPCPlacement{VpcID: "vpc-1"}}
+	outside := awsPlacement{stableEgress: true}
+	cases := []struct {
+		name      string
+		p         awsPlacement
+		fastFork  bool
+		allowCIDR string
+		want      bool
+	}{
+		{"vpc-resident, no CIDR", vpc, true, "", true},
+		{"vpc-resident, --allow-ip", vpc, true, "203.0.113.7/32", false},
+		{"vpc-resident, no --fast-fork", vpc, false, "", false},
+		{"outside the VPC", outside, true, "", false},
+	}
+	for _, c := range cases {
+		if got := c.p.fastForkUnavailable(c.fastFork, c.allowCIDR); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // The shape line is printed before the deploy placement is resolved. On a
 // cluster that has public addresses, the collector can still end up on the
 // private side once it is placed inside the cluster's VPC — so this line must

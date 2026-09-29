@@ -49,6 +49,14 @@ type awsPlacement struct {
 // which is what makes security-group allowlisting possible.
 func (p awsPlacement) vpcResident() bool { return p.vpc != nil }
 
+// fastForkUnavailable reports whether --fast-fork was asked for on a placement
+// whose collector gets no allow_networks: a VPC-resident collector is admitted
+// by security group, which the fork allowlist cannot name yet, so the collector
+// withholds fork_create (furiousengineering/dbgorilla#7767).
+func (p awsPlacement) fastForkUnavailable(fastFork bool, allowCIDR string) bool {
+	return fastFork && p.vpcResident() && allowCIDR == ""
+}
+
 // resolveAWSPlacement decides where the collector runs.
 //
 // Explicit --subnets/--security-group-id always win, which keeps the peered-VPC

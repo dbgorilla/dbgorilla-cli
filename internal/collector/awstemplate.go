@@ -65,7 +65,7 @@ const templateProbeTimeout = 5 * time.Second
 // (defaulting to the empty string, with its Secrets Manager secret and task
 // injection behind a condition); AwsStackParams omits the parameter when the
 // key is absent, so older self-hosted --template-url copies keep deploying.
-const TemplateVersion = "v1.3"
+const TemplateVersion = "v1.4"
 
 // hostedTemplateURL is the published template this build deploys.
 var hostedTemplateURL = templateBaseURL + TemplateVersion + ".yaml"

@@ -26,8 +26,9 @@ const (
 // set (the optional Instaclustr Prometheus key), and scoped the IAM grants per
 // database service, conditioning Cloud SQL's login role on the monitored
 // instances. Both land in v1.4 because neither has been published yet; once a
-// version is out, the next change takes a new one.
-const GcpTemplateVersion = "v1.4"
+// version is out, the next change takes a new one. v1.5 adds the fifth secret,
+// <name>-provisioning-api-key, for fast-fork operations.
+const GcpTemplateVersion = "v1.5"
 
 const gcpTemplateProbeTimeout = 5 * time.Second
 

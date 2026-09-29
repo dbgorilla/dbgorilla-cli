@@ -1379,7 +1379,7 @@ func TestRunUpdateGCP_Password(t *testing.T) {
 	noIAM.IamEnabled = false // IAM would be refused: proves it was not consulted
 
 	t.Run("keeps the stored password", func(t *testing.T) {
-		c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, stored), "v1.4"), noIAM)
+		c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, stored), collector.GcpTemplateVersion), noIAM)
 		passwords := stubEnsureGcpDBPassword(t, nil)
 		var err error
 		out := capture(t, func() { err = runInstallGCP(c) })
@@ -1393,12 +1393,12 @@ func TestRunUpdateGCP_Password(t *testing.T) {
 		if len(*passwords) != 0 {
 			t.Error("no new password, no secret write")
 		}
-		if deploys.deploy.TemplateSource != "gs://dbgorilla-collector-templates/collector/gce/v1.4" || strings.Contains(out, "Moving the deployment") {
+		if deploys.deploy.TemplateSource != collector.HostedGcpTemplateSource() || strings.Contains(out, "Moving the deployment") {
 			t.Errorf("a current deployment keeps its template, got %s", deploys.deploy.TemplateSource)
 		}
 	})
 	t.Run("a new password rotates the secret", func(t *testing.T) {
-		c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, stored), "v1.4"), noIAM)
+		c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, stored), collector.GcpTemplateVersion), noIAM)
 		passwords := stubEnsureGcpDBPassword(t, nil)
 		mustSet(t, c, "db-password", "new-pw")
 		var err error
@@ -1417,7 +1417,7 @@ func TestRunUpdateGCP_Password(t *testing.T) {
 		}
 	})
 	t.Run("an empty --db-password moves to IAM", func(t *testing.T) {
-		c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, stored), "v1.4"), completeGcpTarget())
+		c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, stored), collector.GcpTemplateVersion), completeGcpTarget())
 		mustSet(t, c, "db-password", "")
 		var err error
 		out := capture(t, func() { err = runInstallGCP(c) })
@@ -1452,7 +1452,7 @@ func TestRunUpdateGCP_TemplateSourceOverrides(t *testing.T) {
 // existed gets it.
 func TestRunUpdateGCP_LoginScopeCarriesOver(t *testing.T) {
 	optedOut := func(t *testing.T) *collector.GcpDeploymentSpec {
-		spec := deployedGcpSpec(t, storedGcpConfig(t, installedGcpTarget()), "v1.4")
+		spec := deployedGcpSpec(t, storedGcpConfig(t, installedGcpTarget()), collector.GcpTemplateVersion)
 		delete(spec.Inputs, "database_roles")
 		spec.Inputs["cloud_sql_roles"], spec.Inputs["alloydb_roles"], spec.Inputs["login_instances"] = "true", "false", ""
 		return spec
@@ -1484,7 +1484,7 @@ func TestRunUpdateGCP_LoginScopeCarriesOver(t *testing.T) {
 }
 
 func TestRunUpdateGCP_SwitchesTheTarget(t *testing.T) {
-	c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, installedGcpTarget()), "v1.4"), completeGcpTarget())
+	c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, installedGcpTarget()), collector.GcpTemplateVersion), completeGcpTarget())
 	mustSet(t, c, "db-instance-id", "other-pg")
 	var err error
 	out := capture(t, func() { err = runInstallGCP(c) })
@@ -1520,7 +1520,7 @@ func TestRunUpdateGCP_FailuresRollNothingBack(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, _ := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, installedGcpTarget()), "v1.4"), completeGcpTarget())
+			c, _ := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, installedGcpTarget()), collector.GcpTemplateVersion), completeGcpTarget())
 			// The failing deploy's recorder is the one in effect during the run.
 			deploys := stubGcpDeploy(t, tc.deploy)
 			deleted := stubDeleteGcpDeployment(t, nil)
