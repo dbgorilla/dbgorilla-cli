@@ -70,6 +70,16 @@ own, so the changes the entries below attribute to them arrive in v1.4 and v1.5.
   unrecognised route warns and continues, because a route out the same
   interface is indistinguishable from no route at all.
 
+- A `--fast-fork` collector installed inside an Instaclustr cluster's own VPC
+  now admits itself on every fork by its security group: the install writes
+  the collector's group into `allow_security_groups` when the collector dials
+  private addresses. Fast forks were previously unavailable on that install,
+  because its task address changes on every redeploy and there was no address
+  to allowlist. If the cluster refuses the group and the install falls back to
+  subnet rules, the key is left out, since a fork would refuse it too. Needs a
+  collector release that understands `allow_security_groups`; an older
+  collector ignores the key.
+
 ### Fixed
 
 - `dbg collector install --provider instaclustr` now connects to the cluster's
@@ -119,6 +129,10 @@ own, so the changes the entries below attribute to them arrive in v1.4 and v1.5.
   points Docker's credential helper at the image's registry, so the pull uses
   the VM's service account (which needs `roles/artifactregistry.reader` on the
   repository).
+
+- On the AWS Fargate `--fast-fork` install, the deployed config keeps the
+  Provisioning API key, the fork commands and `allow_networks`. A plain
+  component used to replace the fast-fork one partway through the install.
 
 ## v0.6.0
 
