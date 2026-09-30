@@ -2,6 +2,10 @@
 
 ## v0.7.0
 
+This release publishes collector templates Fargate v1.4 and GCE v1.5; v0.6.0
+shipped v1.2 and v1.3. Fargate v1.3 and GCE v1.4 were never published on their
+own, so the changes the entries below attribute to them arrive in v1.4 and v1.5.
+
 ### Added
 
 - `--fast-fork` and `--fast-fork-key` (or `INSTACLUSTR_FAST_FORK_KEY`): opt-in
@@ -14,9 +18,57 @@
   read-only AWS IAM actions (ec2:DescribeAddresses, ec2:DescribeVpcs,
   fsx:DescribeFileSystems, fsx:DescribeVolumes,
   servicequotas:GetServiceQuota) for the fork preflight check. Without
-  `--fast-fork`, the collector's output is byte-identical to v0.6.0.
+  `--fast-fork` no Provisioning key is stored and the collector offers no
+  fork commands; the five IAM actions are granted either way.
 
-## v0.6.1
+- `--instaclustr-prometheus-key` (or `INSTACLUSTR_PROMETHEUS_API_KEY`): the
+  optional third Instaclustr key kind — their dedicated low-privilege
+  Prometheus key — delivered to the collector as `IC_PROMETHEUS_API_KEY` on
+  every deploy substrate (docker env-file; Fargate template v1.3's fourth
+  `NoEcho` parameter and Secrets Manager secret; GCE template v1.4's fourth
+  Secret Manager secret). Present, the collector also scrapes Instaclustr's
+  per-node platform metrics (host tiles, infra alarms) and dedupes them
+  against the direct connection; absent, platform metrics stay off and
+  database telemetry is unaffected. `--dry-run` resolves and previews the key
+  exactly like a real run; key values from flag or env are trimmed and
+  refused if they carry control characters; an absent key omits the
+  CloudFormation parameter, so installs pinned to a pre-v1.3 `--template-url`
+  copy keep deploying; and a `--template-source` GCE template whose
+  `# template-version:` marker differs from the CLI's contract is refused
+  before anything is created.
+
+- The gcp collector's IAM database login is scoped to what it monitors (GCE
+  template v1.5). `roles/cloudsql.instanceUser` carries an IAM Condition
+  naming the monitored instance and its read replicas, and each database
+  service's roles are granted only when it hosts the target, so a Cloud SQL
+  install no longer carries an AlloyDB grant or vice versa.
+  `roles/alloydb.databaseUser` stays project-wide, because AlloyDB exposes no
+  resource name a condition can match; the install says so.
+  `--allow-project-wide-login` drops the Cloud SQL condition with a warning.
+  Existing installs move to the scoped grant on their next
+  `dbg collector install --target gcp`.
+
+- `dbg collector upgrade` and an in-place `dbg collector install` now work on
+  the gcp target, as they do on aws, instead of requiring an uninstall and a
+  re-install. Identity, endpoints, image and networking are read back from the
+  deployment; a password-auth collector keeps its stored password unless
+  `--db-password` rotates it. A stored setting this dbg cannot model is
+  refused rather than dropped.
+
+- `dbgorilla update` is an alias for `dbgorilla upgrade`.
+
+- The install reports where a cluster runs and how it is reachable: the
+  provider account it belongs to, its own VPC, its network blocks, and whether
+  it was created without public addresses. Account residency and address side
+  are independent — a cluster in your own cloud account still has public
+  addresses unless it was created private, and is dialled publicly from outside
+  its VPC. The VPC is read on AWS, GCP and Azure alike.
+
+- A cluster created without public addresses can only be set up from inside its
+  network, so the install checks the route first and says what would make it
+  work — the VPN, a peered VPC, or a bastion — instead of timing out. An
+  unrecognised route warns and continues, because a route out the same
+  interface is indistinguishable from no route at all.
 
 ### Fixed
 
@@ -50,40 +102,27 @@
   resolves the same address the install did, and refuses to guess when a
   collector known to be private cannot be resolved.
 
-### Added
+- The install one-liner is `curl ... | bash`. Piped to `sh`, it failed on
+  hosts where `/bin/sh` is dash (Debian, Ubuntu), which has no
+  `set -o pipefail`; `dbgorilla upgrade` now prints the `bash` form too.
 
-- The install reports where a cluster runs and how it is reachable: the
-  provider account it belongs to, its own VPC, its network blocks, and whether
-  it was created without public addresses. Account residency and address side
-  are independent — a cluster in your own cloud account still has public
-  addresses unless it was created private, and is dialled publicly from outside
-  its VPC. The VPC is read on AWS, GCP and Azure alike.
+- A gcp deployment whose revision fails at terraform apply is reported as
+  failed, with the reason and the apply log's address. Infrastructure Manager
+  completes the operation without an error payload, so the CLI used to print
+  success over a `FAILED` deployment.
 
-- A cluster created without public addresses can only be set up from inside its
-  network, so the install checks the route first and says what would make it
-  work — the VPN, a peered VPC, or a bastion — instead of timing out. An
-  unrecognised route warns and continues, because a route out the same
-  interface is indistinguishable from no route at all.
+- The gcp rollout wait no longer returns before the instance is recreated; it
+  requires the group's target version and several settled readings in a row.
+  A collector that was stopped stays stopped through an update or upgrade.
+
+- A private Artifact Registry image pulls on the gcp target: the boot script
+  points Docker's credential helper at the image's registry, so the pull uses
+  the VM's service account (which needs `roles/artifactregistry.reader` on the
+  repository).
 
 ## v0.6.0
 
 ### Added
-
-- `--instaclustr-prometheus-key` (or `INSTACLUSTR_PROMETHEUS_API_KEY`): the
-  optional third Instaclustr key kind — their dedicated low-privilege
-  Prometheus key — delivered to the collector as `IC_PROMETHEUS_API_KEY` on
-  every deploy substrate (docker env-file; Fargate template v1.3's fourth
-  `NoEcho` parameter and Secrets Manager secret; GCE template v1.4's fourth
-  Secret Manager secret). Present, the collector also scrapes Instaclustr's
-  per-node platform metrics (host tiles, infra alarms) and dedupes them
-  against the direct connection; absent, platform metrics stay off and
-  database telemetry is unaffected. `--dry-run` resolves and previews the key
-  exactly like a real run; key values from flag or env are trimmed and
-  refused if they carry control characters; an absent key omits the
-  CloudFormation parameter, so installs pinned to a pre-v1.3 `--template-url`
-  copy keep deploying; and a `--template-source` GCE template whose
-  `# template-version:` marker differs from the CLI's contract is refused
-  before anything is created.
 
 - `dbg collector install --provider instaclustr --cluster-id <id>` monitors a
   NetApp Instaclustr managed PostgreSQL cluster. The install discovers the
