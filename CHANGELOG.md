@@ -1,25 +1,5 @@
 # Changelog
 
-## v0.7.1
-
-### Added
-
-- A `--fast-fork` collector installed inside an Instaclustr cluster's own VPC
-  now admits itself on every fork by its security group: the install writes
-  the collector's group into `allow_security_groups` when the collector dials
-  private addresses. Fast forks were previously unavailable on that install,
-  because its task address changes on every redeploy and there was no address
-  to allowlist. If the cluster refuses the group and the install falls back to
-  subnet rules, the key is left out, since a fork would refuse it too. Needs
-  collector 0.12.1 or later, the first to understand `allow_security_groups`;
-  an older collector ignores the key.
-
-### Fixed
-
-- On the AWS Fargate `--fast-fork` install, the deployed config keeps the
-  Provisioning API key, the fork commands and `allow_networks`. A plain
-  component used to replace the fast-fork one partway through the install.
-
 ## v0.7.0
 
 This release publishes collector templates Fargate v1.4 and GCE v1.5; v0.6.0
