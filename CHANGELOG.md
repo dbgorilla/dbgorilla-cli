@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.7.1
+
+### Fixed
+
+- `dbg collector install --target aws` and `dbg collector status` work with a
+  profile that assumes a role from an `aws login` profile (`role_arn` with a
+  `source_profile` holding `login_session`). The AWS SDK this tool uses
+  rejects that chain — "failed to load assume role …, <nil>" — though it reads
+  an `aws login` profile used on its own, and the `aws` CLI accepts both; the
+  CLI now resolves the source's login credentials and assumes the role itself.
+  A chain it cannot resolve that way (an `mfa_serial` role, or more than one
+  link) keeps the SDK's error and prints the workaround: export the
+  credentials with `aws configure export-credentials --format env`.
+
 ## v0.7.0
 
 This release publishes collector templates Fargate v1.4 and GCE v1.5; v0.6.0
