@@ -75,6 +75,9 @@ var (
 	// pinImageRemote resolves a tag to a digest over the registry's HTTP API,
 	// for the AWS path where there is no container runtime to ask.
 	pinImageRemote = collector.RemoteDigest
+	// latestCollectorRelease asks the public registry for the newest collector
+	// release, so tests can answer without reaching it.
+	latestCollectorRelease = collector.LatestRelease
 )
 
 func init() {
@@ -85,7 +88,7 @@ func init() {
 	installCmd.Flags().String("db-user", "", "Read-only database user (prompted if omitted)")
 	installCmd.Flags().String("db-password", "", "Database password (prompted without echo if omitted; or set "+collector.DBPasswordEnv+"). Re-running a gcp install keeps a password-auth collector on its stored password; pass --db-password \"\" to move it to IAM auth")
 	installCmd.Flags().String("ssl-mode", "verify-full", "libpq ssl_mode: disable, require, verify-ca, verify-full (defaults to disable for --target docker, whose database is local and non-TLS by definition)")
-	installCmd.Flags().String("image", collector.DefaultImage, "Collector container image")
+	installCmd.Flags().String("image", "", "Collector container image (default: the newest collector release, pinned to its exact version)")
 	installCmd.Flags().Bool("yes", false, "Skip confirmation prompts")
 	installCmd.Flags().Bool("dry-run", false, "Render config and print the docker command without minting, writing, or starting anything")
 	installCmd.Flags().String("auth-url", "", "Override the auth host base URL (default: collector's deployment default)")
@@ -119,7 +122,7 @@ func init() {
 	logsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
 	logsCmd.Flags().String("tail", "100", "Number of trailing log lines to show")
 
-	collectorUpgradeCmd.Flags().String("image", collector.DefaultImage, "Collector image to upgrade to (default: this CLI's current version)")
+	collectorUpgradeCmd.Flags().String("image", "", "Collector image to upgrade to (default: the newest collector release)")
 	collectorUpgradeCmd.Flags().Bool("allow-downgrade", false, "Install an older collector version than the one currently running")
 
 	collectorCmd.AddCommand(installCmd, statusCmd, listCmd, logsCmd, startCmd, stopCmd, restartCmd, collectorUpgradeCmd, uninstallCmd, encodeConfigCmd)
@@ -240,6 +243,11 @@ func runInstallLocal(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// The image too, so a failed lookup leaves no identity behind.
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		return err
+	}
 
 	// Mint the collector identity. The user token authorizes the mint.
 	fmt.Println(style.Info("Provisioning collector identity..."))
@@ -259,7 +267,7 @@ func runInstallLocal(cmd *cobra.Command) error {
 	if collector.IsLoopback(target.Host) {
 		fmt.Println(style.Success(fmt.Sprintf("✓ Rewrote %s -> %s for in-container access", target.Host, collector.DockerHostInternal)))
 	}
-	return finishDockerInstall(cmd, client, creds, rendered, password, caCert,
+	return finishDockerInstall(cmd, client, creds, image, imageSource, rendered, password, caCert,
 		func(envPath string) error { return collector.WriteEnvFile(envPath, creds.Secret, password) },
 		&collector.State{TargetName: target.Name}, func() {},
 		"  dbg collector status     # check connection\n"+
@@ -267,13 +275,13 @@ func runInstallLocal(cmd *cobra.Command) error {
 }
 
 // finishDockerInstall is the shared tail of every docker-target install:
-// materialize config + secrets, resolve and digest-pin the image, start the
+// materialize config + secrets, digest-pin the resolved image, start the
 // container (rolling back the identity — plus whatever the caller adds via
 // onFail — when it will not start), persist state, and confirm liveness.
 // state arrives carrying only the caller's substrate-specific fields; the
 // common ones are filled in here. nextSteps is the epilogue body.
 func finishDockerInstall(cmd *cobra.Command, client *api.Client, creds *api.CollectorCredentials,
-	rendered, dbPassword, caCert string, writeEnv func(envPath string) error,
+	image, imageSource, rendered, dbPassword, caCert string, writeEnv func(envPath string) error,
 	state *collector.State, onFail func(), nextSteps string) error {
 
 	configPath, _ := collector.ConfigPath()
@@ -292,15 +300,11 @@ func finishDockerInstall(cmd *cobra.Command, client *api.Client, creds *api.Coll
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Wrote config: %s", configPath)))
 
-	// Resolve the collector image: explicit --image wins; else the version the
-	// deployment blesses (preferred_collector_version); else the CLI default.
-	image, imageSource := resolveImage(cmd, creds)
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 	warnCommandSupport(image, renderedCommands(rendered))
 
-	// Pin to an immutable digest before running, so a deployment-blessed version
-	// (a bare tag) is as reproducible and tamper-evident as the hard-pinned
-	// default. Already-pinned refs pass through untouched.
+	// Pin to an immutable digest before running: a tag can be moved, a digest
+	// cannot. Already-pinned refs pass through untouched.
 	pinned, err := pinImage(image)
 	if err != nil {
 		onFail()
@@ -446,7 +450,10 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// Dry run: validate the template without minting an identity or creating
 	// anything. Placeholder identity keeps the template shape valid.
 	if dryRun {
-		image, _ := resolveImage(cmd, nil)
+		image, _, err := resolveImage(cmd)
+		if err != nil {
+			return err
+		}
 		params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:           image,
@@ -469,6 +476,12 @@ func runInstallAWS(cmd *cobra.Command) error {
 		})
 	}
 
+	// Before the identity is minted, so a failed lookup leaves nothing behind.
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		return err
+	}
+
 	fmt.Println("Provisioning collector identity...")
 	creds, err := client.ProvisionCollector()
 	if err != nil {
@@ -476,7 +489,6 @@ func runInstallAWS(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 	warnCommandSupport(image, commandsOf[collector.AwsTarget](targets))
@@ -1445,19 +1457,21 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	// --image override, else the version this CLI ships as current. (Resolving a
-	// deployment-blessed version without re-provisioning isn't wired yet.)
-	image, _ := resolveImage(cmd, nil)
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Collector image: %s (%s)\n", image, imageSource)
 
 	if st.IsGCP() {
 		return runUpgradeGCP(cmd, st, image)
 	}
 
-	// Resolve the tag to a digest BEFORE deciding whether to act. The default
-	// is a moving tag, and a tag cannot be compared against what is running --
-	// so without this, every run would tear down a healthy container to
-	// install the image it is already running. Costs a pull on a run that then
-	// declines to do anything, which is the cheaper mistake.
+	// Resolve the tag to a digest BEFORE deciding whether to act. A tag can be
+	// moved, so only a digest can be compared against what is running --
+	// without this, a run could tear down a healthy container to install the
+	// image it is already running. Costs a pull on a run that then declines to
+	// do anything, which is the cheaper mistake.
 	var target string
 	if st.IsAWS() {
 		// Over HTTP: the AWS path has no container runtime to pull with, and an
@@ -1476,9 +1490,10 @@ func runCollectorUpgrade(cmd *cobra.Command, _ []string) error {
 		target = pinned
 	}
 
-	// The default image comes from this binary, so "upgrade" from an
-	// out-of-date CLI would otherwise roll a newer collector BACKWARDS and
-	// print a success message doing it. Compare before touching anything.
+	// The newest release can be older than what runs (a pre-release, or an
+	// --image someone chose), and an --image can name an older version. Either
+	// would roll the collector BACKWARDS and print a success message doing it.
+	// Compare before touching anything.
 	if done, err := checkUpgradeDirection(cmd, st.Image, target); done || err != nil {
 		return err
 	}
@@ -1541,9 +1556,8 @@ func checkUpgradeDirection(cmd *cobra.Command, current, target string) (done boo
 	return false, fmt.Errorf(
 		"refusing to downgrade the collector.\n"+
 			"  Running: %s\n"+
-			"  This CLI would install: %s\n\n"+
-			"  The version to install comes from this CLI when --image is not given, so an\n"+
-			"  out-of-date dbg downgrades a newer collector. Update dbg first: dbg upgrade\n"+
+			"  This upgrade would install: %s\n\n"+
+			"  To pick the version yourself, pass --image <repo>:<version>.\n"+
 			"  To install the older version anyway, pass --allow-downgrade",
 		current, target)
 }
@@ -1806,20 +1820,28 @@ func resolveCACert(cmd *cobra.Command) (string, error) {
 	return abs, nil
 }
 
-// resolveImage picks the collector image to run. Precedence: an explicit --image
-// flag (operator override) > the version the deployment blesses via
-// preferred_collector_version > the CLI's built-in default.
-func resolveImage(cmd *cobra.Command, creds *api.CollectorCredentials) (image, source string) {
+// resolveImage picks the collector image to deploy, and says why. An explicit
+// --image wins. Otherwise it is the newest collector release, resolved now and
+// named by its exact version, so the deployed collector cannot change version
+// when it restarts.
+//
+// A failed lookup is an error, not a fallback to the moving tag: deploying that
+// would hand the customer a collector that upgrades itself on restart.
+func resolveImage(cmd *cobra.Command) (image, source string, err error) {
 	if cmd.Flags().Changed("image") {
 		v, _ := cmd.Flags().GetString("image")
-		return v, "--image override"
+		if strings.TrimSpace(v) == "" {
+			return "", "", fmt.Errorf("--image is empty. Pass an image such as --image %s:<version>", collector.ImageRepo)
+		}
+		return v, "--image override", nil
 	}
-	if creds != nil && creds.PreferredCollectorVersion != "" {
-		return collector.ImageForVersion(creds.PreferredCollectorVersion),
-			"version " + creds.PreferredCollectorVersion + " blessed by deployment"
+	image, version, err := latestCollectorRelease()
+	if err != nil {
+		return "", "", fmt.Errorf("could not find the newest collector release: %w\n"+
+			"  Check this machine can reach %s, or pass the version to install: --image %s:<version>",
+			err, collector.ImageRepo, collector.ImageRepo)
 	}
-	v, _ := cmd.Flags().GetString("image") // the flag's built-in default
-	return v, "CLI default"
+	return image, "collector " + version + ", latest release", nil
 }
 
 // endpointsFromFlags reads the optional endpoint overrides. Empty values fall

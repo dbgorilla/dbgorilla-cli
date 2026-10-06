@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.1
+## v0.8.0
 
 ### Added
 
@@ -15,6 +15,23 @@
   an older collector ignores the key.
 
 ### Changed
+
+- **`dbg collector install` and `dbg collector upgrade` now install the newest
+  collector release.** With no `--image`, the CLI asks the public collector
+  registry for its highest release version (a plain `X.Y.Z` tag; pre-releases
+  and moving tags such as `latest` are skipped) and deploys that exact
+  version, pinned to its image digest on every target (Docker, AWS Fargate,
+  GCP, Instaclustr). The install prints the choice, for example
+  `(collector 0.12.1, latest release)`.
+
+  Before, the version came from the DBGorilla deployment's suggested version,
+  or failing that from the `latest` tag. The deployment's suggestion is no
+  longer used to choose an image. `--image` still overrides everything.
+
+  If the registry cannot be reached, the install stops and tells you to pass
+  `--image <repo>:<version>`, before any collector identity or cloud resource
+  is created. It never falls back to a moving tag, because a collector deployed from one can change
+  version when it restarts.
 
 - **New databases get `explain` and `collect_statistics`, on every install
   path.** With no command flag, local Docker, `--target aws`, `--target gcp`,

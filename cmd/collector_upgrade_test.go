@@ -38,7 +38,7 @@ func TestCheckUpgradeDirection_RefusesADowngrade(t *testing.T) {
 		t.Error("a refusal is not a clean exit")
 	}
 	// The operator has to be able to see what happened and what to do.
-	for _, want := range []string{"0.4.0", "0.3.3", "dbg upgrade", "--allow-downgrade"} {
+	for _, want := range []string{"0.4.0", "0.3.3", "--image", "--allow-downgrade"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error should mention %q, got:\n%v", want, err)
 		}

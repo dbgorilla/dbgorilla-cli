@@ -183,7 +183,10 @@ func runInstallGCP(cmd *cobra.Command) error {
 	printGcpLoginScope(targets, allowProjectWideLogin, project)
 
 	if dryRun {
-		image, _ := resolveImage(cmd, nil)
+		image, _, err := resolveImage(cmd)
+		if err != nil {
+			return err
+		}
 		inputs, err := collector.GcpDeployInputs(collector.GcpStackInput{
 			AgentID: "DRY-RUN", TenantID: "DRY-RUN",
 			Image:                 image,
@@ -208,6 +211,12 @@ func runInstallGCP(cmd *cobra.Command) error {
 		})
 	}
 
+	// Before the identity is minted, so a failed lookup leaves nothing behind.
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		return err
+	}
+
 	fmt.Println("Provisioning collector identity...")
 	creds, err := client.ProvisionCollector()
 	if err != nil {
@@ -215,7 +224,6 @@ func runInstallGCP(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "instance")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 	warnCommandSupport(image, commandsOf[collector.GcpTarget](targets))
