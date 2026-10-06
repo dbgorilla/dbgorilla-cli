@@ -14,8 +14,13 @@ import (
 // TestMain keeps the TLS capability probe off the network by default. The
 // probe dials a real server, so leaving it live made every install test wait
 // out a connection timeout. Tests that care about probing call stubProbe.
+// The newest-release lookup is stubbed for the same reason: it asks the public
+// registry. Tests that care about it call stubLatestRelease.
 func TestMain(m *testing.M) {
 	probeTLS = func(context.Context, string) preflight.TLSSupport { return preflight.TLSUnknown }
+	latestCollectorRelease = func() (string, string, error) {
+		return collector.ImageForVersion(testLatestVersion), testLatestVersion, nil
+	}
 	os.Exit(m.Run())
 }
 

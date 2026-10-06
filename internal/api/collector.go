@@ -74,9 +74,9 @@ type CollectorCredentials struct {
 	KeycloakBaseURL string `json:"keycloak_base_url,omitempty"`
 	OtlpBaseURL     string `json:"otlp_base_url,omitempty"`
 	OpampBaseURL    string `json:"opamp_base_url,omitempty"`
-	// PreferredCollectorVersion is the collector version the deployment blesses
-	// for this environment (e.g. "0.1.0"). Empty -> the CLI uses its built-in
-	// default image. The CLI pins this version unless --image overrides it.
+	// PreferredCollectorVersion is a collector version the deployment suggests
+	// (e.g. "0.1.0"). Parsed so every backend's response still decodes, but not
+	// used to choose an image: installs take --image or the newest release.
 	PreferredCollectorVersion string `json:"preferred_collector_version,omitempty"`
 }
 

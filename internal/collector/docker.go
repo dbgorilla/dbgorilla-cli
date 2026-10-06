@@ -18,33 +18,25 @@ var (
 	goos         = runtime.GOOS
 )
 
-// ImageRepo is the published collector repository, used to build an image ref
-// from a deployment-advertised preferred version (`<ImageRepo>:<version>`).
+// ImageRepo is the published collector repository. Images are named
+// `<ImageRepo>:<version>`.
 const ImageRepo = "dbgorillapublic.azurecr.io/dbg-collector"
 
-// DefaultImage is the newest published collector.
-//
-// A moving tag rather than a fixed version: a version baked in here is only as
-// current as the binary holding it, so `collector upgrade` could not move a
-// collector forward once this CLI fell behind.
-//
-// Reproducibility is kept where it matters. PinnedRef resolves this to an
-// immutable digest before anything runs locally, so an install records exactly
-// what it started. Pass `--image <repo>:<version>` for a specific version.
+// DefaultImage is the repository's moving tag. Nothing installs it: with no
+// --image, an install resolves the newest release with LatestRelease and
+// deploys that exact version, so a restart cannot move the collector.
 const DefaultImage = ImageRepo + ":latest"
 
-// ImageForVersion returns the image ref for a deployment-blessed version string.
+// ImageForVersion returns the image ref for a version string.
 func ImageForVersion(version string) string {
 	return ImageRepo + ":" + version
 }
 
 // PinnedRef ensures ref is pinned to an immutable digest before we run it.
-// If ref already carries an @sha256 digest (e.g. the built-in DefaultImage) it
-// is returned unchanged. Otherwise — a deployment-blessed version like
-// "<repo>:0.2.0" or a bare --image tag — the image is pulled and its repo
-// digest resolved, yielding "<ref>@sha256:...". This keeps a centrally
-// rolled-out version as reproducible and tamper-evident as a hard-pinned
-// default (a tag is mutable; a digest is not).
+// If ref already carries an @sha256 digest it is returned unchanged. Otherwise
+// — a resolved release like "<repo>:0.2.0" or a bare --image tag — the image is
+// pulled and its repo digest resolved, yielding "<ref>@sha256:...". A tag is
+// mutable; a digest is not.
 func PinnedRef(ref string) (string, error) {
 	if strings.Contains(ref, "@sha256:") {
 		return ref, nil

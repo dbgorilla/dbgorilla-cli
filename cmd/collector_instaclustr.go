@@ -220,6 +220,13 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 
 	caCert := "" // refused above; kept as a named value for the Runner below
 
+	// Before the identity is minted, so a failed lookup leaves nothing behind.
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		rollbackRule()
+		return err
+	}
+
 	fmt.Println(style.Info("Provisioning collector identity..."))
 	creds, err := in.client.ProvisionCollector()
 	if err != nil {
@@ -249,7 +256,7 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 	if created {
 		state.FirewallRuleID = rule.ID
 	}
-	return finishDockerInstall(cmd, in.client, creds, rendered, monitorPassword, caCert,
+	return finishDockerInstall(cmd, in.client, creds, image, imageSource, rendered, monitorPassword, caCert,
 		func(envPath string) error {
 			return collector.WriteInstaclustrEnvFile(envPath, creds.Secret, monitorPassword, in.readOnlyKey, in.prometheusKey, in.provisioningKey)
 		},
@@ -625,7 +632,10 @@ func dryRunInstaclustr(cmd *cobra.Command, in *instaclustrInstall, allowCIDR str
 	fmt.Println("Would write collector.toml:")
 	fmt.Println(rendered)
 	printProvisionalSeedHost(in)
-	image, imageSource := resolveImage(cmd, nil)
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		return err
+	}
 	runner := collector.Runner{
 		Name:  collector.DefaultContainerName,
 		Image: image,
@@ -1283,6 +1293,14 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	}
 	input.Components = []collector.Component{comp}
 
+	// Before the identity is minted, so a failed lookup leaves nothing behind.
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		removeOperatorRule()
+		releasePlacement()
+		return err
+	}
+
 	fmt.Println(style.Info("Provisioning collector identity..."))
 	creds, err := in.client.ProvisionCollector()
 	if err != nil {
@@ -1292,7 +1310,6 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 	warnCommandSupport(image, in.commands)
@@ -1616,6 +1633,13 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	}
 	input.Components = []collector.Component{in.component(collector.CloudDBPasswordEnv)}
 
+	// Before the identity is minted, so a failed lookup leaves nothing behind.
+	image, imageSource, err := resolveImage(cmd)
+	if err != nil {
+		removeOperatorRule()
+		return err
+	}
+
 	fmt.Println(style.Info("Provisioning collector identity..."))
 	creds, err := in.client.ProvisionCollector()
 	if err != nil {
@@ -1624,7 +1648,6 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector provisioned (agent %s, tenant %s)", creds.AgentID, creds.TenantID)))
 
-	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "instance")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 	warnCommandSupport(image, in.commands)
