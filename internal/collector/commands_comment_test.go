@@ -6,9 +6,10 @@ import (
 )
 
 // Every path that writes a collector.toml renders through Config.Render, so
-// each builder must come out with the [commands] comment directly above the
-// [commands] header, exactly once.
+// each builder, given the default commands, must come out with the [commands]
+// comment directly above the [commands] header, exactly once.
 func TestRenderedConfigsExplainCommands(t *testing.T) {
+	pg := DefaultCommands("postgres")
 	render := func(t *testing.T, s string, err error) string {
 		t.Helper()
 		if err != nil {
@@ -18,26 +19,26 @@ func TestRenderedConfigsExplainCommands(t *testing.T) {
 	}
 	cases := map[string]func(t *testing.T) string{
 		"docker": func(t *testing.T) string {
-			s, err := Build("a", "t", Target{Name: "n", Host: "localhost", Port: 5432, User: "u"}, Endpoints{}).Render()
+			s, err := Build("a", "t", Target{Name: "n", Host: "localhost", Port: 5432, User: "u", Commands: pg}, Endpoints{}).Render()
 			return render(t, s, err)
 		},
 		"helm": func(t *testing.T) string {
-			s, err := BuildCNPG("a", "t", CNPGTarget{}, Endpoints{}).Render()
+			s, err := BuildCNPG("a", "t", CNPGTarget{Commands: pg}, Endpoints{}).Render()
 			return render(t, s, err)
 		},
 		"aws": func(t *testing.T) string {
 			s, err := awsConfigTOML("a", "t", "us-east-1",
-				[]AwsTarget{{Name: "n", InstanceID: "db", Host: "h", Port: 5432, User: "u"}}, Endpoints{}, true)
+				[]AwsTarget{{Name: "n", InstanceID: "db", Host: "h", Port: 5432, User: "u", Commands: pg}}, Endpoints{}, true)
 			return render(t, s, err)
 		},
 		"gcp": func(t *testing.T) string {
 			s, err := GcpConfigTOML("a", "t",
-				[]GcpTarget{{InstanceID: "pg", Engine: "postgres"}}, Endpoints{}, false)
+				[]GcpTarget{{InstanceID: "pg", Engine: "postgres", Commands: pg}}, Endpoints{}, true)
 			return render(t, s, err)
 		},
 		"instaclustr": func(t *testing.T) string {
 			s, err := componentsConfigTOML("a", "t",
-				[]Component{{Name: "n", Engine: "postgres"}}, Endpoints{}, false)
+				[]Component{{Name: "n", Engine: "postgres", Commands: pg}}, Endpoints{}, true)
 			return render(t, s, err)
 		},
 	}
@@ -69,7 +70,7 @@ func TestRenderedConfigsExplainCommands(t *testing.T) {
 // update. Comments are dropped on parse, so the comment must not pile up, and
 // the config must still decode strictly.
 func TestCommandsCommentSurvivesRoundTrip(t *testing.T) {
-	first, err := Build("a", "t", Target{Name: "n", Host: "h", Port: 5432, User: "u"}, Endpoints{}).Render()
+	first, err := Build("a", "t", Target{Name: "n", Host: "h", Port: 5432, User: "u", Commands: DefaultCommands("postgres")}, Endpoints{}).Render()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,9 +88,29 @@ func TestCommandsCommentSurvivesRoundTrip(t *testing.T) {
 }
 
 func TestWithCommandsCommentAtStartOfFile(t *testing.T) {
-	got := withCommandsComment("[commands]\nenabled = false\n")
+	got := withCommandsComment("[commands]\nenabled = true\n", true)
 	if !strings.HasPrefix(got, commandsComment+"[commands]\n") {
 		t.Errorf("got:\n%s", got)
+	}
+}
+
+// With the gate off nothing is on, so the "on by default" comment would be
+// wrong. The config still says what is off and still links the reference.
+func TestCommandsOffGetsItsOwnComment(t *testing.T) {
+	cfg := Build("a", "t", Target{Name: "n", Host: "h", Port: 5432, User: "u"}, Endpoints{})
+	cfg.Commands = Commands{Enabled: false}
+	out, err := cfg.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, commandsComment) {
+		t.Errorf("gate off, but the on-by-default comment is present:\n%s", out)
+	}
+	if !strings.Contains(out, commandsOffComment+"[commands]\n") {
+		t.Errorf("off comment is not directly above [commands]:\n%s", out)
+	}
+	if !strings.Contains(out, CommandsDocsURL) {
+		t.Errorf("missing docs link:\n%s", out)
 	}
 }
 

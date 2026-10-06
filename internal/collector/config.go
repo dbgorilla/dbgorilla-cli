@@ -306,6 +306,12 @@ const commandsComment = "# On by default: explain returns query plans only and n
 	"# Remove either from a database's commands list to turn it off.\n" +
 	"# Database commands: " + CommandsDocsURL + "\n"
 
+// commandsOffComment replaces commandsComment when the gate is off. Nothing is
+// on, so a comment that says what is on by default would be wrong; this one
+// says what the collector cannot do and where to read about turning it on.
+const commandsOffComment = "# Off: DBGorilla cannot fetch query plans or optimizer statistics from this collector.\n" +
+	"# Database commands: " + CommandsDocsURL + "\n"
+
 // Render serializes the Config to collector.toml text. The TOML encoder cannot
 // write comments, so the [commands] comment is inserted into its output.
 func (c Config) Render() (string, error) {
@@ -313,18 +319,22 @@ func (c Config) Render() (string, error) {
 	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
 		return "", err
 	}
-	return withCommandsComment(buf.String()), nil
+	return withCommandsComment(buf.String(), c.Commands.Enabled), nil
 }
 
-// withCommandsComment puts commandsComment directly above the [commands]
-// header. The encoder writes table headers at the start of a line, and only the
-// global table is named exactly [commands].
-func withCommandsComment(rendered string) string {
+// withCommandsComment puts the comment for the gate's state directly above the
+// [commands] header. The encoder writes table headers at the start of a line,
+// and only the global table is named exactly [commands].
+func withCommandsComment(rendered string, enabled bool) string {
 	const header = "[commands]\n"
-	if strings.HasPrefix(rendered, header) {
-		return commandsComment + rendered
+	comment := commandsOffComment
+	if enabled {
+		comment = commandsComment
 	}
-	return strings.Replace(rendered, "\n"+header, "\n"+commandsComment+header, 1)
+	if strings.HasPrefix(rendered, header) {
+		return comment + rendered
+	}
+	return strings.Replace(rendered, "\n"+header, "\n"+comment+header, 1)
 }
 
 // LoadConfig decodes an installed collector.toml back into a Config, so `dbg
