@@ -49,12 +49,23 @@ type awsPlacement struct {
 // which is what makes security-group allowlisting possible.
 func (p awsPlacement) vpcResident() bool { return p.vpc != nil }
 
-// fastForkUnavailable reports whether --fast-fork was asked for on a placement
-// whose collector gets no allow_networks: a VPC-resident collector is admitted
-// by security group, which the fork allowlist cannot name yet, so the collector
-// withholds fork_create (furiousengineering/dbgorilla#7767).
-func (p awsPlacement) fastForkUnavailable(fastFork bool, allowCIDR string) bool {
-	return fastFork && p.vpcResident() && allowCIDR == ""
+// forkSecurityGroups is what a --fast-fork collector names on a fork's
+// firewall in place of an address: its own security group, when it runs inside
+// the cluster's VPC. A fork's network is a new block on that same VPC, so the
+// rule matches there exactly as it does on the source — but only for a
+// collector dialling private addresses, since traffic to a public address
+// leaves through the internet gateway and never carries the group.
+func (p awsPlacement) forkSecurityGroups(usePrivate bool) []string {
+	if !p.vpcResident() || !usePrivate || p.securityGroup == "" {
+		return nil
+	}
+	return []string{p.securityGroup}
+}
+
+// fastForkUnavailable reports whether a --fast-fork collector was left with
+// nothing to name on a fork's firewall, in which case it withholds fork_create.
+func fastForkUnavailable(fastFork bool, p collector.Provider) bool {
+	return fastFork && len(p.AllowNetworks) == 0 && len(p.AllowSecurityGroups) == 0
 }
 
 // resolveAWSPlacement decides where the collector runs.
@@ -185,7 +196,7 @@ func resolveVPCResidentPlacement(
 		p.securityGroup = "<created-at-install>"
 		return p, nil
 	}
-	if err := placement.EnsureSecurityGroup(ctx, region, stackName); err != nil {
+	if err := ensureCollectorSG(&placement, ctx, region, stackName); err != nil {
 		return nil, err
 	}
 	p.vpc, p.securityGroup = &placement, placement.SecurityGroupID
@@ -218,10 +229,13 @@ func mustString(cmd *cobra.Command, name string) string {
 //
 // Unlike the address path there is nothing to re-detect later: a redeploy moves
 // the task's address but not its security group.
+//
+// subnetFallback reports that the cluster refused the group and the collector
+// was admitted by its subnets instead; a fork would refuse the group too.
 func allowlistCollectorSecurityGroup(
 	ctx context.Context, in *instaclustrInstall, p *awsPlacement,
 	opCreated bool, removeOperatorRule func(),
-) error {
+) (subnetFallback bool, err error) {
 	rule, created, err := ensureSGRule(ctx, in.setupCreds, in.clusterID, p.securityGroup)
 	if err != nil {
 		// The security-group entry is the better one — it survives a redeploy —
@@ -230,7 +244,7 @@ func allowlistCollectorSecurityGroup(
 		// admitted, and its subnets are a network the firewall understands.
 		fmt.Println(style.Warn(fmt.Sprintf(
 			"⚠  The cluster would not accept a security-group firewall rule (%v).", err)))
-		return allowlistCollectorSubnets(ctx, in, p, removeOperatorRule)
+		return true, allowlistCollectorSubnets(ctx, in, p, removeOperatorRule)
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ Firewall: allowlisted security group %s for the collector",
 		p.securityGroup)))
@@ -242,7 +256,7 @@ func allowlistCollectorSecurityGroup(
 
 	st, lerr := collector.LoadState()
 	if lerr != nil || st == nil {
-		return nil
+		return false, nil
 	}
 	st.CollectorSecurityGroupID = p.securityGroup
 	if created {
@@ -254,7 +268,7 @@ func allowlistCollectorSecurityGroup(
 	if serr := collector.SaveState(st); serr != nil {
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  could not record the firewall rule id: %v", serr)))
 	}
-	return nil
+	return false, nil
 }
 
 // allowlistCollectorSubnets admits the collector by the networks its task can
