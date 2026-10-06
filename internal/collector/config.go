@@ -135,7 +135,13 @@ type Provider struct {
 	ProvisioningAPIKey string `toml:"provisioning_api_key,omitempty"`
 	// AllowNetworks are the CIDRs the collector should allowlist on a fork's
 	// firewall. Written at install from the collector's own egress address.
-	AllowNetworks       []string `toml:"allow_networks,omitempty"`
+	AllowNetworks []string `toml:"allow_networks,omitempty"`
+	// AllowSecurityGroups are the security groups (sg- ids) the collector
+	// should allowlist on a fork's firewall: its own group, when it runs
+	// inside the cluster's VPC and has no stable address to name. Such a rule
+	// matches only traffic to private addresses, so the collector refuses the
+	// key without use_private_addresses.
+	AllowSecurityGroups []string `toml:"allow_security_groups,omitempty"`
 	UsePrivateAddresses bool     `toml:"use_private_addresses,omitempty"`
 }
 

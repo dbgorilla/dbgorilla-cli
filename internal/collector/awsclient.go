@@ -34,6 +34,9 @@ var loadAWSConfig = loadAWSConfigDefault
 func loadAWSConfigDefault(ctx context.Context, region string) (aws.Config, error) {
 	awsCfgOnce.Do(func() {
 		awsCfg, awsCfgErr = config.LoadDefaultConfig(ctx)
+		if awsCfgErr != nil {
+			awsCfg, awsCfgErr = loadViaLoginSource(ctx, awsCfgErr)
+		}
 	})
 	if awsCfgErr != nil {
 		return aws.Config{}, awsCfgErr
@@ -53,11 +56,11 @@ func AwsAvailable() error {
 	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("could not load AWS configuration "+
-			"(set AWS_PROFILE, or run 'aws configure' / 'aws sso login'): %w", err)
+			"(set AWS_PROFILE, or run 'aws configure' / 'aws sso login' / 'aws login'): %w", err)
 	}
 	if _, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
 		return fmt.Errorf("AWS credentials aren't working "+
-			"(run 'aws sso login', or set AWS_PROFILE): %w", err)
+			"(run 'aws sso login' or 'aws login', or set AWS_PROFILE): %w", err)
 	}
 	return nil
 }
