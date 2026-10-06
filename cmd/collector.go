@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -107,8 +108,8 @@ func init() {
 	installCmd.Flags().String("stack-name", collector.DefaultStackName, "AWS: CloudFormation stack name")
 	installCmd.Flags().String("template-url", "", "AWS: deploy this CloudFormation template instead of the published one (must be an S3 URL)")
 	installCmd.Flags().String("config", "", "AWS: TOML file with [[database]] entries to monitor several databases from one collector (supersedes the single --db-* flags)")
-	installCmd.Flags().Bool("enable-commands", false, "AWS/GCP: let DBGorilla fetch the real execution plan for slow queries, run read-only checks, and copy table statistics so a sandbox plans like production. Plans use EXPLAIN without ANALYZE, so the query never runs. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. Statistics copy no table rows. Off by default")
-	installCmd.Flags().String("commands", "", "AWS/GCP: comma-separated subset of commands to allow on every database ("+strings.Join(collector.CommandCatalog("postgres"), ", ")+"). Off unless this or --enable-commands is given; with neither, an interactive run asks per database with nothing selected. --commands=\"\" turns them off")
+	installCmd.Flags().Bool("enable-commands", false, "Allow all three commands on each new database: real execution plans for slow queries (explain), read-only checks (execute_query), and a copy of table statistics so a sandbox plans like production (collect_statistics). Without this flag a new database gets explain only, because it returns the plan and never runs the query. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. Statistics copy no table rows. --enable-commands=false allows none, explain included")
+	installCmd.Flags().String("commands", "", "Comma-separated commands to allow on every database ("+strings.Join(collector.CommandCatalog("postgres"), ", ")+"). Default: explain only, which returns query plans and never runs the query; an interactive AWS or GCP run asks per database with explain ticked. --commands=\"\" allows none")
 	installCmd.Flags().Bool("run-grant", false, "AWS: run the IAM grant automatically against each database, needing an admin DB login reachable from here (prompted when interactive; otherwise the SQL is printed)")
 	installCmd.Flags().String("grant-user", "postgres", "AWS: admin database user for --run-grant")
 	installCmd.Flags().String("grant-password", "", "AWS: admin database password for --run-grant (prompted without echo if omitted)")
@@ -551,7 +552,8 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 	}
 	// Per-database commands: the flags when given. Otherwise each database keeps
 	// what it runs with now (a database listed in --config takes its list), so an
-	// update never turns commands on or off as a side effect.
+	// update never turns commands on or off as a side effect. A database new to
+	// the collector gets the default, as on install.
 	keepCommands := !cmd.Flags().Changed("commands") && !cmd.Flags().Changed("enable-commands")
 	if keepCommands {
 		for i := range targets {
@@ -954,26 +956,32 @@ func commandsForcedOff(cmd *cobra.Command) bool {
 }
 
 // promptCommands shows a per-database checklist of the engine's query-analysis
-// commands, none pre-selected: commands are off unless the operator picks them.
-// On error/cancel, or with nothing picked, the database gets none. An engine
-// with no catalog has nothing to ask about.
+// commands, with explain ticked: it returns the plan and never runs the query,
+// so it is the default; the others are opt-in. Unticking everything grants
+// none. On error/cancel there is no answer, so the database gets the default.
+// An engine with no catalog has nothing to ask about.
 func promptCommands(engine, label string) []string {
 	catalog := collector.CommandCatalog(engine)
 	if len(catalog) == 0 {
 		return nil
 	}
+	defaults := collector.DefaultCommands(engine)
 	opts := make([]huh.Option[string], 0, len(catalog))
 	for _, c := range catalog {
-		opts = append(opts, huh.NewOption(commandLabel(c), c))
+		opts = append(opts, huh.NewOption(commandLabel(c), c).Selected(slices.Contains(defaults, c)))
 	}
-	var picked []string
+	picked := append([]string(nil), defaults...)
 	ms := huh.NewMultiSelect[string]().
 		Title(fmt.Sprintf("Allow DBGorilla to analyse slow queries on %s?", label)).
-		Description("Read-only and bounded: a rolled-back read-only transaction, 30 seconds, 1,000 rows.\n" +
+		Description("explain is on by default: it returns the plan and never runs the query.\n" +
+			"The others are read-only and bounded: a rolled-back read-only transaction, 30 seconds, 1,000 rows.\n" +
 			"space toggles · enter confirms · none = off for this database").
 		Options(opts...).
 		Value(&picked)
-	if err := runForm(ms); err != nil || len(picked) == 0 {
+	if err := runForm(ms); err != nil {
+		return defaults
+	}
+	if len(picked) == 0 {
 		return nil // CommandsFor treats an empty request as "all"
 	}
 	return collector.CommandsFor(engine, picked)
@@ -983,9 +991,9 @@ func promptCommands(engine, label string) []string {
 func commandLabel(cmd string) string {
 	switch cmd {
 	case collector.CmdExecuteQuery:
-		return "execute_query — read-only checks (pg_stat_* and system views)"
+		return "execute_query — read-only checks on system views"
 	case collector.CmdExplain:
-		return "explain — real execution plans; EXPLAIN without ANALYZE, the query never runs"
+		return "explain (on by default) — real execution plans; plan only, the query never runs"
 	case collector.CmdCollectStatistics:
 		return "collect_statistics — copy table statistics, no rows, so a sandbox plans like production"
 	default:
@@ -2015,6 +2023,7 @@ func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
 		Databases: databases,
 		User:      user,
 		SSLMode:   sslMode,
+		Commands:  flagCommands(cmd, "postgres"),
 	}, nil
 }
 

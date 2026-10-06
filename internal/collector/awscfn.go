@@ -335,29 +335,36 @@ func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword 
 		}
 	}
 	// keepCommands: no command flag was given, so a database without a list of
-	// its own keeps the commands it runs with now. A database new to this
-	// collector gets none.
+	// its own keeps the commands it runs with now, none included. A database new
+	// to this collector gets the default, as it would on install.
 	if keepCommands {
 		current := map[string][]string{}
 		for _, c := range conf.Component {
 			current[c.Name] = c.Commands
 		}
 		for i := range targets {
-			if len(targets[i].Commands) == 0 {
-				targets[i].Commands = current[targets[i].Name]
+			if len(targets[i].Commands) > 0 {
+				continue
+			}
+			if cmds, known := current[targets[i].Name]; known {
+				targets[i].Commands = cmds
+			} else {
+				targets[i].Commands = DefaultCommands(targets[i].CommandEngine())
 			}
 		}
 	}
 	conf.Component = nil
+	enabled := false
 	for _, t := range targets {
 		conf.Component = append(conf.Component, awsComponent(t, region))
+		enabled = enabled || len(t.Commands) > 0
 	}
-	conf.Commands = perDatabaseCommands(conf.Commands.Enabled)
+	conf.Commands = perDatabaseCommands(enabled)
 	rendered, err := conf.Render()
 	if err != nil {
 		return err
 	}
-	next, err := EncodeConfig(rendered)
+	next, err := encodeStackConfig(rendered)
 	if err != nil {
 		return err
 	}

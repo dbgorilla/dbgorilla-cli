@@ -137,9 +137,10 @@ type CNPGTarget struct {
 	// MetricsTLS reflects .spec.monitoring.tls.enabled. It only has to be
 	// supplied when Kubernetes access is off, because with access the provider
 	// reads it from the Cluster resource itself.
-	MetricsTLS   bool
-	MetricsCA    string
-	CommandsOn   bool
+	MetricsTLS bool
+	MetricsCA  string
+	// Commands the collector may run against the cluster; empty means none.
+	Commands     []string
 	TopologyEach string
 }
 
@@ -231,8 +232,9 @@ func BuildCNPG(agentID, tenantID string, t CNPGTarget, eps Endpoints) Config {
 			AuthBaseURL:  eps.AuthBaseURL,
 		},
 		Component: []Component{{
-			Name:   orDefault(t.Name, t.Cluster),
-			Engine: "postgres",
+			Name:     orDefault(t.Name, t.Cluster),
+			Engine:   "postgres",
+			Commands: t.Commands,
 			Provider: Provider{
 				Type:       CNPGProviderType,
 				Namespace:  t.Namespace,
@@ -253,7 +255,7 @@ func BuildCNPG(agentID, tenantID string, t CNPGTarget, eps Endpoints) Config {
 			},
 		}},
 		Topology: Topology{Interval: interval},
-		Commands: Commands{Enabled: t.CommandsOn},
+		Commands: perDatabaseCommands(len(t.Commands) > 0),
 	}
 }
 

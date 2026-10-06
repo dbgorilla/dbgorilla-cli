@@ -65,9 +65,18 @@ func TestResolveCommands_GcpTargetsClampToTheirEngine(t *testing.T) {
 			t.Errorf("commands = %v", targets[0].Commands)
 		}
 	})
-	t.Run("mysql has no catalog, so analysis stays off for it", func(t *testing.T) {
+	t.Run("mysql gets explain by default", func(t *testing.T) {
 		targets := []GcpTarget{{InstanceID: "my", Engine: "mysql"}}
-		if ResolveCommands(targets, CommandRequest{Explicit: true, Commands: []string{"explain"}}, nil) {
+		if !ResolveCommands(targets, CommandRequest{}, nil) {
+			t.Error("want enabled")
+		}
+		if !reflect.DeepEqual(targets[0].Commands, []string{CmdExplain}) {
+			t.Errorf("commands = %v, want [explain]", targets[0].Commands)
+		}
+	})
+	t.Run("an engine without a catalog gets nothing", func(t *testing.T) {
+		targets := []GcpTarget{{InstanceID: "x", Engine: "sqlserver"}}
+		if ResolveCommands(targets, CommandRequest{}, nil) {
 			t.Error("an engine without a catalog cannot enable analysis")
 		}
 		if len(targets[0].Commands) != 0 {

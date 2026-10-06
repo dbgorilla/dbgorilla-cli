@@ -70,7 +70,7 @@ func init() {
 	installCmd.Flags().String("vpc-id", "", "VPC for the stable-egress private subnet (required with --stable-egress on aws)")
 	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress subnet, e.g. 10.0.200.0/28 (aws and gcp)")
 	installCmd.Flags().String("region", "", "GCP: region for the collector instance (required with --provider instaclustr --target gcp; aws reads AWS_REGION)")
-	installCmd.Flags().Bool("fast-fork", false, "Enable fast-fork sandbox operations on this collector. Turns on the commands system with only fork commands in scope — engine commands (execute_query, explain) stay disabled. Requires a Provisioning API key via --fast-fork-key or "+instaclustrFastForkEnv)
+	installCmd.Flags().Bool("fast-fork", false, "Enable fast-fork sandbox operations on this collector. Adds the fork commands to the collector's commands; engine commands follow --enable-commands and --commands (explain by default). Requires a Provisioning API key via --fast-fork-key or "+instaclustrFastForkEnv)
 	installCmd.Flags().String("fast-fork-key", "", "Instaclustr Provisioning API key the collector keeps for fast-fork operations — an account-wide write key (or "+instaclustrFastForkEnv+")")
 
 	refreshFirewallCmd.Flags().String("instaclustr-user", "", "Instaclustr console username (or "+instaclustrUserEnv+")")
@@ -235,9 +235,6 @@ func runInstallInstaclustr(cmd *cobra.Command) error {
 		comp.Commands = append(comp.Commands, collector.ForkCommands...)
 	}
 	cfg := collector.BuildInstaclustr(creds.AgentID, creds.TenantID, comp, endpointsFor(creds, cmd))
-	if in.fastFork {
-		cfg.Commands.Enabled = true
-	}
 	rendered, err := cfg.Render()
 	if err != nil {
 		rollbackRule()
@@ -279,12 +276,15 @@ type instaclustrInstall struct {
 	// holds for fork lifecycle operations. Present only when --fast-fork is on.
 	provisioningKey string
 	fastFork        bool
-	client          *api.Client
-	ict             collector.InstaclustrTarget
-	seedHost        string
-	usePrivate      bool
-	sslMode         string
-	databases       []string
+	// commands are the engine commands from the flags: explain by default.
+	// Fork commands are appended on top when fastFork is on.
+	commands   []string
+	client     *api.Client
+	ict        collector.InstaclustrTarget
+	seedHost   string
+	usePrivate bool
+	sslMode    string
+	databases  []string
 	// privateSrc is the address the cluster sees this machine arrive from
 	// when setup runs over a private path (VPN, peering, bastion). Empty on
 	// the public path, where the operator's public egress address is used
@@ -313,8 +313,10 @@ func (in *instaclustrInstall) sourceIP(ctx context.Context) (string, error) {
 // resolved, so it reads whatever in.seedHost has settled on.
 func (in *instaclustrInstall) component(passwordEnv string) collector.Component {
 	host, private := in.collectorAddress()
-	return collector.BuildInstaclustrComponent(in.ict, host, 5432, in.databases, in.sslMode, "",
+	comp := collector.BuildInstaclustrComponent(in.ict, host, 5432, in.databases, in.sslMode, "",
 		in.setupCreds.Username, private, passwordEnv, collector.PrometheusKeyRef(in.prometheusKey))
+	comp.Commands = append([]string(nil), in.commands...)
+	return comp
 }
 
 // collectorAddress is the side the COLLECTOR dials, which is not always the
@@ -481,6 +483,7 @@ func resolveInstaclustrInstallInputs(cmd *cobra.Command, apiURL string, dryRun b
 		prometheusKey:   prometheusKey,
 		provisioningKey: provisioningKey,
 		fastFork:        fastFork,
+		commands:        flagCommands(cmd, "postgres"),
 		client:          client,
 		ict:             ict,
 		seedHost:        seedHost,
@@ -614,9 +617,6 @@ func dryRunInstaclustr(cmd *cobra.Command, in *instaclustrInstall, allowCIDR str
 	// Empty credentials: nothing is minted on a dry run, so the endpoints are
 	// whatever the --*-url flags say (or the collector's production defaults).
 	cfg := collector.BuildInstaclustr("<agent-id>", "<tenant-id>", comp, endpointsFor(&api.CollectorCredentials{}, cmd))
-	if in.fastFork {
-		cfg.Commands.Enabled = true
-	}
 	rendered, err := cfg.Render()
 	if err != nil {
 		return err
@@ -1231,7 +1231,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		Subnets:         placement.subnets,
 		SecurityGroup:   placement.securityGroup,
 		AssignPublicIP:  placement.assignPublicIP,
-		CommandsEnabled: in.fastFork,
+		CommandsEnabled: len(comp.Commands) > 0,
 		StableEgress:    placement.stableEgress,
 		VpcID:           placement.vpcID,
 		NatSubnetCidr:   placement.natSubnetCidr,
@@ -1578,7 +1578,7 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 		Region:          region,
 		DeploymentName:  deploymentName,
 		Project:         project,
-		CommandsEnabled: in.fastFork,
+		CommandsEnabled: len(comp.Commands) > 0,
 		StableEgress:    stableEgress,
 		NatSubnetCidr:   natCidr,
 	}

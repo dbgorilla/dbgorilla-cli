@@ -16,38 +16,51 @@
 
 ### Changed
 
-- **Collector commands are now off by default for `--target aws` and
-  `--target gcp`.** Before, a new AWS or GCP collector allowed every command
-  unless you said otherwise, and a non-interactive install turned them all on.
-  Now nothing is allowed until you opt in. Local Docker, `helm-values` and
-  Instaclustr installs were already off and are unchanged.
+- **New databases get `explain` only, on every install path.** With no
+  command flag, local Docker, `--target aws`, `--target gcp`, Instaclustr and
+  `helm-values` installs now allow `explain` and nothing else. `explain` lets
+  DBGorilla fetch the real execution plan for a slow query. It returns the
+  plan only and never runs the query. `execute_query` and
+  `collect_statistics` stay off until you turn them on.
 
-  What commands let DBGorilla do: fetch the real execution plan for slow
-  queries, run read-only checks, and copy table statistics so a sandbox plans
-  like production. The bounds, enforced by the collector: plans use `EXPLAIN`
-  without `ANALYZE`, so the query never runs; checks run in a read-only
-  transaction that is always rolled back, with a 30-second limit and at most
-  1,000 rows; statistics copy no table rows.
+  Before, AWS and GCP allowed every command by default, so a scripted install
+  turned them all on. Local Docker, `helm-values` and Instaclustr allowed
+  none. **Scripted installs now get `explain` only** on every path.
 
-  What to do: if you install AWS or GCP collectors from a script or CI and
-  want commands, add `--enable-commands` (every command) or
-  `--commands=execute_query,explain` (a subset). Without one of those, the new
-  collector runs with commands off. An interactive install still asks per
-  database, now with nothing selected.
+  What to do:
+  - To keep every command, add `--enable-commands`. It allows all three:
+    `explain`, read-only checks (`execute_query`), and a copy of table
+    statistics so a sandbox plans like production (`collect_statistics`).
+    Checks run in a read-only transaction that is always rolled back, with a
+    30-second limit and at most 1,000 rows. Statistics copy no table rows.
+  - To pick a subset, use `--commands=execute_query,explain`.
+  - To allow nothing, `explain` included, use `--enable-commands=false` or
+    `--commands=`. `helm-values` takes `--enable-commands=false`.
+
+  An interactive AWS or GCP install still asks per database, now with
+  `explain` ticked and the others unticked. Unticking everything allows
+  nothing.
 
   Existing collectors are not changed. Re-running `dbg collector install`
   against one you already have keeps each database's current commands unless
   you pass `--enable-commands` or `--commands`. A database added on that run
-  starts with none.
+  gets `explain`, as on a fresh install.
+
+- MySQL databases on `--target gcp` can now be granted commands, and get
+  `explain` by default. Before, the CLI gave a MySQL database none, whatever
+  the flags said.
 
 - `--enable-commands` now also allows `collect_statistics` on AWS and GCP
-  collectors, the table-statistics copy above. Helm installs with
-  `--enable-commands` already allowed it. It needs collector 0.5.0 or later.
+  collectors. Helm installs with `--enable-commands` already allowed it. It
+  needs collector 0.5.0 or later.
 
 - Every `collector.toml` the CLI writes now carries a comment above
-  `[commands]` linking the configuration reference, and noting that `explain`
-  returns query plans only and never runs the query. The comment adds about
-  250 bytes to the AWS stack parameter, which is capped at 4,096.
+  `[commands]`. It says `explain` is on by default because it returns query
+  plans only and never runs your queries, how to turn it off, and links the
+  configuration reference. On AWS the config travels in a stack parameter
+  capped at 4,096 bytes. When a config would not fit with its comments, the
+  CLI drops the comments rather than refuse, so the comment never lowers how
+  many databases one collector can watch.
 
 ### Fixed
 

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -104,31 +105,39 @@ func TestPromptGrantPassword_UnansweredMeansNoPassword(t *testing.T) {
 }
 
 func TestPromptCommands(t *testing.T) {
-	// Nothing is pre-selected; confirming without changing anything leaves
-	// commands off for the database.
-	t.Run("confirming without picking grants nothing", func(t *testing.T) {
-		got := []string{"sentinel"}
+	// explain is pre-selected; confirming without changing anything grants it.
+	t.Run("confirming without changes grants explain", func(t *testing.T) {
+		var got []string
 		scriptForm(t, "\n\n\n", func() { got = promptCommands("postgres", "prod") })
+		if !reflect.DeepEqual(got, []string{collector.CmdExplain}) {
+			t.Errorf("commands = %v, want [explain]", got)
+		}
+	})
+
+	// A cancelled checklist is no answer, so the database gets the default.
+	t.Run("abort grants the default", func(t *testing.T) {
+		var got []string
+		scriptForm(t, "", func() { got = promptCommands("postgres", "prod") })
+		if !reflect.DeepEqual(got, []string{collector.CmdExplain}) {
+			t.Errorf("commands = %v, want [explain] on abort", got)
+		}
+	})
+
+	// Unticking explain leaves nothing ticked, which is an explicit none.
+	t.Run("unticking everything grants nothing", func(t *testing.T) {
+		got := []string{"sentinel"}
+		// Accessible mode: a number toggles that option, a blank line confirms.
+		scriptForm(t, "2\n\n", func() { got = promptCommands("postgres", "prod") })
 		if len(got) != 0 {
 			t.Errorf("commands = %v, want none", got)
 		}
 	})
 
-	// A cancelled checklist must not turn commands on.
-	t.Run("abort grants nothing", func(t *testing.T) {
-		got := []string{"sentinel"}
-		scriptForm(t, "", func() { got = promptCommands("postgres", "prod") })
-		if len(got) != 0 {
-			t.Errorf("commands = %v, want none on abort", got)
-		}
-	})
-
-	t.Run("picking one grants only that one", func(t *testing.T) {
+	t.Run("ticking another adds it to explain", func(t *testing.T) {
 		var got []string
-		// Accessible mode: a number toggles that option, a blank line confirms.
 		scriptForm(t, "1\n\n", func() { got = promptCommands("postgres", "prod") })
-		if len(got) != 1 || got[0] != collector.CmdExecuteQuery {
-			t.Errorf("commands = %v, want [execute_query]", got)
+		if !reflect.DeepEqual(got, []string{collector.CmdExecuteQuery, collector.CmdExplain}) {
+			t.Errorf("commands = %v, want [execute_query explain]", got)
 		}
 	})
 

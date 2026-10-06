@@ -128,13 +128,13 @@ func TestResolveCommands_Precedence(t *testing.T) {
 		}
 	})
 
-	t.Run("no flag and no prompt means off", func(t *testing.T) {
+	t.Run("no flag and no prompt means explain only", func(t *testing.T) {
 		targets := []AwsTarget{{Name: "a"}}
-		if ResolveCommands(targets, CommandRequest{}, nil) {
-			t.Error("want disabled: commands are off unless turned on")
+		if !ResolveCommands(targets, CommandRequest{}, nil) {
+			t.Error("want enabled: explain is on by default")
 		}
-		if len(targets[0].Commands) != 0 {
-			t.Errorf("want no commands, got %v", targets[0].Commands)
+		if !reflect.DeepEqual(targets[0].Commands, []string{CmdExplain}) {
+			t.Errorf("want [explain], got %v", targets[0].Commands)
 		}
 	})
 

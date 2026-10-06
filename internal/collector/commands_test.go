@@ -94,3 +94,35 @@ func TestCloudConfigs_GateOnGrantsNothingByDefault(t *testing.T) {
 		t.Errorf("with the gate off there is nothing to narrow:\n%s", off)
 	}
 }
+
+// A local Docker config carries the database's own list, and turns the gate on
+// with an empty allowed set so nothing else is inherited.
+func TestBuildRendersTargetCommands(t *testing.T) {
+	out, err := Build("a", "t", Target{Name: "n", Host: "h", Port: 5432, User: "u", Commands: DefaultCommands("postgres")}, Endpoints{}).Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`commands = ["explain"]`, "enabled = true", "allowed = []"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	none, err := Build("a", "t", Target{Name: "n", Host: "h", Port: 5432, User: "u"}, Endpoints{}).Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(none, "enabled = false") || strings.Contains(none, "commands = [") {
+		t.Errorf("no commands should render the gate off:\n%s", none)
+	}
+}
+
+func TestDefaultCommandsIsExplainOnEverySupportedEngine(t *testing.T) {
+	for _, engine := range []string{"postgres", "mysql"} {
+		if got := DefaultCommands(engine); len(got) != 1 || got[0] != CmdExplain {
+			t.Errorf("%s: got %v, want [explain]", engine, got)
+		}
+	}
+	if got := DefaultCommands("sqlserver"); len(got) != 0 {
+		t.Errorf("an unknown engine gets nothing, got %v", got)
+	}
+}

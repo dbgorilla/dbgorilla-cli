@@ -84,6 +84,40 @@ func TestRunHelmValues_DryRunNeedsNothing(t *testing.T) {
 	}
 }
 
+// helm-values follows the same default as every install path: explain with no
+// flag, all three with --enable-commands, none with --enable-commands=false.
+func TestRunHelmValues_Commands(t *testing.T) {
+	cases := []struct {
+		name, flag string
+		want       []string
+		notWant    []string
+	}{
+		{"no flag grants explain", "", []string{`commands = ["explain"]`, "enabled = true"}, []string{"execute_query"}},
+		{"enable-commands grants all", "true", []string{`commands = ["execute_query", "explain", "collect_statistics"]`}, nil},
+		{"enable-commands=false grants none", "false", []string{"enabled = false"}, []string{"commands = ["}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolate(t)
+			c := helmDryRunCmd(t)
+			if tc.flag != "" {
+				mustSet(t, c, "enable-commands", tc.flag)
+			}
+			out := capture(t, func() { _ = runHelmValues(c, nil) })
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q:\n%s", w, out)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(out, w) {
+					t.Errorf("unexpected %q:\n%s", w, out)
+				}
+			}
+		})
+	}
+}
+
 // The secret is never rendered into anything pasteable.
 func TestRunHelmValues_DryRunLeaksNoLiterals(t *testing.T) {
 	isolate(t)

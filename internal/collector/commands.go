@@ -3,7 +3,8 @@ package collector
 import "strings"
 
 // Query-analysis commands the collector may run against a monitored database.
-// They are off unless the operator turns them on. Which commands each component
+// explain is on by default (DefaultCommands); the other two are off unless the
+// operator turns them on. Which commands each component
 // may run is per-component, and clamped to what the component's engine
 // supports. The collector enforces the bounds, not this CLI: execute_query runs
 // in a read-only transaction that is always rolled back, with a 30-second
@@ -39,10 +40,22 @@ var ForkCommands = []string{
 const componentEngine = "postgres"
 
 // commandCatalog is the ordered set of commands each engine supports; it is the
-// single source of truth for engine clamping and the interactive picker. MySQL
-// has no entry, so a MySQL component gets no commands.
+// single source of truth for engine clamping and the interactive picker. It
+// mirrors the collector's engines, which support the same three on both.
 var commandCatalog = map[string][]string{
 	"postgres": {CmdExecuteQuery, CmdExplain, CmdCollectStatistics},
+	"mysql":    {CmdExecuteQuery, CmdExplain, CmdCollectStatistics},
+}
+
+// defaultCommands is what a new database gets when nobody chose: explain only.
+// It returns the plan and never runs the query or reads a row, so it is safe to
+// grant unasked; the other two read data and stay opt-in.
+var defaultCommands = []string{CmdExplain}
+
+// DefaultCommands is the commands a new database of this engine gets when no
+// flag or checklist answer says otherwise.
+func DefaultCommands(engine string) []string {
+	return CommandsFor(engine, defaultCommands)
 }
 
 // CommandCatalog lists every command a component of the given engine can run,
@@ -89,13 +102,17 @@ func (t *GcpTarget) CommandEngine() string     { return t.Engine }
 func (t *GcpTarget) CommandList() []string     { return t.Commands }
 func (t *GcpTarget) SetCommandList(c []string) { t.Commands = c }
 
+func (c *Component) CommandEngine() string        { return c.Engine }
+func (c *Component) CommandList() []string        { return c.Commands }
+func (c *Component) SetCommandList(cmds []string) { c.Commands = cmds }
+
 // CommandRequest is how the caller's flags landed, decoupled from cobra: the
 // command layer reads the flags, this layer applies the precedence.
 type CommandRequest struct {
 	// ForcedOff is an explicit hard "no query analysis" — --enable-commands=false
 	// or --commands="" — for policies that forbid the collector issuing any
-	// queries. It clears every database, --config lists included, and skips the
-	// prompt.
+	// queries, explain included. It clears every database, --config lists
+	// included, and skips the prompt.
 	ForcedOff bool
 	// Enabled is --enable-commands=true: every command the engine supports, for
 	// each database that has no list of its own and no --commands. It skips the
@@ -113,13 +130,13 @@ type CommandRequest struct {
 // is on at all. That gate is implicit: on iff at least one database ended up
 // with a command.
 //
-// Commands are off unless something turns them on. Precedence per component:
-// commands from --config win; else an explicit --commands applies to all; else
-// --enable-commands grants everything the engine supports; else prompt, if the
-// caller supplied one; else nothing. All are engine-clamped.
+// Precedence per component: commands from --config win; else an explicit
+// --commands applies to all; else --enable-commands grants everything the engine
+// supports; else prompt, if the caller supplied one; else DefaultCommands. All
+// are engine-clamped.
 //
 // prompt is the interactive per-database checklist. nil means non-interactive,
-// which leaves the database with no commands — keeping the terminal handling in
+// which gives the database DefaultCommands — keeping the terminal handling in
 // the command layer and this precedence testable on its own.
 func ResolveCommands[T any, PT interface {
 	*T
@@ -151,7 +168,7 @@ func ResolveCommands[T any, PT interface {
 		case prompt != nil:
 			t.SetCommandList(prompt(targets[i]))
 		default:
-			t.SetCommandList(nil)
+			t.SetCommandList(DefaultCommands(engine))
 		}
 		if len(t.CommandList()) > 0 {
 			enabled = true // implicit gate: any database with a command turns it on

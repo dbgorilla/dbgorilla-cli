@@ -217,7 +217,7 @@ type Commands struct {
 }
 
 // perDatabaseCommands is the [commands] block for configs whose databases each
-// carry their own list (aws, gcp). With the gate on and Allowed omitted, a
+// carry their own list, which is every config this CLI writes. With the gate on and Allowed omitted, a
 // database the operator left with no commands would inherit every command
 // another database turned on; an empty Allowed keeps it at none.
 func perDatabaseCommands(enabled bool) Commands {
@@ -235,6 +235,8 @@ type Target struct {
 	Databases []string
 	User      string
 	SSLMode   string
+	// Commands the collector may run against this database; empty means none.
+	Commands []string
 }
 
 // Endpoints carries optional explicit endpoint overrides (Phase 1: from the
@@ -268,9 +270,11 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 		sslMode = "verify-full"
 	}
 	cfg := baseConfig(agentID, tenantID, eps, false)
+	cfg.Commands = perDatabaseCommands(len(target.Commands) > 0)
 	cfg.Component = []Component{{
 		Name:     target.Name,
 		Engine:   "postgres",
+		Commands: target.Commands,
 		Provider: Provider{Type: "self_hosted"},
 		Auth: Auth{
 			Method:   "password",
@@ -293,10 +297,12 @@ const CommandsDocsURL = "https://www.dbgorilla.com/docs/getting-started/collecto
 // commandsComment sits above [commands] in every rendered config. Commands are
 // the one setting that lets DBGorilla issue statements against a database, so
 // an operator reading the file should not have to guess what granting them means.
-// Two lines because the AWS target carries the whole config in a 4096-byte
-// CloudFormation parameter.
-const commandsComment = "# Database commands: " + CommandsDocsURL + "\n" +
-	"# explain returns query plans only. It never runs the query.\n"
+// It says why explain is on without being asked, since that is the one
+// command granted by default. Kept short because the AWS target carries the
+// whole config in a 4096-byte CloudFormation parameter.
+const commandsComment = "# explain is on by default: it returns query plans only and never runs your queries.\n" +
+	"# Remove it from a database's commands list to turn it off.\n" +
+	"# Database commands: " + CommandsDocsURL + "\n"
 
 // Render serializes the Config to collector.toml text. The TOML encoder cannot
 // write comments, so the [commands] comment is inserted into its output.

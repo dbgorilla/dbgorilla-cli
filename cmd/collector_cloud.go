@@ -270,6 +270,16 @@ func resolveCommands[T any, PT interface {
 	*T
 	collector.CommandTarget
 }](cmd *cobra.Command, targets []T, label func(T) string) bool {
+	req := commandRequest(cmd)
+	var prompt func(T) []string
+	if interactiveSelectable(cmd) && !req.Explicit && !req.Enabled {
+		prompt = func(t T) []string { return promptCommands(PT(&t).CommandEngine(), label(t)) }
+	}
+	return collector.ResolveCommands[T, PT](targets, req, prompt)
+}
+
+// commandRequest reads --commands and --enable-commands.
+func commandRequest(cmd *cobra.Command) collector.CommandRequest {
 	req := collector.CommandRequest{
 		ForcedOff: commandsForcedOff(cmd),
 		Explicit:  cmd.Flags().Changed("commands"),
@@ -281,11 +291,17 @@ func resolveCommands[T any, PT interface {
 		v, _ := cmd.Flags().GetString("commands")
 		req.Commands = splitCSV(v)
 	}
-	var prompt func(T) []string
-	if interactiveSelectable(cmd) && !req.Explicit && !req.Enabled {
-		prompt = func(t T) []string { return promptCommands(PT(&t).CommandEngine(), label(t)) }
-	}
-	return collector.ResolveCommands[T, PT](targets, req, prompt)
+	return req
+}
+
+// flagCommands is the command list for a single database of this engine from
+// the flags alone, with the same precedence as the cloud targets: explain by
+// default, everything with --enable-commands, none with --enable-commands=false
+// or --commands="". Paths without a per-database checklist use it.
+func flagCommands(cmd *cobra.Command, engine string) []string {
+	comps := []collector.Component{{Engine: engine}}
+	collector.ResolveCommands(comps, commandRequest(cmd), nil)
+	return comps[0].Commands
 }
 
 func awsTargetLabel(t collector.AwsTarget) string { return orUnknown(t.Name) }

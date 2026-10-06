@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
@@ -73,15 +74,42 @@ func TestResolveCommands_HardOff(t *testing.T) {
 	}
 }
 
-func TestResolveCommands_OffByDefault(t *testing.T) {
-	// Non-interactive with no flag: commands stay off.
+func TestResolveCommands_ExplainByDefault(t *testing.T) {
+	// Non-interactive with no flag: explain only, and the gate is on for it.
 	c := commandsTestCmd()
 	targets := []collector.AwsTarget{{Name: "a"}}
-	if resolveCommands(c, targets, awsTargetLabel) {
-		t.Error("no flag should leave commands off")
+	if !resolveCommands(c, targets, awsTargetLabel) {
+		t.Error("no flag should turn commands on for explain")
 	}
-	if len(targets[0].Commands) != 0 {
-		t.Errorf("no flag should grant nothing, got %v", targets[0].Commands)
+	if !reflect.DeepEqual(targets[0].Commands, []string{collector.CmdExplain}) {
+		t.Errorf("no flag should grant explain only, got %v", targets[0].Commands)
+	}
+}
+
+// Paths without a per-database checklist (local Docker, Instaclustr,
+// helm-values) read the flags through flagCommands.
+func TestFlagCommands(t *testing.T) {
+	cases := []struct {
+		name  string
+		flags map[string]string
+		want  []string
+	}{
+		{"no flag grants explain", nil, []string{collector.CmdExplain}},
+		{"enable-commands grants all", map[string]string{"enable-commands": "true"}, collector.CommandCatalog("postgres")},
+		{"enable-commands=false grants none", map[string]string{"enable-commands": "false"}, nil},
+		{"empty --commands grants none", map[string]string{"commands": ""}, nil},
+		{"--commands picks a subset", map[string]string{"commands": "execute_query"}, []string{collector.CmdExecuteQuery}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := commandsTestCmd()
+			for k, v := range tc.flags {
+				_ = c.Flags().Set(k, v)
+			}
+			if got := flagCommands(c, "postgres"); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

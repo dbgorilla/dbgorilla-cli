@@ -84,3 +84,55 @@ func TestWithCommandsCommentAtStartOfFile(t *testing.T) {
 		t.Errorf("got:\n%s", got)
 	}
 }
+
+// The comment must never cost a database on AWS: a config that fits keeps it,
+// and one that fits only without it is sent without it.
+func TestEncodeStackConfigDropsCommentsOnlyWhenNeeded(t *testing.T) {
+	targets := func(n int) []AwsTarget {
+		var out []AwsTarget
+		for i := 0; i < n; i++ {
+			id := "db-" + strings.Repeat("x", 2) + string(rune('a'+i))
+			out = append(out, AwsTarget{Name: id, InstanceID: id, Host: id + ".c1a2b3c4d5e6.us-east-1.rds.amazonaws.com",
+				Port: 5432, User: "dbgorilla", Commands: DefaultCommands("postgres")})
+		}
+		return out
+	}
+	small, err := awsConfigTOML("a", "t", "us-east-1", targets(1), Endpoints{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := encodeStackConfig(small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec, _ := DecodeConfig(enc); !strings.Contains(dec, commandsComment) {
+		t.Error("a config that fits should keep its comment")
+	}
+
+	// Grow until the full text no longer fits but the compact one does.
+	for n := 2; n < 40; n++ {
+		full, err := awsConfigTOML("a", "t", "us-east-1", targets(n), Endpoints{}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := EncodeConfig(full); err == nil {
+			continue
+		}
+		if _, err := EncodeConfig(CompactConfig(full)); err != nil {
+			t.Skip("no size where only the compact form fits")
+		}
+		enc, err := encodeStackConfig(full)
+		if err != nil {
+			t.Fatalf("n=%d: should fit once comments are dropped: %v", n, err)
+		}
+		dec, _ := DecodeConfig(enc)
+		if strings.Contains(dec, "#") {
+			t.Errorf("n=%d: comments should be dropped:\n%s", n, dec)
+		}
+		if _, err := StrictParseConfig(dec); err != nil {
+			t.Errorf("compacted config does not parse: %v", err)
+		}
+		return
+	}
+	t.Fatal("never exceeded the limit")
+}

@@ -31,7 +31,7 @@ func init() {
 	f.String("agent-id", "", "Render for a collector identity you already have, instead of provisioning one (needs --tenant-id)")
 	f.String("tenant-id", "", "Tenant the existing collector identity belongs to (needs --agent-id)")
 	f.StringArray("set", nil, "Extra chart value as key=value; repeatable (e.g. --set image.tag=v1.2.3)")
-	f.Bool("enable-commands", false, "Let DBGorilla fetch the real execution plan for slow queries, run read-only checks, and copy table statistics so a sandbox plans like production. Plans use EXPLAIN without ANALYZE, so the query never runs. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. Statistics copy no table rows. Off by default")
+	f.Bool("enable-commands", false, "Allow all three commands: real execution plans for slow queries (explain), read-only checks (execute_query), and a copy of table statistics so a sandbox plans like production (collect_statistics). Without this flag the cluster gets explain only, because it returns the plan and never runs the query. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. Statistics copy no table rows. --enable-commands=false allows none, explain included")
 	f.Bool("yes", false, "Skip confirmation prompts")
 	f.Bool("dry-run", false, "Render everything without minting an identity or writing any file")
 	f.String("auth-url", "", "Override the auth host base URL")
@@ -495,7 +495,6 @@ func cnpgTargetFromFlags(cmd *cobra.Command) (collector.CNPGTarget, error) {
 	get := func(n string) string { v, _ := cmd.Flags().GetString(n); return v }
 	port, _ := cmd.Flags().GetInt("metrics-port")
 	tls, _ := cmd.Flags().GetBool("metrics-tls")
-	commands, _ := cmd.Flags().GetBool("enable-commands")
 	return collector.CNPGTarget{
 		Name:        get("name"),
 		Namespace:   get("namespace"),
@@ -508,6 +507,6 @@ func cnpgTargetFromFlags(cmd *cobra.Command) (collector.CNPGTarget, error) {
 		MetricsPort: port,
 		MetricsTLS:  tls,
 		MetricsCA:   get("metrics-ca"),
-		CommandsOn:  commands,
+		Commands:    flagCommands(cmd, "postgres"),
 	}, nil
 }

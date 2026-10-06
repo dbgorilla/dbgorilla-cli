@@ -60,6 +60,14 @@ func TestRunInstallAWS_HappyPath(t *testing.T) {
 	if st.Region != "us-east-1" {
 		t.Errorf("region should be captured at install time, got %q", st.Region)
 	}
+	// No command flag on a scripted install: the database gets explain only.
+	cfg, derr := collector.DecodeConfig(deploys.params["CollectorConfig"])
+	if derr != nil {
+		t.Fatalf("DecodeConfig: %v", derr)
+	}
+	if !strings.Contains(cfg, `commands = ["explain"]`) || strings.Contains(cfg, "execute_query") {
+		t.Errorf("want explain only on the database:\n%s", cfg)
+	}
 }
 
 // A dry run must mint nothing and create nothing.

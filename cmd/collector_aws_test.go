@@ -299,10 +299,13 @@ func TestProviderLabel(t *testing.T) {
 }
 
 func TestCommandLabel(t *testing.T) {
-	if got := commandLabel(collector.CmdExecuteQuery); !strings.Contains(got, "pg_stat") {
+	if got := commandLabel(collector.CmdExecuteQuery); !strings.Contains(got, "read-only") {
 		t.Errorf("got %q", got)
 	}
-	if got := commandLabel(collector.CmdExplain); !strings.Contains(got, "EXPLAIN") {
+	// explain says it is the default and that the query never runs, and never
+	// claims EXPLAIN ANALYZE.
+	got := commandLabel(collector.CmdExplain)
+	if !strings.Contains(got, "on by default") || !strings.Contains(got, "never runs") || strings.Contains(got, "ANALYZE") {
 		t.Errorf("got %q", got)
 	}
 	// An unknown command shows as itself rather than disappearing.

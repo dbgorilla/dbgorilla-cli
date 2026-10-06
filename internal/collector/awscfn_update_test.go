@@ -216,8 +216,8 @@ func sentConfig(t *testing.T, f *awsFake) Config {
 }
 
 // An update with no command flag must not turn commands on or off: each
-// database keeps what it runs with now, and a database new to the collector
-// gets none, even though the gate is on for the others.
+// database keeps what it runs with now, none included, and a database new to
+// the collector gets the default, explain.
 func TestUpdateComponents_KeepCommandsPreservesEachDatabase(t *testing.T) {
 	kept := updateTarget("kept", "db-kept")
 	kept.Commands = []string{CmdExplain}
@@ -244,11 +244,14 @@ func TestUpdateComponents_KeepCommandsPreservesEachDatabase(t *testing.T) {
 	if !slices.Equal(got["kept"], []string{CmdExplain}) {
 		t.Errorf("kept: want [explain], got %v", got["kept"])
 	}
-	if len(got["off"]) != 0 || len(got["new"]) != 0 {
-		t.Errorf("off and new must have no commands, got off=%v new=%v", got["off"], got["new"])
+	if len(got["off"]) != 0 {
+		t.Errorf("off must keep no commands, got %v", got["off"])
+	}
+	if !slices.Equal(got["new"], []string{CmdExplain}) {
+		t.Errorf("new: want the default [explain], got %v", got["new"])
 	}
 	// With the gate on, a database with no list inherits [commands].allowed;
-	// it must be present and empty, or "off" and "new" would get everything.
+	// it must be present and empty, or "off" would get everything.
 	if !conf.Commands.Enabled || conf.Commands.Allowed == nil || len(*conf.Commands.Allowed) != 0 {
 		t.Errorf("want enabled with allowed = [], got %+v", conf.Commands)
 	}

@@ -371,7 +371,7 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 		t.Errorf("runtime SA = %q", d.Inputs["runtime_service_account"])
 	}
 	cfg := decodedConfig(t, d)
-	for _, want := range []string{`method = "gcp_iam"`, `user = "dbg-test@acme-prod.iam"`, `ssl_mode = "verify-full"`, `enabled = false`} {
+	for _, want := range []string{`method = "gcp_iam"`, `user = "dbg-test@acme-prod.iam"`, `ssl_mode = "verify-full"`, `enabled = true`, `commands = ["explain"]`} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("config missing %s:\n%s", want, cfg)
 		}
@@ -1003,9 +1003,10 @@ func TestRunInstallGCP_CommandsFlags(t *testing.T) {
 		return decodedConfig(t, deploys.deploy)
 	}
 
-	t.Run("no flag leaves commands off", func(t *testing.T) {
+	t.Run("no flag grants explain only", func(t *testing.T) {
 		cfg := run(t, func(*cobra.Command) {})
-		if !strings.Contains(cfg, `enabled = false`) || strings.Contains(cfg, "execute_query") {
+		if !strings.Contains(cfg, `commands = ["explain"]`) || !strings.Contains(cfg, `allowed = []`) ||
+			strings.Contains(cfg, "execute_query") {
 			t.Errorf("config:\n%s", cfg)
 		}
 	})
@@ -1024,7 +1025,7 @@ func TestRunInstallGCP_CommandsFlags(t *testing.T) {
 	})
 	t.Run(`--commands="" turns analysis off`, func(t *testing.T) {
 		cfg := run(t, func(c *cobra.Command) { mustSet(t, c, "commands", "") })
-		if !strings.Contains(cfg, `enabled = false`) || strings.Contains(cfg, "execute_query") {
+		if !strings.Contains(cfg, `enabled = false`) || strings.Contains(cfg, "commands = [") {
 			t.Errorf("config:\n%s", cfg)
 		}
 	})
