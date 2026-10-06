@@ -131,6 +131,8 @@ func icCmd(t *testing.T, apiURL string) *cobra.Command {
 	cmd.Flags().String("ca-cert", "", "")
 	cmd.Flags().Bool("dry-run", false, "")
 	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Bool("enable-commands", false, "")
+	cmd.Flags().String("commands", "", "")
 	cmd.Flags().String("image", "", "")
 	cmd.Flags().String("auth-url", "", "")
 	cmd.Flags().String("keycloak-url", "", "")
@@ -326,6 +328,38 @@ func TestInstallInstaclustrDryRunMutatesNothing(t *testing.T) {
 	}
 	if strings.Contains(out, "key123") || strings.Contains(out, "prom789") {
 		t.Fatalf("a key leaked into the preview:\n%s", out)
+	}
+	if !strings.Contains(out, `commands = ["explain", "collect_statistics"]`) {
+		t.Fatalf("with no command flag the cluster should get explain and collect_statistics:\n%s", out)
+	}
+}
+
+// --enable-commands=false is the opt-out: the cluster gets no commands at all.
+func TestInstallInstaclustrDryRunCommandsOptOut(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	defer srv.Close()
+	setInstallStubs(t, nil, cleanReport(), nil)
+	stubDiscoverInstaclustr(t, icTestTarget(), nil)
+	stubPublicEgressIP(t, "192.0.2.9", nil)
+	stubEnsureFirewallRule(t, collector.FirewallRule{}, false, errors.New("must not be called"))
+	stubCreateInstaclustrRole(t, errors.New("must not be called"))
+
+	cmd := icCmd(t, srv.URL)
+	mustSet(t, cmd, "cluster-id", "c-1")
+	mustSet(t, cmd, "instaclustr-user", "someone")
+	mustSet(t, cmd, "instaclustr-api-key", "key123")
+	mustSet(t, cmd, "dry-run", "true")
+	mustSet(t, cmd, "enable-commands", "false")
+
+	out := capture(t, func() {
+		if err := runInstall(cmd, nil); err != nil {
+			t.Errorf("dry run failed: %v", err)
+		}
+	})
+	if strings.Contains(out, "commands = [") || !strings.Contains(out, "enabled = false") {
+		t.Fatalf("--enable-commands=false should leave the cluster with none:\n%s", out)
 	}
 }
 

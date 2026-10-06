@@ -3,13 +3,18 @@ package collector
 import "strings"
 
 // Query-analysis commands the collector may run against a monitored database.
-// Enabling them lets the collector issue read-only analysis queries; a policy
-// that forbids the collector issuing any queries leaves them off via the global
-// gate ([commands] enabled). Which commands each component may run is
-// per-component, and clamped to what the component's engine supports.
+// explain and collect_statistics are on by default (DefaultCommands);
+// execute_query is off unless the operator turns it on. Which commands each
+// component may run is per-component, and clamped to what the component's
+// engine supports. The collector enforces the bounds, not this CLI:
+// execute_query runs in a read-only transaction that is always rolled back,
+// with a 30-second statement timeout and at most 1,000 rows; explain is
+// plan-only (no ANALYZE), so the query is never executed; collect_statistics
+// copies optimizer statistics and no table rows.
 const (
-	CmdExecuteQuery = "execute_query" // read-only queries against system / pg_stat views
-	CmdExplain      = "explain"       // EXPLAIN / EXPLAIN ANALYZE plans
+	CmdExecuteQuery      = "execute_query"      // read-only checks, e.g. pg_stat_* and system views
+	CmdExplain           = "explain"            // EXPLAIN without ANALYZE: the plan, never the run
+	CmdCollectStatistics = "collect_statistics" // table statistics only, so a sandbox plans like production
 )
 
 // Fork commands the collector may run when the operator enables fast forks
@@ -35,10 +40,59 @@ var ForkCommands = []string{
 const componentEngine = "postgres"
 
 // commandCatalog is the ordered set of commands each engine supports; it is the
-// single source of truth for engine clamping and the interactive picker. MySQL
-// has no entry, so a MySQL component gets no commands.
+// single source of truth for engine clamping and the interactive picker. It
+// mirrors the collector's engines, which support the same three on both.
 var commandCatalog = map[string][]string{
-	"postgres": {CmdExecuteQuery, CmdExplain},
+	"postgres": {CmdExecuteQuery, CmdExplain, CmdCollectStatistics},
+	"mysql":    {CmdExecuteQuery, CmdExplain, CmdCollectStatistics},
+}
+
+// defaultCommands is what a new database gets when nobody chose: explain and
+// collect_statistics. Neither runs the operator's queries or reads a table
+// row. explain returns the plan. collect_statistics copies the optimizer's
+// statistics, which is what lets a recommendation be tested on a replay of
+// the production planner before it is made; without it the test cannot run
+// and the recommendation goes out unchecked. execute_query reads data and
+// stays opt-in.
+var defaultCommands = []string{CmdExplain, CmdCollectStatistics}
+
+// minCollectorVersion is the first collector release that understands each
+// command. A collector reads its config with a closed command list, so a name
+// it does not know is a parse error and the whole config is refused, not just
+// the one command. explain and execute_query predate every image this CLI can
+// install, so only collect_statistics is listed.
+var minCollectorVersion = map[string]string{
+	CmdCollectStatistics: "0.5.0",
+}
+
+// CommandsBeyondImage lists the commands the collector image cannot be
+// expected to understand, so the caller can warn before the collector refuses
+// its config. A tag that is not a version (latest, a digest, a custom build)
+// gives no answer and reports nothing: refusing on an unknown tag would block
+// every custom image.
+func CommandsBeyondImage(image string, commands []string) []string {
+	have, ok := parseVersion(ImageTagOf(image))
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, c := range commands {
+		min, listed := minCollectorVersion[c]
+		if !listed {
+			continue
+		}
+		need, _ := parseVersion(min)
+		if compareVersions(need, have) < 0 { // the image is older than the first release with c
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// DefaultCommands is the commands a new database of this engine gets when no
+// flag or checklist answer says otherwise.
+func DefaultCommands(engine string) []string {
+	return CommandsFor(engine, defaultCommands)
 }
 
 // CommandCatalog lists every command a component of the given engine can run,
@@ -85,13 +139,22 @@ func (t *GcpTarget) CommandEngine() string     { return t.Engine }
 func (t *GcpTarget) CommandList() []string     { return t.Commands }
 func (t *GcpTarget) SetCommandList(c []string) { t.Commands = c }
 
+func (c *Component) CommandEngine() string        { return c.Engine }
+func (c *Component) CommandList() []string        { return c.Commands }
+func (c *Component) SetCommandList(cmds []string) { c.Commands = cmds }
+
 // CommandRequest is how the caller's flags landed, decoupled from cobra: the
 // command layer reads the flags, this layer applies the precedence.
 type CommandRequest struct {
 	// ForcedOff is an explicit hard "no query analysis" — --enable-commands=false
 	// or --commands="" — for policies that forbid the collector issuing any
-	// queries. It clears every database and skips the prompt.
+	// queries, explain included. It clears every database, --config lists
+	// included, and skips the prompt.
 	ForcedOff bool
+	// Enabled is --enable-commands=true: every command the engine supports, for
+	// each database that has no list of its own and no --commands. It skips the
+	// prompt.
+	Enabled bool
 	// Explicit reports that --commands was given (even empty), which applies to
 	// every database and suppresses the interactive checklist.
 	Explicit bool
@@ -102,16 +165,16 @@ type CommandRequest struct {
 // ResolveCommands settles, per database, which query-analysis commands the
 // collector may run, storing them on each target, and reports whether analysis
 // is on at all. That gate is implicit: on iff at least one database ended up
-// with a command. There is no separate yes/no switch — the per-database choice
-// is the switch.
+// with a command.
 //
 // Precedence per component: commands from --config win; else an explicit
-// --commands applies to all; else prompt, if the caller supplied one; else every
-// command the engine supports. All are engine-clamped.
+// --commands applies to all; else --enable-commands grants everything the engine
+// supports; else prompt, if the caller supplied one; else DefaultCommands. All
+// are engine-clamped.
 //
 // prompt is the interactive per-database checklist. nil means non-interactive,
-// which takes the full-catalog default — keeping the terminal handling in the
-// command layer and this precedence testable on its own.
+// which gives the database DefaultCommands — keeping the terminal handling in
+// the command layer and this precedence testable on its own.
 func ResolveCommands[T any, PT interface {
 	*T
 	CommandTarget
@@ -130,11 +193,19 @@ func ResolveCommands[T any, PT interface {
 		case len(t.CommandList()) > 0: // from --config: keep, clamped
 			t.SetCommandList(CommandsFor(engine, t.CommandList()))
 		case req.Explicit:
+			// An empty CommandsFor request means "all", so a --commands value
+			// that names nothing (",") must not reach it.
+			if len(req.Commands) == 0 {
+				t.SetCommandList(nil)
+				break
+			}
 			t.SetCommandList(CommandsFor(engine, req.Commands))
+		case req.Enabled:
+			t.SetCommandList(CommandsFor(engine, nil))
 		case prompt != nil:
 			t.SetCommandList(prompt(targets[i]))
 		default:
-			t.SetCommandList(CommandsFor(engine, nil))
+			t.SetCommandList(DefaultCommands(engine))
 		}
 		if len(t.CommandList()) > 0 {
 			enabled = true // implicit gate: any database with a command turns it on

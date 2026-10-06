@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
@@ -40,7 +41,7 @@ func TestResolveImage_ExplicitFlagOverridesPreferred(t *testing.T) {
 // non-interactive branches (no checklist prompt).
 func commandsTestCmd() *cobra.Command {
 	c := &cobra.Command{}
-	c.Flags().Bool("enable-commands", true, "")
+	c.Flags().Bool("enable-commands", false, "")
 	c.Flags().String("commands", "", "")
 	c.Flags().Bool("yes", false, "")
 	return c
@@ -73,16 +74,56 @@ func TestResolveCommands_HardOff(t *testing.T) {
 	}
 }
 
-func TestResolveCommands_ImplicitGate(t *testing.T) {
-	// No prompt, non-interactive: default is every command, and the gate is
-	// implicitly on because a database ended up with commands.
+func TestResolveCommands_ExplainByDefault(t *testing.T) {
+	// Non-interactive with no flag: the default, and the gate is on for it.
 	c := commandsTestCmd()
 	targets := []collector.AwsTarget{{Name: "a"}}
 	if !resolveCommands(c, targets, awsTargetLabel) {
-		t.Error("default (all commands) should be implicitly enabled")
+		t.Error("no flag should turn commands on for the default")
 	}
-	if len(targets[0].Commands) != 2 {
-		t.Errorf("default should allow the full catalog, got %v", targets[0].Commands)
+	if !reflect.DeepEqual(targets[0].Commands, []string{collector.CmdExplain, collector.CmdCollectStatistics}) {
+		t.Errorf("no flag should grant explain and collect_statistics, got %v", targets[0].Commands)
+	}
+}
+
+// Paths without a per-database checklist (local Docker, Instaclustr,
+// helm-values) read the flags through flagCommands.
+func TestFlagCommands(t *testing.T) {
+	cases := []struct {
+		name  string
+		flags map[string]string
+		want  []string
+	}{
+		{"no flag grants explain and collect_statistics", nil, []string{collector.CmdExplain, collector.CmdCollectStatistics}},
+		{"enable-commands grants all", map[string]string{"enable-commands": "true"}, collector.CommandCatalog("postgres")},
+		{"enable-commands=false grants none", map[string]string{"enable-commands": "false"}, nil},
+		{"empty --commands grants none", map[string]string{"commands": ""}, nil},
+		{"--commands picks a subset", map[string]string{"commands": "execute_query"}, []string{collector.CmdExecuteQuery}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := commandsTestCmd()
+			for k, v := range tc.flags {
+				_ = c.Flags().Set(k, v)
+			}
+			if got := flagCommands(c, "postgres"); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveCommands_EnableCommandsGrantsTheCatalog(t *testing.T) {
+	// --enable-commands turns on every command the engine supports, and the
+	// gate is implicitly on because a database ended up with commands.
+	c := commandsTestCmd()
+	_ = c.Flags().Set("enable-commands", "true")
+	targets := []collector.AwsTarget{{Name: "a"}}
+	if !resolveCommands(c, targets, awsTargetLabel) {
+		t.Error("--enable-commands should turn commands on")
+	}
+	if len(targets[0].Commands) != len(collector.CommandCatalog("postgres")) {
+		t.Errorf("--enable-commands should allow the full catalog, got %v", targets[0].Commands)
 	}
 }
 

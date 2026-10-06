@@ -81,7 +81,8 @@ type Component struct {
 	Name   string `toml:"name"`
 	Engine string `toml:"engine"`
 	// Commands the control plane may run against this database (execute_query,
-	// explain). Omitted means "inherit the global [commands] default".
+	// explain, collect_statistics). Omitted means "inherit the global [commands]
+	// default".
 	Commands []string `toml:"commands,omitempty"`
 	Provider Provider `toml:"provider"`
 	Auth     Auth     `toml:"auth"`
@@ -208,9 +209,23 @@ type Topology struct {
 	Interval string `toml:"interval"`
 }
 
-// Commands is [commands].
+// Commands is [commands]. Enabled grants a database with no commands list of
+// its own the Allowed set, or everything its engine supports when Allowed is
+// nil. A non-nil empty Allowed grants such a database nothing.
 type Commands struct {
-	Enabled bool `toml:"enabled"`
+	Enabled bool      `toml:"enabled"`
+	Allowed *[]string `toml:"allowed,omitempty"`
+}
+
+// perDatabaseCommands is the [commands] block for configs whose databases each
+// carry their own list, which is every config this CLI writes. With the gate on and Allowed omitted, a
+// database the operator left with no commands would inherit every command
+// another database turned on; an empty Allowed keeps it at none.
+func perDatabaseCommands(enabled bool) Commands {
+	if !enabled {
+		return Commands{}
+	}
+	return Commands{Enabled: true, Allowed: &[]string{}}
 }
 
 // Target describes one local database the developer wants monitored.
@@ -221,6 +236,8 @@ type Target struct {
 	Databases []string
 	User      string
 	SSLMode   string
+	// Commands the collector may run against this database; empty means none.
+	Commands []string
 }
 
 // Endpoints carries optional explicit endpoint overrides (Phase 1: from the
@@ -254,9 +271,11 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 		sslMode = "verify-full"
 	}
 	cfg := baseConfig(agentID, tenantID, eps, false)
+	cfg.Commands = perDatabaseCommands(len(target.Commands) > 0)
 	cfg.Component = []Component{{
 		Name:     target.Name,
 		Engine:   "postgres",
+		Commands: target.Commands,
 		Provider: Provider{Type: "self_hosted"},
 		Auth: Auth{
 			Method:   "password",
@@ -273,13 +292,49 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 	return cfg
 }
 
-// Render serializes the Config to collector.toml text.
+// CommandsDocsURL is the reference section that explains [commands].
+const CommandsDocsURL = "https://www.dbgorilla.com/docs/getting-started/collector-installation/config-reference/#database-commands"
+
+// commandsComment sits above [commands] in every rendered config. Commands are
+// the one setting that lets DBGorilla issue statements against a database, so
+// an operator reading the file should not have to guess what granting them means.
+// It says why the two default commands are on without being asked. Kept short
+// because the AWS target carries the whole config in a 4096-byte
+// CloudFormation parameter.
+const commandsComment = "# On by default: explain returns query plans only and never runs your queries;\n" +
+	"# collect_statistics copies optimizer statistics, never table rows, so recommendations can be tested.\n" +
+	"# Remove either from a database's commands list to turn it off.\n" +
+	"# Database commands: " + CommandsDocsURL + "\n"
+
+// commandsOffComment replaces commandsComment when the gate is off. Nothing is
+// on, so a comment that says what is on by default would be wrong; this one
+// says what the collector cannot do and where to read about turning it on.
+const commandsOffComment = "# Off: DBGorilla cannot fetch query plans or optimizer statistics from this collector.\n" +
+	"# Database commands: " + CommandsDocsURL + "\n"
+
+// Render serializes the Config to collector.toml text. The TOML encoder cannot
+// write comments, so the [commands] comment is inserted into its output.
 func (c Config) Render() (string, error) {
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+	return withCommandsComment(buf.String(), c.Commands.Enabled), nil
+}
+
+// withCommandsComment puts the comment for the gate's state directly above the
+// [commands] header. The encoder writes table headers at the start of a line,
+// and only the global table is named exactly [commands].
+func withCommandsComment(rendered string, enabled bool) string {
+	const header = "[commands]\n"
+	comment := commandsOffComment
+	if enabled {
+		comment = commandsComment
+	}
+	if strings.HasPrefix(rendered, header) {
+		return comment + rendered
+	}
+	return strings.Replace(rendered, "\n"+header, "\n"+comment+header, 1)
 }
 
 // LoadConfig decodes an installed collector.toml back into a Config, so `dbg

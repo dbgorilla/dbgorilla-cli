@@ -204,7 +204,7 @@ func TestAwsRegion(t *testing.T) {
 
 func TestCommandCatalog_IsAStableIndependentCopy(t *testing.T) {
 	got := CommandCatalog("postgres")
-	if len(got) != 2 || got[0] != CmdExecuteQuery || got[1] != CmdExplain {
+	if len(got) != 3 || got[0] != CmdExecuteQuery || got[1] != CmdExplain || got[2] != CmdCollectStatistics {
 		t.Fatalf("catalog = %v", got)
 	}
 	// The picker mutates what it is given; the catalog must not be aliased to

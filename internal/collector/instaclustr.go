@@ -500,7 +500,7 @@ func BuildInstaclustr(agentID, tenantID string, comp Component, eps Endpoints) C
 		},
 		Component: []Component{comp},
 		Topology:  Topology{Interval: "60s"},
-		Commands:  Commands{Enabled: false},
+		Commands:  perDatabaseCommands(len(comp.Commands) > 0),
 	}
 }
 
