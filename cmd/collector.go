@@ -1857,11 +1857,10 @@ func endpointsFor(creds *api.CollectorCredentials, cmd *cobra.Command) collector
 // while the install is pointed somewhere that is plainly not production.
 //
 // Those defaults are the production control plane. A deployment that advertises its own endpoints
-// overrides them, which every production install does — but a dev or PR deployment that advertises
-// none leaves the collector dialling production with a credential minted elsewhere. That fails with
-// a bare 401 from a host the operator never named, and nothing in the install output mentions it.
-// Observed against a PR environment on 2026-09-24: the collector spent three restarts reporting
-// "opamp authorization rejected" while pointed at wss://otlp.dbgorilla.com.
+// overrides them, which every production install does — but a self-hosted deployment that
+// advertises none leaves the collector dialling production with a credential minted elsewhere.
+// That fails with a bare 401 from a host the operator never named, and nothing in the install
+// output mentions it.
 func warnIfFallingBackToProd(e collector.Endpoints, cmd *cobra.Command) {
 	apiURL, _ := cmd.Flags().GetString("api-url")
 	if apiURL == "" {

@@ -97,7 +97,7 @@ func TestEndpointsFor(t *testing.T) {
 }
 
 // An endpoint the deployment does not advertise falls back to the collector's built-in default,
-// which is the PRODUCTION control plane. Against a dev or PR deployment that is almost never what
+// which is the PRODUCTION control plane. Against a self-hosted deployment that is almost never what
 // the operator wants, and the failure it produces — a 401 from a host they never named — says
 // nothing about the cause. The install has to say so out loud.
 func TestWarnIfFallingBackToProd(t *testing.T) {
@@ -114,7 +114,7 @@ func TestWarnIfFallingBackToProd(t *testing.T) {
 
 	t.Run("warns for a non-production api-url with nothing advertised", func(t *testing.T) {
 		c := endpointFlagCmd()
-		_ = c.Flags().Set("api-url", "https://pr-dbgorilla-7765.internal.dbgorilla.com")
+		_ = c.Flags().Set("api-url", "https://dbgorilla.example")
 		out := capture(func() { endpointsFor(&api.CollectorCredentials{}, c) })
 		if !strings.Contains(out, "PRODUCTION") || !strings.Contains(out, "--opamp-url") {
 			t.Errorf("expected a production-fallback warning naming the flag, got %q", out)
@@ -123,10 +123,10 @@ func TestWarnIfFallingBackToProd(t *testing.T) {
 
 	t.Run("silent when the deployment advertises its own endpoints", func(t *testing.T) {
 		c := endpointFlagCmd()
-		_ = c.Flags().Set("api-url", "https://pr-dbgorilla-7765.internal.dbgorilla.com")
+		_ = c.Flags().Set("api-url", "https://dbgorilla.example")
 		creds := &api.CollectorCredentials{
-			OtlpBaseURL:  "https://otlp.internal:4317",
-			OpampBaseURL: "wss://opamp.internal/v1/opamp",
+			OtlpBaseURL:  "https://otlp.example:4317",
+			OpampBaseURL: "wss://opamp.example/v1/opamp",
 		}
 		if out := capture(func() { endpointsFor(creds, c) }); strings.Contains(out, "PRODUCTION") {
 			t.Errorf("warned despite advertised endpoints: %q", out)
