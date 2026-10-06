@@ -46,6 +46,7 @@ var (
 	deleteFirewallRule    = collector.DeleteInstaclustrFirewallRule
 	ensureSGRule          = collector.EnsureSecurityGroupRule
 	discoverVPCPlacement  = collector.DiscoverVPCPlacement
+	ensureCollectorSG     = (*collector.VPCPlacement).EnsureSecurityGroup
 	releaseCollectorSG    = collector.ReleaseCollectorSecurityGroup
 	createInstaclustrRole = collector.EnsureInstaclustrRole
 	primaryHost           = collector.PrimaryHost
@@ -53,6 +54,7 @@ var (
 	publicEgressIP        = func(ctx context.Context) (string, error) { return collector.PublicEgressIP(ctx) }
 	stackOutput           = collector.StackOutput
 	gcpDeploymentOutput   = collector.GcpDeploymentOutput
+	updateStackConfig     = collector.UpdateConfig
 )
 
 func init() {
@@ -1200,11 +1202,6 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	// Inside the cluster's VPC the collector takes the private path, whatever
 	// side the operator had to use to reach the cluster from here.
 	in.collectorPrivate = placement.collectorUsePrivate
-	if placement.fastForkUnavailable(in.fastFork, allowCIDR) {
-		fmt.Println(style.Warn("⚠  Fast forks will not be available on this install: the collector runs inside the cluster's VPC " +
-			"and is allowlisted by security group, which a fork's firewall cannot name yet (furiousengineering/dbgorilla#7767). " +
-			"Existing forks and snapshots stay usable; the install continues."))
-	}
 
 	// The collector's security group is created before the role, the identity
 	// and the stack, so every failure from here on has to hand it back — an
@@ -1228,18 +1225,9 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	comp := in.component(collector.CloudDBPasswordEnv)
-	if in.fastFork {
-		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
-		if allowCIDR != "" {
-			comp.Provider.AllowNetworks = []string{allowCIDR}
-		}
-		comp.Commands = append(comp.Commands, collector.ForkCommands...)
-	}
 	input := collector.AwsStackInput{
 		Region:          region,
 		AccountID:       accountID,
-		Components:      []collector.Component{comp},
 		Subnets:         placement.subnets,
 		SecurityGroup:   placement.securityGroup,
 		AssignPublicIP:  placement.assignPublicIP,
@@ -1279,7 +1267,18 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		releasePlacement()
 		return err
 	}
-	input.Components = []collector.Component{in.component(collector.CloudDBPasswordEnv)}
+	// The component is built here, on the primary the role step settled, and
+	// carries what --fast-fork adds.
+	comp := in.component(collector.CloudDBPasswordEnv)
+	if in.fastFork {
+		comp.Provider.ProvisioningAPIKey = collector.ProvisioningKeyRef(in.provisioningKey)
+		if allowCIDR != "" {
+			comp.Provider.AllowNetworks = []string{allowCIDR}
+		}
+		comp.Provider.AllowSecurityGroups = placement.forkSecurityGroups(comp.Provider.UsePrivateAddresses)
+		comp.Commands = append(comp.Commands, collector.ForkCommands...)
+	}
+	input.Components = []collector.Component{comp}
 
 	fmt.Println(style.Info("Provisioning collector identity..."))
 	creds, err := in.client.ProvisionCollector()
@@ -1346,15 +1345,33 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	// or the one the operator supplied.
 	//
 	// egressCIDR is that address, and is deliberately empty on the VPC-resident
-	// path: a security group is not a CIDR, and the fork allowlist speaks only
-	// CIDRs, so a VPC-resident collector cannot pre-authorise itself on a fork
-	// yet. Teaching the fork allowlist to take a security group is the fix
-	// (furiousengineering/dbgorilla#7767); putting a subnet CIDR here instead
-	// would admit the whole subnet to every fork.
+	// path: that collector names its security group on a fork's firewall too
+	// (allow_security_groups, rendered above). Putting a subnet CIDR here
+	// instead would admit every workload in the subnet to every fork.
 	var egressCIDR string
 	if placement.vpcResident() {
-		if err := allowlistCollectorSecurityGroup(ctx, in, placement, opCreated, removeOperatorRule); err != nil {
+		subnetFallback, err := allowlistCollectorSecurityGroup(ctx, in, placement, opCreated, removeOperatorRule)
+		if err != nil {
 			return err
+		}
+		// A cluster that refused the group on the source would refuse it on a
+		// fork too, so the config must not name it. The group was rendered
+		// before the refusal was known; the refusal is the rare case, so it
+		// pays for the second update rather than every install.
+		if subnetFallback && len(comp.Provider.AllowSecurityGroups) > 0 {
+			comp.Provider.AllowSecurityGroups = nil
+			if err := pushStackConfig(input, comp, stackName, region); err != nil {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  could not remove allow_security_groups from the config: %v. "+
+					"Fast forks will be offered and then refused by the cluster; re-install to clear it", err)))
+			}
+		}
+		if fastForkUnavailable(in.fastFork, comp.Provider) {
+			why := "the cluster would not accept the collector's security group"
+			if !subnetFallback {
+				why = "the collector dials public addresses, which a security-group rule never matches"
+			}
+			fmt.Println(style.Warn("⚠  Fast forks will not be available on this install: " + why +
+				", so a fork's firewall has nothing to admit it by. Existing forks and snapshots stay usable."))
 		}
 	} else {
 		cidr, aerr := allowlistCollectorEgress(ctx, in, placement.stableEgress, func() (string, error) {
@@ -1376,11 +1393,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	// itself on fork clusters.
 	if in.fastFork && placement.stableEgress && egressCIDR != "" {
 		comp.Provider.AllowNetworks = []string{egressCIDR}
-		input.Components = []collector.Component{comp}
-		updatedParams, _, err := collector.AwsStackParams(input)
-		if err != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not re-render config with allow_networks: %v", err)))
-		} else if err := collector.UpdateConfig(stackName, region, updatedParams["CollectorConfig"]); err != nil {
+		if err := pushStackConfig(input, comp, stackName, region); err != nil {
 			fmt.Println(style.Warn(fmt.Sprintf("⚠  could not update config with allow_networks: %v (run refresh-firewall after)", err)))
 		} else {
 			fmt.Println(style.Success("✓ Config updated with the collector's egress for fork allowlisting"))
@@ -1393,6 +1406,18 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	fmt.Println("  dbg collector logs -f             # CloudWatch logs")
 	fmt.Println("  dbg collector refresh-firewall    # re-assert the allowlist entry")
 	return nil
+}
+
+// pushStackConfig re-renders the stack's config with comp as its component and
+// pushes it as a parameter-only update, for what the install learns only after
+// the stack is up.
+func pushStackConfig(input collector.AwsStackInput, comp collector.Component, stackName, region string) error {
+	input.Components = []collector.Component{comp}
+	params, _, err := collector.AwsStackParams(input)
+	if err != nil {
+		return err
+	}
+	return updateStackConfig(stackName, region, params["CollectorConfig"])
 }
 
 // --- the gcp substrate ------------------------------------------------------

@@ -45,6 +45,14 @@ func TestRefreshFirewallWithSecurityGroupDetectsNoIP(t *testing.T) {
 	stubStackOutput(t, "", errors.New("must not read the stack egress IP for a security-group allowlist"))
 	cidrs := stubEnsureFirewallRule(t, collector.FirewallRule{}, false, errors.New("must not touch the CIDR allowlist"))
 	groups := stubEnsureSGRule(t, collector.SecurityGroupRule{ID: "r-1", SecurityGroupID: "sg-collector"}, false, nil)
+	// The group is stable, so the config's allow_security_groups is left as the
+	// install rendered it rather than re-rendered.
+	origUpdate := updateStackConfig
+	updateStackConfig = func(_, _, _ string) error {
+		t.Error("a security-group refresh must not rewrite the collector config")
+		return nil
+	}
+	t.Cleanup(func() { updateStackConfig = origUpdate })
 
 	if err := runRefreshFirewall(refreshFirewallCmd, nil); err != nil {
 		t.Fatalf("runRefreshFirewall: %v", err)
