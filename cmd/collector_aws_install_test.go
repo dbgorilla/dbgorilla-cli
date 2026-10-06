@@ -360,6 +360,44 @@ func TestRunInstallAWS_ExistingStackBecomesAnUpdate(t *testing.T) {
 	if update.stack != "dbg-collector" || update.region != "us-east-1" {
 		t.Errorf("update targeted %q/%q", update.stack, update.region)
 	}
+	if !update.keepCommands {
+		t.Error("an update with no command flag must keep each database's current commands")
+	}
+}
+
+// A command flag on an update is a decision about commands, so the update
+// applies it instead of keeping what the collector runs with now.
+func TestRunInstallAWS_UpdateWithEnableCommandsAppliesIt(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	stubStackStatus(t, "CREATE_COMPLETE", nil)
+	update := stubUpdateComponents(t, nil)
+	stubDeploy(t, nil)
+	if err := collector.SaveState(&collector.State{
+		AgentID: "agent-aws", Target: "aws", StackName: "dbg-collector", Region: "us-east-1",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := awsCmd(t)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+	mustSet(t, c, "enable-commands", "true")
+
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("runInstallAWS: %v\n%s", err, out)
+	}
+	if update.keepCommands {
+		t.Error("--enable-commands on an update must be applied, not ignored")
+	}
+	if len(update.targets) != 1 || len(update.targets[0].Commands) != len(collector.CommandCatalog("postgres")) {
+		t.Errorf("want the full catalog on the database, got %+v", update.targets)
+	}
 }
 
 // State can name a stack that was deleted from the console. Updating it would

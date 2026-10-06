@@ -56,9 +56,9 @@ func TestAmbiguousTargetError_LabelsEveryKind(t *testing.T) {
 // ResolveCommands is generic over the cloud targets; the gcp side adds an
 // engine the catalog does not cover.
 func TestResolveCommands_GcpTargetsClampToTheirEngine(t *testing.T) {
-	t.Run("postgres gets the full catalog by default", func(t *testing.T) {
+	t.Run("postgres gets the full catalog when enabled", func(t *testing.T) {
 		targets := []GcpTarget{{InstanceID: "pg", Engine: "postgres"}}
-		if !ResolveCommands(targets, CommandRequest{}, nil) {
+		if !ResolveCommands(targets, CommandRequest{Enabled: true}, nil) {
 			t.Error("want enabled")
 		}
 		if !reflect.DeepEqual(targets[0].Commands, CommandCatalog("postgres")) {

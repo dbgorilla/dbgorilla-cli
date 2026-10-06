@@ -96,14 +96,15 @@ type updateCall struct {
 	stack, region string
 	targets       []collector.AwsTarget
 	password      string
+	keepCommands  bool
 }
 
 func stubUpdateComponents(t *testing.T, err error) *updateCall {
 	t.Helper()
 	rec := &updateCall{}
 	orig := updateComponents
-	updateComponents = func(stack, region string, targets []collector.AwsTarget, password string) error {
-		rec.called, rec.stack, rec.region, rec.targets, rec.password = true, stack, region, targets, password
+	updateComponents = func(stack, region string, targets []collector.AwsTarget, password string, keepCommands bool) error {
+		rec.called, rec.stack, rec.region, rec.targets, rec.password, rec.keepCommands = true, stack, region, targets, password, keepCommands
 		return err
 	}
 	t.Cleanup(func() { updateComponents = orig })
@@ -220,7 +221,7 @@ func awsCmd(t *testing.T) *cobra.Command {
 	c.Flags().String("config", "", "")
 	c.Flags().String("image", collector.DefaultImage, "")
 	c.Flags().String("commands", "", "")
-	c.Flags().Bool("enable-commands", true, "")
+	c.Flags().Bool("enable-commands", false, "")
 	c.Flags().Bool("run-grant", false, "")
 	c.Flags().String("grant-user", "postgres", "")
 	c.Flags().String("grant-password", "", "")

@@ -208,9 +208,23 @@ type Topology struct {
 	Interval string `toml:"interval"`
 }
 
-// Commands is [commands].
+// Commands is [commands]. Enabled grants a database with no commands list of
+// its own the Allowed set, or everything its engine supports when Allowed is
+// nil. A non-nil empty Allowed grants such a database nothing.
 type Commands struct {
-	Enabled bool `toml:"enabled"`
+	Enabled bool      `toml:"enabled"`
+	Allowed *[]string `toml:"allowed,omitempty"`
+}
+
+// perDatabaseCommands is the [commands] block for configs whose databases each
+// carry their own list (aws, gcp). With the gate on and Allowed omitted, a
+// database the operator left with no commands would inherit every command
+// another database turned on; an empty Allowed keeps it at none.
+func perDatabaseCommands(enabled bool) Commands {
+	if !enabled {
+		return Commands{}
+	}
+	return Commands{Enabled: true, Allowed: &[]string{}}
 }
 
 // Target describes one local database the developer wants monitored.

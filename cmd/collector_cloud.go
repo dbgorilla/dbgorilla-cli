@@ -274,12 +274,15 @@ func resolveCommands[T any, PT interface {
 		ForcedOff: commandsForcedOff(cmd),
 		Explicit:  cmd.Flags().Changed("commands"),
 	}
+	if cmd.Flags().Changed("enable-commands") {
+		req.Enabled, _ = cmd.Flags().GetBool("enable-commands")
+	}
 	if req.Explicit {
 		v, _ := cmd.Flags().GetString("commands")
 		req.Commands = splitCSV(v)
 	}
 	var prompt func(T) []string
-	if interactiveSelectable(cmd) && !req.Explicit {
+	if interactiveSelectable(cmd) && !req.Explicit && !req.Enabled {
 		prompt = func(t T) []string { return promptCommands(PT(&t).CommandEngine(), label(t)) }
 	}
 	return collector.ResolveCommands[T, PT](targets, req, prompt)

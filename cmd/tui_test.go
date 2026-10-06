@@ -104,23 +104,31 @@ func TestPromptGrantPassword_UnansweredMeansNoPassword(t *testing.T) {
 }
 
 func TestPromptCommands(t *testing.T) {
-	// Every command is pre-selected; confirming without changing anything
-	// enables the lot.
-	t.Run("confirming keeps every command", func(t *testing.T) {
-		var got []string
+	// Nothing is pre-selected; confirming without changing anything leaves
+	// commands off for the database.
+	t.Run("confirming without picking grants nothing", func(t *testing.T) {
+		got := []string{"sentinel"}
 		scriptForm(t, "\n\n\n", func() { got = promptCommands("postgres", "prod") })
-		if len(got) != len(collector.CommandCatalog("postgres")) {
-			t.Errorf("commands = %v, want the full catalog", got)
+		if len(got) != 0 {
+			t.Errorf("commands = %v, want none", got)
 		}
 	})
 
-	// A cancelled checklist must not silently turn query analysis off — that
-	// would quietly reduce what the collector reports.
-	t.Run("abort falls back to the catalog", func(t *testing.T) {
-		var got []string
+	// A cancelled checklist must not turn commands on.
+	t.Run("abort grants nothing", func(t *testing.T) {
+		got := []string{"sentinel"}
 		scriptForm(t, "", func() { got = promptCommands("postgres", "prod") })
-		if len(got) != len(collector.CommandCatalog("postgres")) {
-			t.Errorf("commands = %v, want the full catalog on abort", got)
+		if len(got) != 0 {
+			t.Errorf("commands = %v, want none on abort", got)
+		}
+	})
+
+	t.Run("picking one grants only that one", func(t *testing.T) {
+		var got []string
+		// Accessible mode: a number toggles that option, a blank line confirms.
+		scriptForm(t, "1\n\n", func() { got = promptCommands("postgres", "prod") })
+		if len(got) != 1 || got[0] != collector.CmdExecuteQuery {
+			t.Errorf("commands = %v, want [execute_query]", got)
 		}
 	})
 

@@ -107,8 +107,8 @@ func init() {
 	installCmd.Flags().String("stack-name", collector.DefaultStackName, "AWS: CloudFormation stack name")
 	installCmd.Flags().String("template-url", "", "AWS: deploy this CloudFormation template instead of the published one (must be an S3 URL)")
 	installCmd.Flags().String("config", "", "AWS: TOML file with [[database]] entries to monitor several databases from one collector (supersedes the single --db-* flags)")
-	installCmd.Flags().Bool("enable-commands", true, "AWS/GCP: set false to forbid the collector issuing any query-analysis queries (a hard off; otherwise the per-database checklist / --commands decides)")
-	installCmd.Flags().String("commands", "", "AWS/GCP: comma-separated query-analysis commands to allow per database (execute_query, explain). Empty + interactive prompts a per-database checklist; empty + non-interactive allows all; --commands=\"\" turns analysis off")
+	installCmd.Flags().Bool("enable-commands", false, "AWS/GCP: let DBGorilla fetch the real execution plan for slow queries, run read-only checks, and copy table statistics so a sandbox plans like production. Plans use EXPLAIN without ANALYZE, so the query never runs. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. Statistics copy no table rows. Off by default")
+	installCmd.Flags().String("commands", "", "AWS/GCP: comma-separated subset of commands to allow on every database ("+strings.Join(collector.CommandCatalog("postgres"), ", ")+"). Off unless this or --enable-commands is given; with neither, an interactive run asks per database with nothing selected. --commands=\"\" turns them off")
 	installCmd.Flags().Bool("run-grant", false, "AWS: run the IAM grant automatically against each database, needing an admin DB login reachable from here (prompted when interactive; otherwise the SQL is printed)")
 	installCmd.Flags().String("grant-user", "postgres", "AWS: admin database user for --run-grant")
 	installCmd.Flags().String("grant-password", "", "AWS: admin database password for --run-grant (prompted without echo if omitted)")
@@ -549,13 +549,22 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 	if err := resolveAwsAuth(cmd, targets, &dbPassword, false); err != nil {
 		return err
 	}
-	// Re-apply per-component query-analysis commands (the component env is
-	// rebuilt on update). The global on/off gate is preserved by UpdateComponents
-	// via UsePreviousValue, so it stays whatever the install set.
-	resolveCommands(cmd, targets, awsTargetLabel)
+	// Per-database commands: the flags when given. Otherwise each database keeps
+	// what it runs with now (a database listed in --config takes its list), so an
+	// update never turns commands on or off as a side effect.
+	keepCommands := !cmd.Flags().Changed("commands") && !cmd.Flags().Changed("enable-commands")
+	if keepCommands {
+		for i := range targets {
+			if len(targets[i].Commands) > 0 {
+				targets[i].Commands = collector.CommandsFor(targets[i].CommandEngine(), targets[i].Commands)
+			}
+		}
+	} else {
+		resolveCommands(cmd, targets, awsTargetLabel)
+	}
 	fmt.Printf("Updating collector %s in place to monitor %d database(s)...\n", st.AgentID, len(targets))
 	if err := withSpinner("Updating collector…", func() error {
-		return updateComponents(st.StackName, st.Region, targets, dbPassword)
+		return updateComponents(st.StackName, st.Region, targets, dbPassword, keepCommands)
 	}); err != nil {
 		return err
 	}
@@ -930,8 +939,8 @@ func resolveAwsAuth(cmd *cobra.Command, targets []collector.AwsTarget, dbPasswor
 
 // commandsForcedOff reports an explicit hard "no query analysis" — for policies
 // that forbid the collector issuing any queries: --enable-commands=false, or
-// --commands="" (an explicitly empty list). Absent either, analysis is offered
-// (the checklist / --commands / the all-commands default decide the specifics).
+// --commands="" (an explicitly empty list). Unlike the default, it also clears
+// lists that came from --config.
 func commandsForcedOff(cmd *cobra.Command) bool {
 	if cmd.Flags().Changed("commands") {
 		v, _ := cmd.Flags().GetString("commands")
@@ -945,8 +954,9 @@ func commandsForcedOff(cmd *cobra.Command) bool {
 }
 
 // promptCommands shows a per-database checklist of the engine's query-analysis
-// commands, all pre-selected. On error/cancel it falls back to allowing all.
-// An engine with no catalog has nothing to ask about.
+// commands, none pre-selected: commands are off unless the operator picks them.
+// On error/cancel, or with nothing picked, the database gets none. An engine
+// with no catalog has nothing to ask about.
 func promptCommands(engine, label string) []string {
 	catalog := collector.CommandCatalog(engine)
 	if len(catalog) == 0 {
@@ -954,16 +964,17 @@ func promptCommands(engine, label string) []string {
 	}
 	opts := make([]huh.Option[string], 0, len(catalog))
 	for _, c := range catalog {
-		opts = append(opts, huh.NewOption(commandLabel(c), c).Selected(true))
+		opts = append(opts, huh.NewOption(commandLabel(c), c))
 	}
-	picked := append([]string(nil), catalog...) // default: all
+	var picked []string
 	ms := huh.NewMultiSelect[string]().
-		Title(fmt.Sprintf("Query-analysis commands for %s", label)).
-		Description("space toggles · enter confirms · none = off for this database").
+		Title(fmt.Sprintf("Allow DBGorilla to analyse slow queries on %s?", label)).
+		Description("Read-only and bounded: a rolled-back read-only transaction, 30 seconds, 1,000 rows.\n" +
+			"space toggles · enter confirms · none = off for this database").
 		Options(opts...).
 		Value(&picked)
-	if err := runForm(ms); err != nil {
-		return catalog
+	if err := runForm(ms); err != nil || len(picked) == 0 {
+		return nil // CommandsFor treats an empty request as "all"
 	}
 	return collector.CommandsFor(engine, picked)
 }
@@ -972,9 +983,11 @@ func promptCommands(engine, label string) []string {
 func commandLabel(cmd string) string {
 	switch cmd {
 	case collector.CmdExecuteQuery:
-		return "execute_query — read pg_stat_* / system views"
+		return "execute_query — read-only checks (pg_stat_* and system views)"
 	case collector.CmdExplain:
-		return "explain — EXPLAIN / EXPLAIN ANALYZE query plans"
+		return "explain — real execution plans; EXPLAIN without ANALYZE, the query never runs"
+	case collector.CmdCollectStatistics:
+		return "collect_statistics — copy table statistics, no rows, so a sandbox plans like production"
 	default:
 		return cmd
 	}

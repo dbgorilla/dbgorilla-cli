@@ -438,6 +438,7 @@ const maxConfigParamBytes = 4096
 // [dbgorilla] identity block plus one [[component]] per monitored database.
 func awsConfigTOML(agentID, tenantID, region string, targets []AwsTarget, eps Endpoints, commandsEnabled bool) (string, error) {
 	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
+	cfg.Commands = perDatabaseCommands(commandsEnabled)
 	for _, t := range targets {
 		cfg.Component = append(cfg.Component, awsComponent(t, region))
 	}

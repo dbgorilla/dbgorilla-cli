@@ -40,7 +40,7 @@ func TestResolveImage_ExplicitFlagOverridesPreferred(t *testing.T) {
 // non-interactive branches (no checklist prompt).
 func commandsTestCmd() *cobra.Command {
 	c := &cobra.Command{}
-	c.Flags().Bool("enable-commands", true, "")
+	c.Flags().Bool("enable-commands", false, "")
 	c.Flags().String("commands", "", "")
 	c.Flags().Bool("yes", false, "")
 	return c
@@ -73,16 +73,29 @@ func TestResolveCommands_HardOff(t *testing.T) {
 	}
 }
 
-func TestResolveCommands_ImplicitGate(t *testing.T) {
-	// No prompt, non-interactive: default is every command, and the gate is
-	// implicitly on because a database ended up with commands.
+func TestResolveCommands_OffByDefault(t *testing.T) {
+	// Non-interactive with no flag: commands stay off.
 	c := commandsTestCmd()
 	targets := []collector.AwsTarget{{Name: "a"}}
-	if !resolveCommands(c, targets, awsTargetLabel) {
-		t.Error("default (all commands) should be implicitly enabled")
+	if resolveCommands(c, targets, awsTargetLabel) {
+		t.Error("no flag should leave commands off")
 	}
-	if len(targets[0].Commands) != 2 {
-		t.Errorf("default should allow the full catalog, got %v", targets[0].Commands)
+	if len(targets[0].Commands) != 0 {
+		t.Errorf("no flag should grant nothing, got %v", targets[0].Commands)
+	}
+}
+
+func TestResolveCommands_EnableCommandsGrantsTheCatalog(t *testing.T) {
+	// --enable-commands turns on every command the engine supports, and the
+	// gate is implicitly on because a database ended up with commands.
+	c := commandsTestCmd()
+	_ = c.Flags().Set("enable-commands", "true")
+	targets := []collector.AwsTarget{{Name: "a"}}
+	if !resolveCommands(c, targets, awsTargetLabel) {
+		t.Error("--enable-commands should turn commands on")
+	}
+	if len(targets[0].Commands) != len(collector.CommandCatalog("postgres")) {
+		t.Errorf("--enable-commands should allow the full catalog, got %v", targets[0].Commands)
 	}
 }
 

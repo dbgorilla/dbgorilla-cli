@@ -7,15 +7,16 @@ import (
 )
 
 func TestCommandsFor(t *testing.T) {
-	all := []string{CmdExecuteQuery, CmdExplain}
+	all := []string{CmdExecuteQuery, CmdExplain, CmdCollectStatistics}
 
 	// Empty request -> all supported, in catalog order.
 	if got := CommandsFor("postgres", nil); !reflect.DeepEqual(got, all) {
 		t.Errorf("empty request = %v, want all %v", got, all)
 	}
 	// A subset is preserved but reordered to catalog order and de-duped.
-	if got := CommandsFor("postgres", []string{"explain", "explain", "execute_query"}); !reflect.DeepEqual(got, all) {
-		t.Errorf("subset = %v, want catalog-ordered %v", got, all)
+	pair := []string{CmdExecuteQuery, CmdExplain}
+	if got := CommandsFor("postgres", []string{"explain", "explain", "execute_query"}); !reflect.DeepEqual(got, pair) {
+		t.Errorf("subset = %v, want catalog-ordered %v", got, pair)
 	}
 	// Unknown commands are dropped (engine clamping).
 	if got := CommandsFor("postgres", []string{"explain", "drop_table"}); !reflect.DeepEqual(got, []string{CmdExplain}) {
@@ -55,4 +56,41 @@ func TestAwsComponent_CommandsEmitted(t *testing.T) {
 			t.Errorf("a target with no commands should render no commands key:\n%s", rendered)
 		}
 	})
+}
+
+// A database left with no commands must stay at none even when another
+// database turns the gate on: the collector gives a component with no list of
+// its own whatever [commands] allows, which is everything unless allowed = [].
+func TestCloudConfigs_GateOnGrantsNothingByDefault(t *testing.T) {
+	aws, err := awsConfigTOML("a", "t", "us-east-2", []AwsTarget{
+		{Name: "on", InstanceID: "on", Host: "h", Commands: []string{CmdExplain}},
+		{Name: "off", InstanceID: "off", Host: "h"},
+	}, Endpoints{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcp, err := GcpConfigTOML("a", "t", []GcpTarget{
+		{InstanceID: "on", Engine: "postgres", Commands: []string{CmdExplain}},
+		{InstanceID: "off", Engine: "postgres"},
+	}, Endpoints{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, rendered := range map[string]string{"aws": aws, "gcp": gcp} {
+		conf, err := StrictParseConfig(rendered)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !conf.Commands.Enabled || conf.Commands.Allowed == nil || len(*conf.Commands.Allowed) != 0 {
+			t.Errorf("%s: want enabled with allowed = [], got %+v", name, conf.Commands)
+		}
+	}
+
+	off, err := awsConfigTOML("a", "t", "us-east-2", []AwsTarget{{Name: "off", InstanceID: "off", Host: "h"}}, Endpoints{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(off, "allowed") {
+		t.Errorf("with the gate off there is nothing to narrow:\n%s", off)
+	}
 }

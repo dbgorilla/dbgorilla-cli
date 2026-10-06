@@ -580,6 +580,7 @@ func gcpComponent(t GcpTarget) Component {
 // stay ${ENV} references.
 func GcpConfigTOML(agentID, tenantID string, targets []GcpTarget, eps Endpoints, commandsEnabled bool) (string, error) {
 	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
+	cfg.Commands = perDatabaseCommands(commandsEnabled)
 	for _, t := range targets {
 		cfg.Component = append(cfg.Component, gcpComponent(t))
 	}

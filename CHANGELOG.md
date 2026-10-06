@@ -14,6 +14,36 @@
   collector 0.12.1 or later, the first to understand `allow_security_groups`;
   an older collector ignores the key.
 
+### Changed
+
+- **Collector commands are now off by default for `--target aws` and
+  `--target gcp`.** Before, a new AWS or GCP collector allowed every command
+  unless you said otherwise, and a non-interactive install turned them all on.
+  Now nothing is allowed until you opt in. Local Docker, `helm-values` and
+  Instaclustr installs were already off and are unchanged.
+
+  What commands let DBGorilla do: fetch the real execution plan for slow
+  queries, run read-only checks, and copy table statistics so a sandbox plans
+  like production. The bounds, enforced by the collector: plans use `EXPLAIN`
+  without `ANALYZE`, so the query never runs; checks run in a read-only
+  transaction that is always rolled back, with a 30-second limit and at most
+  1,000 rows; statistics copy no table rows.
+
+  What to do: if you install AWS or GCP collectors from a script or CI and
+  want commands, add `--enable-commands` (every command) or
+  `--commands=execute_query,explain` (a subset). Without one of those, the new
+  collector runs with commands off. An interactive install still asks per
+  database, now with nothing selected.
+
+  Existing collectors are not changed. Re-running `dbg collector install`
+  against one you already have keeps each database's current commands unless
+  you pass `--enable-commands` or `--commands`. A database added on that run
+  starts with none.
+
+- `--enable-commands` now also allows `collect_statistics` on AWS and GCP
+  collectors, the table-statistics copy above. Helm installs with
+  `--enable-commands` already allowed it. It needs collector 0.5.0 or later.
+
 ### Fixed
 
 - On the AWS Fargate `--fast-fork` install, the deployed config keeps the
@@ -29,6 +59,17 @@
   A chain it cannot resolve that way (an `mfa_serial` role, or more than one
   link) keeps the SDK's error and prints the workaround: export the
   credentials with `aws configure export-credentials --format env`.
+
+- On an AWS or GCP collector watching several databases, a database you left
+  with no commands could still run every command when another database had
+  commands turned on. Each database now gets only what was chosen for it.
+  Re-running `dbg collector install` on an affected collector applies the
+  fix, which turns commands off for that database.
+- Unticking every command in the interactive checklist, or a `--commands`
+  value that names no command (such as `,`), allowed every command instead of
+  none. Both now mean none.
+- The checklist described `explain` as running `EXPLAIN ANALYZE`. It never
+  does: the collector requests the plan only, so the query is never executed.
 
 ## v0.7.0
 

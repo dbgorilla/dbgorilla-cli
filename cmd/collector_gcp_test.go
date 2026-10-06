@@ -276,7 +276,7 @@ func gcpCmd(t *testing.T) *cobra.Command {
 	c.Flags().String("db-password", "", "")
 	c.Flags().String("image", collector.DefaultImage, "")
 	c.Flags().String("commands", "", "")
-	c.Flags().Bool("enable-commands", true, "")
+	c.Flags().Bool("enable-commands", false, "")
 	c.Flags().Bool("yes", false, "")
 	c.Flags().Bool("dry-run", false, "")
 	c.Flags().String("auth-url", "", "")
@@ -371,7 +371,7 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 		t.Errorf("runtime SA = %q", d.Inputs["runtime_service_account"])
 	}
 	cfg := decodedConfig(t, d)
-	for _, want := range []string{`method = "gcp_iam"`, `user = "dbg-test@acme-prod.iam"`, `ssl_mode = "verify-full"`, `enabled = true`} {
+	for _, want := range []string{`method = "gcp_iam"`, `user = "dbg-test@acme-prod.iam"`, `ssl_mode = "verify-full"`, `enabled = false`} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("config missing %s:\n%s", want, cfg)
 		}
@@ -1003,9 +1003,16 @@ func TestRunInstallGCP_CommandsFlags(t *testing.T) {
 		return decodedConfig(t, deploys.deploy)
 	}
 
-	t.Run("default allows every command the engine supports", func(t *testing.T) {
+	t.Run("no flag leaves commands off", func(t *testing.T) {
 		cfg := run(t, func(*cobra.Command) {})
-		if !strings.Contains(cfg, `enabled = true`) || !strings.Contains(cfg, `commands = ["execute_query", "explain"]`) {
+		if !strings.Contains(cfg, `enabled = false`) || strings.Contains(cfg, "execute_query") {
+			t.Errorf("config:\n%s", cfg)
+		}
+	})
+	t.Run("--enable-commands allows every command the engine supports", func(t *testing.T) {
+		cfg := run(t, func(c *cobra.Command) { mustSet(t, c, "enable-commands", "true") })
+		if !strings.Contains(cfg, `enabled = true`) || !strings.Contains(cfg, `allowed = []`) ||
+			!strings.Contains(cfg, `commands = ["execute_query", "explain", "collect_statistics"]`) {
 			t.Errorf("config:\n%s", cfg)
 		}
 	})

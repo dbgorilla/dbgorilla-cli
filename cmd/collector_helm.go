@@ -31,7 +31,7 @@ func init() {
 	f.String("agent-id", "", "Render for a collector identity you already have, instead of provisioning one (needs --tenant-id)")
 	f.String("tenant-id", "", "Tenant the existing collector identity belongs to (needs --agent-id)")
 	f.StringArray("set", nil, "Extra chart value as key=value; repeatable (e.g. --set image.tag=v1.2.3)")
-	f.Bool("enable-commands", false, "Allow the control plane to run query-analysis commands (execute_query, explain)")
+	f.Bool("enable-commands", false, "Let DBGorilla fetch the real execution plan for slow queries, run read-only checks, and copy table statistics so a sandbox plans like production. Plans use EXPLAIN without ANALYZE, so the query never runs. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. Statistics copy no table rows. Off by default")
 	f.Bool("yes", false, "Skip confirmation prompts")
 	f.Bool("dry-run", false, "Render everything without minting an identity or writing any file")
 	f.String("auth-url", "", "Override the auth host base URL")

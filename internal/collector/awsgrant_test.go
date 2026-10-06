@@ -89,7 +89,7 @@ func TestAdminDSN(t *testing.T) {
 // The precedence these cases pin used to be reachable only through a
 // cobra.Command; it is now testable on its own.
 func TestResolveCommands_Precedence(t *testing.T) {
-	all := []string{CmdExecuteQuery, CmdExplain}
+	all := []string{CmdExecuteQuery, CmdExplain, CmdCollectStatistics}
 
 	t.Run("config commands win over the flag, and are clamped", func(t *testing.T) {
 		targets := []AwsTarget{{Name: "a", Commands: []string{"execute_query", "bogus"}}}
@@ -128,13 +128,37 @@ func TestResolveCommands_Precedence(t *testing.T) {
 		}
 	})
 
-	t.Run("no prompt means the full catalog", func(t *testing.T) {
+	t.Run("no flag and no prompt means off", func(t *testing.T) {
 		targets := []AwsTarget{{Name: "a"}}
-		if !ResolveCommands(targets, CommandRequest{}, nil) {
+		if ResolveCommands(targets, CommandRequest{}, nil) {
+			t.Error("want disabled: commands are off unless turned on")
+		}
+		if len(targets[0].Commands) != 0 {
+			t.Errorf("want no commands, got %v", targets[0].Commands)
+		}
+	})
+
+	t.Run("enabled means the full catalog and skips the prompt", func(t *testing.T) {
+		targets := []AwsTarget{{Name: "a"}}
+		prompted := false
+		if !ResolveCommands(targets, CommandRequest{Enabled: true}, func(AwsTarget) []string {
+			prompted = true
+			return nil
+		}) {
 			t.Error("want enabled")
 		}
 		if !reflect.DeepEqual(targets[0].Commands, all) {
 			t.Errorf("want the full catalog, got %v", targets[0].Commands)
+		}
+		if prompted {
+			t.Error("--enable-commands must not prompt")
+		}
+	})
+
+	t.Run("an explicit list that names nothing is off, not all", func(t *testing.T) {
+		targets := []AwsTarget{{Name: "a"}}
+		if ResolveCommands(targets, CommandRequest{Explicit: true, Commands: nil}, nil) {
+			t.Error("want disabled")
 		}
 	})
 
