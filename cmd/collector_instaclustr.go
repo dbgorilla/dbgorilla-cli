@@ -1231,7 +1231,9 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		Subnets:         placement.subnets,
 		SecurityGroup:   placement.securityGroup,
 		AssignPublicIP:  placement.assignPublicIP,
-		CommandsEnabled: len(comp.Commands) > 0,
+		// The component is built after placement settles; its commands are
+		// the engine commands plus the fork commands when --fast-fork is on.
+		CommandsEnabled: len(in.commands) > 0 || in.fastFork,
 		StableEgress:    placement.stableEgress,
 		VpcID:           placement.vpcID,
 		NatSubnetCidr:   placement.natSubnetCidr,
