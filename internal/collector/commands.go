@@ -3,14 +3,14 @@ package collector
 import "strings"
 
 // Query-analysis commands the collector may run against a monitored database.
-// explain is on by default (DefaultCommands); the other two are off unless the
-// operator turns them on. Which commands each component
-// may run is per-component, and clamped to what the component's engine
-// supports. The collector enforces the bounds, not this CLI: execute_query runs
-// in a read-only transaction that is always rolled back, with a 30-second
-// statement timeout and at most 1,000 rows; explain is plan-only (no ANALYZE),
-// so the query is never executed; collect_statistics copies optimizer
-// statistics and no table rows.
+// explain and collect_statistics are on by default (DefaultCommands);
+// execute_query is off unless the operator turns it on. Which commands each
+// component may run is per-component, and clamped to what the component's
+// engine supports. The collector enforces the bounds, not this CLI:
+// execute_query runs in a read-only transaction that is always rolled back,
+// with a 30-second statement timeout and at most 1,000 rows; explain is
+// plan-only (no ANALYZE), so the query is never executed; collect_statistics
+// copies optimizer statistics and no table rows.
 const (
 	CmdExecuteQuery      = "execute_query"      // read-only checks, e.g. pg_stat_* and system views
 	CmdExplain           = "explain"            // EXPLAIN without ANALYZE: the plan, never the run
@@ -47,10 +47,47 @@ var commandCatalog = map[string][]string{
 	"mysql":    {CmdExecuteQuery, CmdExplain, CmdCollectStatistics},
 }
 
-// defaultCommands is what a new database gets when nobody chose: explain only.
-// It returns the plan and never runs the query or reads a row, so it is safe to
-// grant unasked; the other two read data and stay opt-in.
-var defaultCommands = []string{CmdExplain}
+// defaultCommands is what a new database gets when nobody chose: explain and
+// collect_statistics. Neither runs the operator's queries or reads a table
+// row. explain returns the plan. collect_statistics copies the optimizer's
+// statistics, which is what lets a recommendation be tested on a replay of
+// the production planner before it is made; without it the test cannot run
+// and the recommendation goes out unchecked. execute_query reads data and
+// stays opt-in.
+var defaultCommands = []string{CmdExplain, CmdCollectStatistics}
+
+// minCollectorVersion is the first collector release that understands each
+// command. A collector reads its config with a closed command list, so a name
+// it does not know is a parse error and the whole config is refused, not just
+// the one command. explain and execute_query predate every image this CLI can
+// install, so only collect_statistics is listed.
+var minCollectorVersion = map[string]string{
+	CmdCollectStatistics: "0.5.0",
+}
+
+// CommandsBeyondImage lists the commands the collector image cannot be
+// expected to understand, so the caller can warn before the collector refuses
+// its config. A tag that is not a version (latest, a digest, a custom build)
+// gives no answer and reports nothing: refusing on an unknown tag would block
+// every custom image.
+func CommandsBeyondImage(image string, commands []string) []string {
+	have, ok := parseVersion(ImageTagOf(image))
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, c := range commands {
+		min, listed := minCollectorVersion[c]
+		if !listed {
+			continue
+		}
+		need, _ := parseVersion(min)
+		if compareVersions(need, have) < 0 { // the image is older than the first release with c
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 // DefaultCommands is the commands a new database of this engine gets when no
 // flag or checklist answer says otherwise.

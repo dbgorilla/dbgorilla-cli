@@ -53,6 +53,14 @@ func TestRenderedConfigsExplainCommands(t *testing.T) {
 			if !strings.Contains(out, CommandsDocsURL) {
 				t.Errorf("missing docs link:\n%s", out)
 			}
+			// The comment explains both default commands, and says what each
+			// never touches: explain never runs the query, collect_statistics
+			// never copies a row.
+			for _, want := range []string{"explain", "never runs your queries", "collect_statistics", "never table rows"} {
+				if !strings.Contains(commandsComment, want) {
+					t.Errorf("comment does not say %q:\n%s", want, commandsComment)
+				}
+			}
 		})
 	}
 }

@@ -247,8 +247,8 @@ func TestUpdateComponents_KeepCommandsPreservesEachDatabase(t *testing.T) {
 	if len(got["off"]) != 0 {
 		t.Errorf("off must keep no commands, got %v", got["off"])
 	}
-	if !slices.Equal(got["new"], []string{CmdExplain}) {
-		t.Errorf("new: want the default [explain], got %v", got["new"])
+	if !slices.Equal(got["new"], DefaultCommands("postgres")) {
+		t.Errorf("new: want the default %v, got %v", DefaultCommands("postgres"), got["new"])
 	}
 	// With the gate on, a database with no list inherits [commands].allowed;
 	// it must be present and empty, or "off" would get everything.

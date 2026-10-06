@@ -589,11 +589,42 @@ func GcpConfigTOML(agentID, tenantID string, targets []GcpTarget, eps Endpoints,
 
 // GcpGrantStatements is the SQL a database admin runs so the collector's IAM
 // database user (registered with gcloud beforehand) can read the database.
-func GcpGrantStatements(user string, databases []string) []string {
+// The statements are per engine: a MySQL user is a 'name'@'host' pair, and its
+// read grants are privileges rather than roles.
+func GcpGrantStatements(engine, user string, databases []string) []string {
+	if engine == "mysql" {
+		return mysqlGrantStatements(user)
+	}
 	u := quoteIdent(user)
 	stmts := []string{"GRANT pg_monitor TO " + u + ";"}
 	for _, db := range databases {
 		stmts = append(stmts, "GRANT CONNECT ON DATABASE "+quoteIdent(db)+" TO "+u+";")
 	}
 	return append(stmts, "GRANT pg_read_all_data TO "+u+";")
+}
+
+// mysqlGrantStatements is the MySQL counterpart of the Postgres grant: PROCESS
+// for the InnoDB status views, REPLICATION CLIENT for replica discovery and
+// lag, SELECT on performance_schema for activity and query insight, and SELECT
+// on every schema so explain can plan a query against the tables it reads (the
+// pg_read_all_data equivalent). collect_statistics reads InnoDB's persistent
+// optimizer statistics, which live in the mysql schema; the global SELECT
+// covers them, and the two tables are named so an operator narrowing the grant
+// knows which ones that command needs.
+func mysqlGrantStatements(user string) []string {
+	u := quoteMySQLUser(user)
+	return []string{
+		"GRANT PROCESS, REPLICATION CLIENT ON *.* TO " + u + ";",
+		"GRANT SELECT ON performance_schema.* TO " + u + ";",
+		"GRANT SELECT ON *.* TO " + u + ";",
+		"-- collect_statistics reads these two (covered by the grant above; listed for a narrower grant):",
+		"GRANT SELECT ON mysql.innodb_table_stats TO " + u + ";",
+		"GRANT SELECT ON mysql.innodb_index_stats TO " + u + ";",
+	}
+}
+
+// quoteMySQLUser renders a MySQL account for a GRANT: 'user'@'%', since a
+// Cloud SQL IAM login arrives from the proxy and no narrower host applies.
+func quoteMySQLUser(user string) string {
+	return "'" + strings.ReplaceAll(user, "'", "''") + "'@'%'"
 }

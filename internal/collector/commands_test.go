@@ -102,7 +102,7 @@ func TestBuildRendersTargetCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`commands = ["explain"]`, "enabled = true", "allowed = []"} {
+	for _, want := range []string{`commands = ["explain", "collect_statistics"]`, "enabled = true", "allowed = []"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
@@ -116,13 +116,45 @@ func TestBuildRendersTargetCommands(t *testing.T) {
 	}
 }
 
-func TestDefaultCommandsIsExplainOnEverySupportedEngine(t *testing.T) {
+// Both engines support collect_statistics, so both default to it: without the
+// optimizer statistics a recommendation cannot be tested before it is made.
+func TestDefaultCommandsIsExplainAndStatisticsOnEverySupportedEngine(t *testing.T) {
+	want := []string{CmdExplain, CmdCollectStatistics}
 	for _, engine := range []string{"postgres", "mysql"} {
-		if got := DefaultCommands(engine); len(got) != 1 || got[0] != CmdExplain {
-			t.Errorf("%s: got %v, want [explain]", engine, got)
+		if got := DefaultCommands(engine); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %v, want %v", engine, got, want)
 		}
 	}
 	if got := DefaultCommands("sqlserver"); len(got) != 0 {
 		t.Errorf("an unknown engine gets nothing, got %v", got)
+	}
+}
+
+// A collector refuses a config naming a command it does not know, so the CLI
+// warns from the image tag alone. A tag that is not a version cannot be
+// ordered and must stay silent, or custom images could never be installed.
+func TestCommandsBeyondImage(t *testing.T) {
+	both := []string{CmdExplain, CmdCollectStatistics}
+	cases := []struct {
+		image string
+		want  []string
+	}{
+		{ImageRepo + ":0.4.2", []string{CmdCollectStatistics}},
+		{ImageRepo + ":v0.4.2", []string{CmdCollectStatistics}},
+		{ImageRepo + ":0.5.0-rc.1", []string{CmdCollectStatistics}},
+		{ImageRepo + ":0.5.0", nil},
+		{ImageRepo + ":0.12.1", nil},
+		{ImageRepo + ":0.5.0@sha256:abc", nil},
+		{ImageRepo + ":latest", nil},
+		{ImageRepo + "@sha256:abc", nil},
+		{"", nil},
+	}
+	for _, c := range cases {
+		if got := CommandsBeyondImage(c.image, both); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%q: got %v, want %v", c.image, got, c.want)
+		}
+	}
+	if got := CommandsBeyondImage(ImageRepo+":0.4.2", []string{CmdExplain}); got != nil {
+		t.Errorf("explain predates every installable image, got %v", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -308,6 +309,11 @@ func TestCommandLabel(t *testing.T) {
 	if !strings.Contains(got, "on by default") || !strings.Contains(got, "never runs") || strings.Contains(got, "ANALYZE") {
 		t.Errorf("got %q", got)
 	}
+	// collect_statistics says it is the default and copies no rows.
+	got = commandLabel(collector.CmdCollectStatistics)
+	if !strings.Contains(got, "on by default") || !strings.Contains(got, "no rows") {
+		t.Errorf("got %q", got)
+	}
 	// An unknown command shows as itself rather than disappearing.
 	if got := commandLabel("future_command"); got != "future_command" {
 		t.Errorf("got %q", got)
@@ -394,5 +400,30 @@ func TestSplitCSV(t *testing.T) {
 	}
 	if splitCSV("") != nil {
 		t.Error("an empty string should yield no values")
+	}
+}
+
+// The warning names the command the image predates and both ways out; a
+// current image or an unversioned tag says nothing.
+func TestWarnCommandSupport(t *testing.T) {
+	both := collector.DefaultCommands("postgres")
+	out := capture(t, func() { warnCommandSupport(collector.ImageRepo+":0.4.0", both) })
+	for _, want := range []string{"0.4.0", "collect_statistics", "--image", "--commands=explain"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning missing %q:\n%s", want, out)
+		}
+	}
+	for _, image := range []string{collector.ImageRepo + ":0.5.0", collector.ImageRepo + ":latest", collector.ImageRepo + "@sha256:abc"} {
+		if out := capture(t, func() { warnCommandSupport(image, both) }); out != "" {
+			t.Errorf("%s: unexpected output %q", image, out)
+		}
+	}
+	// The docker path reads the commands back out of the rendered config.
+	rendered, err := collector.Build("a", "t", collector.Target{Name: "n", Host: "h", Port: 5432, User: "u", Commands: both}, collector.Endpoints{}).Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := renderedCommands(rendered); !reflect.DeepEqual(got, both) {
+		t.Errorf("renderedCommands = %v, want %v", got, both)
 	}
 }

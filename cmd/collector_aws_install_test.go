@@ -65,8 +65,8 @@ func TestRunInstallAWS_HappyPath(t *testing.T) {
 	if derr != nil {
 		t.Fatalf("DecodeConfig: %v", derr)
 	}
-	if !strings.Contains(cfg, `commands = ["explain"]`) || strings.Contains(cfg, "execute_query") {
-		t.Errorf("want explain only on the database:\n%s", cfg)
+	if !strings.Contains(cfg, `commands = ["explain", "collect_statistics"]`) || strings.Contains(cfg, "execute_query") {
+		t.Errorf("want the default explain + collect_statistics on the database:\n%s", cfg)
 	}
 }
 

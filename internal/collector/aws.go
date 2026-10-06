@@ -47,7 +47,7 @@ type AwsTarget struct {
 	ProviderType  string // aws_rds | aws_aurora
 	AuthMethod    string // "iam" (default) | "password" — password rides Secrets Manager
 	// Commands are the query-analysis commands this database allows the collector
-	// to run (execute_query, explain), clamped to the engine. Empty means none
+	// to run (execute_query, explain, collect_statistics), clamped to the engine. Empty means none
 	// (query analysis off for this component).
 	Commands      []string
 	Subnets       []string

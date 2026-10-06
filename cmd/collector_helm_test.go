@@ -92,7 +92,7 @@ func TestRunHelmValues_Commands(t *testing.T) {
 		want       []string
 		notWant    []string
 	}{
-		{"no flag grants explain", "", []string{`commands = ["explain"]`, "enabled = true"}, []string{"execute_query"}},
+		{"no flag grants explain and collect_statistics", "", []string{`commands = ["explain", "collect_statistics"]`, "enabled = true"}, []string{"execute_query"}},
 		{"enable-commands grants all", "true", []string{`commands = ["execute_query", "explain", "collect_statistics"]`}, nil},
 		{"enable-commands=false grants none", "false", []string{"enabled = false"}, []string{"commands = ["}},
 	}

@@ -75,14 +75,14 @@ func TestResolveCommands_HardOff(t *testing.T) {
 }
 
 func TestResolveCommands_ExplainByDefault(t *testing.T) {
-	// Non-interactive with no flag: explain only, and the gate is on for it.
+	// Non-interactive with no flag: the default, and the gate is on for it.
 	c := commandsTestCmd()
 	targets := []collector.AwsTarget{{Name: "a"}}
 	if !resolveCommands(c, targets, awsTargetLabel) {
-		t.Error("no flag should turn commands on for explain")
+		t.Error("no flag should turn commands on for the default")
 	}
-	if !reflect.DeepEqual(targets[0].Commands, []string{collector.CmdExplain}) {
-		t.Errorf("no flag should grant explain only, got %v", targets[0].Commands)
+	if !reflect.DeepEqual(targets[0].Commands, []string{collector.CmdExplain, collector.CmdCollectStatistics}) {
+		t.Errorf("no flag should grant explain and collect_statistics, got %v", targets[0].Commands)
 	}
 }
 
@@ -94,7 +94,7 @@ func TestFlagCommands(t *testing.T) {
 		flags map[string]string
 		want  []string
 	}{
-		{"no flag grants explain", nil, []string{collector.CmdExplain}},
+		{"no flag grants explain and collect_statistics", nil, []string{collector.CmdExplain, collector.CmdCollectStatistics}},
 		{"enable-commands grants all", map[string]string{"enable-commands": "true"}, collector.CommandCatalog("postgres")},
 		{"enable-commands=false grants none", map[string]string{"enable-commands": "false"}, nil},
 		{"empty --commands grants none", map[string]string{"commands": ""}, nil},

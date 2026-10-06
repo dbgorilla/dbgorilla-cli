@@ -70,7 +70,7 @@ func init() {
 	installCmd.Flags().String("vpc-id", "", "VPC for the stable-egress private subnet (required with --stable-egress on aws)")
 	installCmd.Flags().String("nat-subnet-cidr", "", "Unused CIDR in the VPC for the stable-egress subnet, e.g. 10.0.200.0/28 (aws and gcp)")
 	installCmd.Flags().String("region", "", "GCP: region for the collector instance (required with --provider instaclustr --target gcp; aws reads AWS_REGION)")
-	installCmd.Flags().Bool("fast-fork", false, "Enable fast-fork sandbox operations on this collector. Adds the fork commands to the collector's commands; engine commands follow --enable-commands and --commands (explain by default). Requires a Provisioning API key via --fast-fork-key or "+instaclustrFastForkEnv)
+	installCmd.Flags().Bool("fast-fork", false, "Enable fast-fork sandbox operations on this collector. Adds the fork commands to the collector's commands; engine commands follow --enable-commands and --commands (explain and collect_statistics by default). Requires a Provisioning API key via --fast-fork-key or "+instaclustrFastForkEnv)
 	installCmd.Flags().String("fast-fork-key", "", "Instaclustr Provisioning API key the collector keeps for fast-fork operations — an account-wide write key (or "+instaclustrFastForkEnv+")")
 
 	refreshFirewallCmd.Flags().String("instaclustr-user", "", "Instaclustr console username (or "+instaclustrUserEnv+")")
@@ -276,7 +276,8 @@ type instaclustrInstall struct {
 	// holds for fork lifecycle operations. Present only when --fast-fork is on.
 	provisioningKey string
 	fastFork        bool
-	// commands are the engine commands from the flags: explain by default.
+	// commands are the engine commands from the flags: explain and
+	// collect_statistics by default.
 	// Fork commands are appended on top when fastFork is on.
 	commands   []string
 	client     *api.Client
@@ -1226,11 +1227,11 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		return err
 	}
 	input := collector.AwsStackInput{
-		Region:          region,
-		AccountID:       accountID,
-		Subnets:         placement.subnets,
-		SecurityGroup:   placement.securityGroup,
-		AssignPublicIP:  placement.assignPublicIP,
+		Region:         region,
+		AccountID:      accountID,
+		Subnets:        placement.subnets,
+		SecurityGroup:  placement.securityGroup,
+		AssignPublicIP: placement.assignPublicIP,
 		// The component is built after placement settles; its commands are
 		// the engine commands plus the fork commands when --fast-fork is on.
 		CommandsEnabled: len(in.commands) > 0 || in.fastFork,
@@ -1294,6 +1295,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
+	warnCommandSupport(image, in.commands)
 
 	input.AgentID, input.TenantID, input.Image = creds.AgentID, creds.TenantID, image
 	input.Endpoints = endpointsFor(creds, cmd)
@@ -1625,6 +1627,7 @@ func runInstallInstaclustrGCP(cmd *cobra.Command) error {
 	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "instance")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
+	warnCommandSupport(image, in.commands)
 
 	input.AgentID, input.TenantID, input.Image = creds.AgentID, creds.TenantID, image
 	input.Endpoints = endpointsFor(creds, cmd)

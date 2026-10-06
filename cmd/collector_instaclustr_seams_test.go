@@ -329,8 +329,8 @@ func TestInstallInstaclustrDryRunMutatesNothing(t *testing.T) {
 	if strings.Contains(out, "key123") || strings.Contains(out, "prom789") {
 		t.Fatalf("a key leaked into the preview:\n%s", out)
 	}
-	if !strings.Contains(out, `commands = ["explain"]`) {
-		t.Fatalf("with no command flag the cluster should get explain:\n%s", out)
+	if !strings.Contains(out, `commands = ["explain", "collect_statistics"]`) {
+		t.Fatalf("with no command flag the cluster should get explain and collect_statistics:\n%s", out)
 	}
 }
 

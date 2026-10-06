@@ -371,7 +371,7 @@ func TestRunInstallGCP_HappyPath(t *testing.T) {
 		t.Errorf("runtime SA = %q", d.Inputs["runtime_service_account"])
 	}
 	cfg := decodedConfig(t, d)
-	for _, want := range []string{`method = "gcp_iam"`, `user = "dbg-test@acme-prod.iam"`, `ssl_mode = "verify-full"`, `enabled = true`, `commands = ["explain"]`} {
+	for _, want := range []string{`method = "gcp_iam"`, `user = "dbg-test@acme-prod.iam"`, `ssl_mode = "verify-full"`, `enabled = true`, `commands = ["explain", "collect_statistics"]`} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("config missing %s:\n%s", want, cfg)
 		}
@@ -710,7 +710,8 @@ func TestRunInstallGCP_PriorInstall(t *testing.T) {
 			t.Errorf("inputs must be the current contract with the new replica in the login condition, got %v", d.Inputs)
 		}
 		// Identity, endpoints and commands are read back, never re-minted;
-		// the databases and commands the install settled survive.
+		// the databases and commands the install settled survive. The stored
+		// list is explain alone, narrower than today's default, and stays so.
 		cfg := decodedConfig(t, d)
 		for _, want := range []string{`agent_id = "agent-old"`, `tenant_id = "tenant-old"`, `opamp_base_url = "https://opamp.example"`,
 			`otlp_base_url = "https://otlp.example:4318"`, `databases = ["app"]`, `commands = ["explain"]`, `enabled = true`, `method = "gcp_iam"`} {
@@ -1003,9 +1004,9 @@ func TestRunInstallGCP_CommandsFlags(t *testing.T) {
 		return decodedConfig(t, deploys.deploy)
 	}
 
-	t.Run("no flag grants explain only", func(t *testing.T) {
+	t.Run("no flag grants explain and collect_statistics", func(t *testing.T) {
 		cfg := run(t, func(*cobra.Command) {})
-		if !strings.Contains(cfg, `commands = ["explain"]`) || !strings.Contains(cfg, `allowed = []`) ||
+		if !strings.Contains(cfg, `commands = ["explain", "collect_statistics"]`) || !strings.Contains(cfg, `allowed = []`) ||
 			strings.Contains(cfg, "execute_query") {
 			t.Errorf("config:\n%s", cfg)
 		}

@@ -295,13 +295,52 @@ func commandRequest(cmd *cobra.Command) collector.CommandRequest {
 }
 
 // flagCommands is the command list for a single database of this engine from
-// the flags alone, with the same precedence as the cloud targets: explain by
-// default, everything with --enable-commands, none with --enable-commands=false
-// or --commands="". Paths without a per-database checklist use it.
+// the flags alone, with the same precedence as the cloud targets: explain and
+// collect_statistics by default, everything with --enable-commands, none with
+// --enable-commands=false or --commands="". Paths without a per-database
+// checklist use it.
 func flagCommands(cmd *cobra.Command, engine string) []string {
 	comps := []collector.Component{{Engine: engine}}
 	collector.ResolveCommands(comps, commandRequest(cmd), nil)
 	return comps[0].Commands
+}
+
+// warnCommandSupport says when the chosen collector image predates a command
+// the install grants. The collector refuses a config that names a command it
+// does not know, so without the warning the install succeeds here and the
+// collector fails at its first start. Derived from the image tag alone; a tag
+// that is not a version stays silent.
+func warnCommandSupport(image string, commands []string) {
+	beyond := collector.CommandsBeyondImage(image, commands)
+	if len(beyond) == 0 {
+		return
+	}
+	fmt.Println(style.Warn(fmt.Sprintf("⚠  collector image %s predates %s, so it will refuse this config. "+
+		"Use a newer --image, or pass --commands=explain to leave it out",
+		image, strings.Join(beyond, ", "))))
+}
+
+// commandsOf gathers every command granted across the targets, for
+// warnCommandSupport.
+func commandsOf[T any, PT interface {
+	*T
+	collector.CommandTarget
+}](targets []T) []string {
+	var out []string
+	for i := range targets {
+		out = append(out, PT(&targets[i]).CommandList()...)
+	}
+	return out
+}
+
+// renderedCommands reads the commands back out of a rendered config, for the
+// paths that hand finishDockerInstall text rather than targets.
+func renderedCommands(rendered string) []string {
+	cfg, err := collector.ParseConfig(rendered)
+	if err != nil {
+		return nil
+	}
+	return commandsOf[collector.Component](cfg.Component)
 }
 
 func awsTargetLabel(t collector.AwsTarget) string { return orUnknown(t.Name) }

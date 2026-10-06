@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -255,9 +256,9 @@ func TestResolveTarget(t *testing.T) {
 		if len(tgt.Databases) != 2 || tgt.Databases[0] != "app" || tgt.Databases[1] != "analytics" {
 			t.Errorf("databases = %v (empty entries should be trimmed out)", tgt.Databases)
 		}
-		// No command flag: the local collector gets explain only.
-		if len(tgt.Commands) != 1 || tgt.Commands[0] != collector.CmdExplain {
-			t.Errorf("commands = %v, want [explain]", tgt.Commands)
+		// No command flag: the local collector gets the default.
+		if !slices.Equal(tgt.Commands, collector.DefaultCommands("postgres")) {
+			t.Errorf("commands = %v, want %v", tgt.Commands, collector.DefaultCommands("postgres"))
 		}
 	})
 

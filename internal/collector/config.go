@@ -81,7 +81,8 @@ type Component struct {
 	Name   string `toml:"name"`
 	Engine string `toml:"engine"`
 	// Commands the control plane may run against this database (execute_query,
-	// explain). Omitted means "inherit the global [commands] default".
+	// explain, collect_statistics). Omitted means "inherit the global [commands]
+	// default".
 	Commands []string `toml:"commands,omitempty"`
 	Provider Provider `toml:"provider"`
 	Auth     Auth     `toml:"auth"`
@@ -297,11 +298,12 @@ const CommandsDocsURL = "https://www.dbgorilla.com/docs/getting-started/collecto
 // commandsComment sits above [commands] in every rendered config. Commands are
 // the one setting that lets DBGorilla issue statements against a database, so
 // an operator reading the file should not have to guess what granting them means.
-// It says why explain is on without being asked, since that is the one
-// command granted by default. Kept short because the AWS target carries the
-// whole config in a 4096-byte CloudFormation parameter.
-const commandsComment = "# explain is on by default: it returns query plans only and never runs your queries.\n" +
-	"# Remove it from a database's commands list to turn it off.\n" +
+// It says why the two default commands are on without being asked. Kept short
+// because the AWS target carries the whole config in a 4096-byte
+// CloudFormation parameter.
+const commandsComment = "# On by default: explain returns query plans only and never runs your queries;\n" +
+	"# collect_statistics copies optimizer statistics, never table rows, so recommendations can be tested.\n" +
+	"# Remove either from a database's commands list to turn it off.\n" +
 	"# Database commands: " + CommandsDocsURL + "\n"
 
 // Render serializes the Config to collector.toml text. The TOML encoder cannot
