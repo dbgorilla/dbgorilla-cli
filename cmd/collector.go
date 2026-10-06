@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -107,8 +108,8 @@ func init() {
 	installCmd.Flags().String("stack-name", collector.DefaultStackName, "AWS: CloudFormation stack name")
 	installCmd.Flags().String("template-url", "", "AWS: deploy this CloudFormation template instead of the published one (must be an S3 URL)")
 	installCmd.Flags().String("config", "", "AWS: TOML file with [[database]] entries to monitor several databases from one collector (supersedes the single --db-* flags)")
-	installCmd.Flags().Bool("enable-commands", true, "AWS/GCP: set false to forbid the collector issuing any query-analysis queries (a hard off; otherwise the per-database checklist / --commands decides)")
-	installCmd.Flags().String("commands", "", "AWS/GCP: comma-separated query-analysis commands to allow per database (execute_query, explain). Empty + interactive prompts a per-database checklist; empty + non-interactive allows all; --commands=\"\" turns analysis off")
+	installCmd.Flags().Bool("enable-commands", false, "Allow all three commands on each new database: real execution plans for slow queries (explain), a copy of optimizer statistics so recommendations can be tested on a replay of your planner (collect_statistics), and read-only checks (execute_query). Without this flag a new database gets explain and collect_statistics: plans only, never your queries; statistics only, never table rows. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. --enable-commands=false allows none. On MySQL, collect_statistics needs SELECT on mysql.innodb_table_stats and mysql.innodb_index_stats")
+	installCmd.Flags().String("commands", "", "Comma-separated commands to allow on every database ("+strings.Join(collector.CommandCatalog("postgres"), ", ")+"). Default: explain and collect_statistics, which return query plans and optimizer statistics and never run your queries or read table rows; an interactive AWS or GCP run asks per database with both ticked. --commands=\"\" allows none")
 	installCmd.Flags().Bool("run-grant", false, "AWS: run the IAM grant automatically against each database, needing an admin DB login reachable from here (prompted when interactive; otherwise the SQL is printed)")
 	installCmd.Flags().String("grant-user", "postgres", "AWS: admin database user for --run-grant")
 	installCmd.Flags().String("grant-password", "", "AWS: admin database password for --run-grant (prompted without echo if omitted)")
@@ -295,6 +296,7 @@ func finishDockerInstall(cmd *cobra.Command, client *api.Client, creds *api.Coll
 	// deployment blesses (preferred_collector_version); else the CLI default.
 	image, imageSource := resolveImage(cmd, creds)
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
+	warnCommandSupport(image, renderedCommands(rendered))
 
 	// Pin to an immutable digest before running, so a deployment-blessed version
 	// (a bare tag) is as reproducible and tamper-evident as the hard-pinned
@@ -477,6 +479,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "task")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
+	warnCommandSupport(image, commandsOf[collector.AwsTarget](targets))
 
 	params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 		AgentID:         creds.AgentID,
@@ -549,13 +552,23 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 	if err := resolveAwsAuth(cmd, targets, &dbPassword, false); err != nil {
 		return err
 	}
-	// Re-apply per-component query-analysis commands (the component env is
-	// rebuilt on update). The global on/off gate is preserved by UpdateComponents
-	// via UsePreviousValue, so it stays whatever the install set.
-	resolveCommands(cmd, targets, awsTargetLabel)
+	// Per-database commands: the flags when given. Otherwise each database keeps
+	// what it runs with now (a database listed in --config takes its list), so an
+	// update never turns commands on or off as a side effect. A database new to
+	// the collector gets the default, as on install.
+	keepCommands := !cmd.Flags().Changed("commands") && !cmd.Flags().Changed("enable-commands")
+	if keepCommands {
+		for i := range targets {
+			if len(targets[i].Commands) > 0 {
+				targets[i].Commands = collector.CommandsFor(targets[i].CommandEngine(), targets[i].Commands)
+			}
+		}
+	} else {
+		resolveCommands(cmd, targets, awsTargetLabel)
+	}
 	fmt.Printf("Updating collector %s in place to monitor %d database(s)...\n", st.AgentID, len(targets))
 	if err := withSpinner("Updating collector…", func() error {
-		return updateComponents(st.StackName, st.Region, targets, dbPassword)
+		return updateComponents(st.StackName, st.Region, targets, dbPassword, keepCommands)
 	}); err != nil {
 		return err
 	}
@@ -930,8 +943,8 @@ func resolveAwsAuth(cmd *cobra.Command, targets []collector.AwsTarget, dbPasswor
 
 // commandsForcedOff reports an explicit hard "no query analysis" — for policies
 // that forbid the collector issuing any queries: --enable-commands=false, or
-// --commands="" (an explicitly empty list). Absent either, analysis is offered
-// (the checklist / --commands / the all-commands default decide the specifics).
+// --commands="" (an explicitly empty list). Unlike the default, it also clears
+// lists that came from --config.
 func commandsForcedOff(cmd *cobra.Command) bool {
 	if cmd.Flags().Changed("commands") {
 		v, _ := cmd.Flags().GetString("commands")
@@ -945,25 +958,35 @@ func commandsForcedOff(cmd *cobra.Command) bool {
 }
 
 // promptCommands shows a per-database checklist of the engine's query-analysis
-// commands, all pre-selected. On error/cancel it falls back to allowing all.
+// commands, with explain and collect_statistics ticked: neither runs the
+// query or reads a row, so they are the default; execute_query is opt-in.
+// Unticking everything grants none. On error/cancel there is no answer, so
+// the database gets the default.
 // An engine with no catalog has nothing to ask about.
 func promptCommands(engine, label string) []string {
 	catalog := collector.CommandCatalog(engine)
 	if len(catalog) == 0 {
 		return nil
 	}
+	defaults := collector.DefaultCommands(engine)
 	opts := make([]huh.Option[string], 0, len(catalog))
 	for _, c := range catalog {
-		opts = append(opts, huh.NewOption(commandLabel(c), c).Selected(true))
+		opts = append(opts, huh.NewOption(commandLabel(c), c).Selected(slices.Contains(defaults, c)))
 	}
-	picked := append([]string(nil), catalog...) // default: all
+	picked := append([]string(nil), defaults...)
 	ms := huh.NewMultiSelect[string]().
-		Title(fmt.Sprintf("Query-analysis commands for %s", label)).
-		Description("space toggles · enter confirms · none = off for this database").
+		Title(fmt.Sprintf("Allow DBGorilla to analyse slow queries on %s?", label)).
+		Description("explain and collect_statistics are on by default: plans only, never your queries;\n" +
+			"statistics only, never table rows, so recommendations can be tested before you see them.\n" +
+			"execute_query is read-only and bounded: a rolled-back transaction, 30 seconds, 1,000 rows.\n" +
+			"space toggles · enter confirms · none = off for this database").
 		Options(opts...).
 		Value(&picked)
 	if err := runForm(ms); err != nil {
-		return catalog
+		return defaults
+	}
+	if len(picked) == 0 {
+		return nil // CommandsFor treats an empty request as "all"
 	}
 	return collector.CommandsFor(engine, picked)
 }
@@ -972,9 +995,11 @@ func promptCommands(engine, label string) []string {
 func commandLabel(cmd string) string {
 	switch cmd {
 	case collector.CmdExecuteQuery:
-		return "execute_query — read pg_stat_* / system views"
+		return "execute_query — read-only checks on system views"
 	case collector.CmdExplain:
-		return "explain — EXPLAIN / EXPLAIN ANALYZE query plans"
+		return "explain (on by default) — real execution plans; plan only, the query never runs"
+	case collector.CmdCollectStatistics:
+		return "collect_statistics (on by default) — copy optimizer statistics, no rows, so recommendations can be tested"
 	default:
 		return cmd
 	}
@@ -2002,6 +2027,7 @@ func resolveTarget(cmd *cobra.Command) (collector.Target, error) {
 		Databases: databases,
 		User:      user,
 		SSLMode:   sslMode,
+		Commands:  flagCommands(cmd, "postgres"),
 	}, nil
 }
 

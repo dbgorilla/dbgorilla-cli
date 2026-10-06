@@ -3,8 +3,10 @@ package cmd
 import (
 	"bytes"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
 )
@@ -24,7 +26,10 @@ func scriptForm(t *testing.T, answers string, fn func()) string {
 	t.Helper()
 	var out bytes.Buffer
 	origIn, origOut, origAcc := formIO.in, formIO.out, formIO.accessible
-	formIO.in, formIO.out, formIO.accessible = strings.NewReader(answers), &out, true
+	// One byte at a time: each accessible prompt wraps the reader in its own
+	// buffer, so a reader that lets it read ahead loses every answer after the
+	// first prompt.
+	formIO.in, formIO.out, formIO.accessible = iotest.OneByteReader(strings.NewReader(answers)), &out, true
 	t.Cleanup(func() { formIO.in, formIO.out, formIO.accessible = origIn, origOut, origAcc })
 	fn()
 	return out.String()
@@ -104,23 +109,50 @@ func TestPromptGrantPassword_UnansweredMeansNoPassword(t *testing.T) {
 }
 
 func TestPromptCommands(t *testing.T) {
-	// Every command is pre-selected; confirming without changing anything
-	// enables the lot.
-	t.Run("confirming keeps every command", func(t *testing.T) {
+	defaults := []string{collector.CmdExplain, collector.CmdCollectStatistics}
+	// explain and collect_statistics are pre-selected; confirming without
+	// changing anything grants both.
+	t.Run("confirming without changes grants the default", func(t *testing.T) {
 		var got []string
 		scriptForm(t, "\n\n\n", func() { got = promptCommands("postgres", "prod") })
-		if len(got) != len(collector.CommandCatalog("postgres")) {
-			t.Errorf("commands = %v, want the full catalog", got)
+		if !reflect.DeepEqual(got, defaults) {
+			t.Errorf("commands = %v, want %v", got, defaults)
 		}
 	})
 
-	// A cancelled checklist must not silently turn query analysis off — that
-	// would quietly reduce what the collector reports.
-	t.Run("abort falls back to the catalog", func(t *testing.T) {
+	// A cancelled checklist is no answer, so the database gets the default.
+	t.Run("abort grants the default", func(t *testing.T) {
 		var got []string
 		scriptForm(t, "", func() { got = promptCommands("postgres", "prod") })
-		if len(got) != len(collector.CommandCatalog("postgres")) {
-			t.Errorf("commands = %v, want the full catalog on abort", got)
+		if !reflect.DeepEqual(got, defaults) {
+			t.Errorf("commands = %v, want %v on abort", got, defaults)
+		}
+	})
+
+	// Unticking both defaults leaves nothing ticked, which is an explicit none.
+	t.Run("unticking everything grants nothing", func(t *testing.T) {
+		got := []string{"sentinel"}
+		// Accessible mode: a number toggles that option, a blank line confirms.
+		// Options are in catalog order: 1 execute_query, 2 explain, 3 collect_statistics.
+		scriptForm(t, "2\n3\n\n", func() { got = promptCommands("postgres", "prod") })
+		if len(got) != 0 {
+			t.Errorf("commands = %v, want none", got)
+		}
+	})
+
+	t.Run("unticking collect_statistics leaves explain", func(t *testing.T) {
+		var got []string
+		scriptForm(t, "3\n\n", func() { got = promptCommands("postgres", "prod") })
+		if !reflect.DeepEqual(got, []string{collector.CmdExplain}) {
+			t.Errorf("commands = %v, want [explain]", got)
+		}
+	})
+
+	t.Run("ticking execute_query adds it to the default", func(t *testing.T) {
+		var got []string
+		scriptForm(t, "1\n\n", func() { got = promptCommands("postgres", "prod") })
+		if !reflect.DeepEqual(got, collector.CommandCatalog("postgres")) {
+			t.Errorf("commands = %v, want every command", got)
 		}
 	})
 

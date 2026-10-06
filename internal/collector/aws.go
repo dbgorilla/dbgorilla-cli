@@ -47,7 +47,7 @@ type AwsTarget struct {
 	ProviderType  string // aws_rds | aws_aurora
 	AuthMethod    string // "iam" (default) | "password" — password rides Secrets Manager
 	// Commands are the query-analysis commands this database allows the collector
-	// to run (execute_query, explain), clamped to the engine. Empty means none
+	// to run (execute_query, explain, collect_statistics), clamped to the engine. Empty means none
 	// (query analysis off for this component).
 	Commands      []string
 	Subnets       []string
@@ -438,6 +438,7 @@ const maxConfigParamBytes = 4096
 // [dbgorilla] identity block plus one [[component]] per monitored database.
 func awsConfigTOML(agentID, tenantID, region string, targets []AwsTarget, eps Endpoints, commandsEnabled bool) (string, error) {
 	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
+	cfg.Commands = perDatabaseCommands(commandsEnabled)
 	for _, t := range targets {
 		cfg.Component = append(cfg.Component, awsComponent(t, region))
 	}
@@ -568,7 +569,7 @@ func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err er
 	if err != nil {
 		return nil, nil, err
 	}
-	encoded, err := EncodeConfig(configTOML)
+	encoded, err := encodeStackConfig(configTOML)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -604,6 +605,7 @@ func AwsStackParams(in AwsStackInput) (params, secrets map[string]string, err er
 // (instaclustr), as opposed to AwsTargets rendered per RDS instance.
 func componentsConfigTOML(agentID, tenantID string, components []Component, eps Endpoints, commandsEnabled bool) (string, error) {
 	cfg := baseConfig(agentID, tenantID, eps, commandsEnabled)
+	cfg.Commands = perDatabaseCommands(commandsEnabled)
 	cfg.Component = components
 	return cfg.Render()
 }
@@ -632,6 +634,21 @@ func CompactConfig(configTOML string) string {
 		kept = append(kept, line)
 	}
 	return strings.Join(kept, "\n") + "\n"
+}
+
+// encodeStackConfig encodes a rendered config for the stack parameter, dropping
+// its comments only when the full text would not fit. The comments are for a
+// reader and the collector ignores them, so they must never be what costs an
+// operator a monitored database.
+func encodeStackConfig(configTOML string) (string, error) {
+	encoded, err := EncodeConfig(configTOML)
+	if err == nil {
+		return encoded, nil
+	}
+	if compact := CompactConfig(configTOML); compact != configTOML {
+		return EncodeConfig(compact)
+	}
+	return "", err
 }
 
 // EncodeConfig base64-encodes a rendered collector.toml for the stack's

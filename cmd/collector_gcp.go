@@ -218,6 +218,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 	image, imageSource := resolveImage(cmd, creds)
 	image = pinImageOrWarn(image, "instance")
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
+	warnCommandSupport(image, commandsOf[collector.GcpTarget](targets))
 
 	inputs, err := collector.GcpDeployInputs(collector.GcpStackInput{
 		AgentID:               creds.AgentID,
@@ -438,7 +439,7 @@ func printGcpGrantGuidance(target collector.GcpTarget, deploymentName, project s
 			sa, target.InstanceID)
 	}
 	fmt.Printf("  2. Connect as an admin and grant read access to %q:\n", target.User)
-	for _, stmt := range collector.GcpGrantStatements(target.User, target.Databases) {
+	for _, stmt := range collector.GcpGrantStatements(target.Engine, target.User, target.Databases) {
 		fmt.Printf("     %s\n", stmt)
 	}
 }

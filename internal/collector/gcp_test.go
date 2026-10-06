@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -291,7 +292,7 @@ func TestMergeCloudSQLInstance_MySQLIamFlagUnderscoreForm(t *testing.T) {
 // The GCP grant script has no CREATE USER (gcloud registers the user) and no
 // rds_iam (an RDS role); either would abort a paste run as one transaction.
 func TestGcpGrantStatements(t *testing.T) {
-	got := GcpGrantStatements("collector@p.iam", []string{"app"})
+	got := GcpGrantStatements("postgres", "collector@p.iam", []string{"app"})
 	want := []string{
 		`GRANT pg_monitor TO "collector@p.iam";`,
 		`GRANT CONNECT ON DATABASE "app" TO "collector@p.iam";`,
@@ -303,6 +304,29 @@ func TestGcpGrantStatements(t *testing.T) {
 	for _, s := range got {
 		if strings.Contains(s, "rds_iam") || strings.Contains(s, "CREATE USER") {
 			t.Fatalf("RDS-only statement in the GCP script: %s", s)
+		}
+	}
+}
+
+// A MySQL account is 'name'@'host' and its reads are privileges, not roles.
+// The two InnoDB statistics tables are named because collect_statistics
+// reads them and nothing else in the grant hints at that.
+func TestGcpGrantStatementsMySQL(t *testing.T) {
+	got := GcpGrantStatements("mysql", "collector", []string{"app"})
+	for _, want := range []string{
+		"GRANT PROCESS, REPLICATION CLIENT ON *.* TO 'collector'@'%';",
+		"GRANT SELECT ON performance_schema.* TO 'collector'@'%';",
+		"GRANT SELECT ON *.* TO 'collector'@'%';",
+		"GRANT SELECT ON mysql.innodb_table_stats TO 'collector'@'%';",
+		"GRANT SELECT ON mysql.innodb_index_stats TO 'collector'@'%';",
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	for _, s := range got {
+		if strings.Contains(s, "pg_") || strings.Contains(s, "CONNECT ON DATABASE") {
+			t.Errorf("Postgres statement in the MySQL grant: %s", s)
 		}
 	}
 }

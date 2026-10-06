@@ -297,7 +297,7 @@ func StackStatus(stackName, region string) (string, error) {
 // the stack: adding a password-auth database, or rotating an existing password,
 // both have to reach the DbPassword parameter or the collector is left with an
 // unresolved ${DBG_DB_PASSWORD} reference.
-func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword string) error {
+func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword string, keepCommands bool) error {
 	ctx := context.Background()
 	cfg, err := loadAWSConfig(ctx, region)
 	if err != nil {
@@ -334,15 +334,37 @@ func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword 
 				stackName, c.Provider.Type, c.Provider.Type)
 		}
 	}
+	// keepCommands: no command flag was given, so a database without a list of
+	// its own keeps the commands it runs with now, none included. A database new
+	// to this collector gets the default, as it would on install.
+	if keepCommands {
+		current := map[string][]string{}
+		for _, c := range conf.Component {
+			current[c.Name] = c.Commands
+		}
+		for i := range targets {
+			if len(targets[i].Commands) > 0 {
+				continue
+			}
+			if cmds, known := current[targets[i].Name]; known {
+				targets[i].Commands = cmds
+			} else {
+				targets[i].Commands = DefaultCommands(targets[i].CommandEngine())
+			}
+		}
+	}
 	conf.Component = nil
+	enabled := false
 	for _, t := range targets {
 		conf.Component = append(conf.Component, awsComponent(t, region))
+		enabled = enabled || len(t.Commands) > 0
 	}
+	conf.Commands = perDatabaseCommands(enabled)
 	rendered, err := conf.Render()
 	if err != nil {
 		return err
 	}
-	next, err := EncodeConfig(rendered)
+	next, err := encodeStackConfig(rendered)
 	if err != nil {
 		return err
 	}

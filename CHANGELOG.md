@@ -14,6 +14,69 @@
   collector 0.12.1 or later, the first to understand `allow_security_groups`;
   an older collector ignores the key.
 
+### Changed
+
+- **New databases get `explain` and `collect_statistics`, on every install
+  path.** With no command flag, local Docker, `--target aws`, `--target gcp`,
+  Instaclustr and `helm-values` installs now allow those two and nothing
+  else. `explain` lets DBGorilla fetch the real execution plan for a slow
+  query: the plan only, the query never runs. `collect_statistics` copies the
+  optimizer's statistics, never table rows, so a recommendation can be tested
+  on a replay of your planner before you see it. Without it the test cannot
+  run and recommendations go out unchecked. `execute_query` stays off until
+  you turn it on.
+
+  Before, AWS and GCP allowed every command by default, so a scripted install
+  turned them all on. Local Docker, `helm-values` and Instaclustr allowed
+  none. **Scripted installs now get `explain` and `collect_statistics`** on
+  every path.
+
+  What to do:
+  - To keep every command, add `--enable-commands`. It also allows read-only
+    checks (`execute_query`), which run in a read-only transaction that is
+    always rolled back, with a 30-second limit and at most 1,000 rows.
+  - To pick a subset, use `--commands=explain` or
+    `--commands=execute_query,explain`.
+  - To allow nothing, use `--enable-commands=false` or `--commands=`.
+    `helm-values` takes `--enable-commands=false`.
+
+  An interactive AWS or GCP install still asks per database, now with
+  `explain` and `collect_statistics` ticked and `execute_query` unticked.
+  Unticking everything allows nothing.
+
+  Existing collectors are not changed. Re-running `dbg collector install`
+  against one you already have keeps each database's current commands unless
+  you pass `--enable-commands` or `--commands`. A database added on that run
+  gets the new default, as on a fresh install.
+
+  `collect_statistics` needs collector 0.5.0 or later. A collector reads its
+  config with a closed list of command names, so an older image refuses the
+  whole config rather than the one command. When the install can tell from
+  the image tag that the image is too old, it warns and names the ways out:
+  a newer `--image`, or `--commands=explain`. A tag that is not a version
+  (`latest`, a digest, a custom build) gets no warning.
+
+  On MySQL, `collect_statistics` reads InnoDB's persistent optimizer
+  statistics, so the monitoring user needs `SELECT` on
+  `mysql.innodb_table_stats` and `mysql.innodb_index_stats`. The help text
+  says so, and the grant guidance a GCP MySQL install prints includes them.
+
+- MySQL databases on `--target gcp` can now be granted commands, and get the
+  same default as Postgres. Before, the CLI gave a MySQL database none,
+  whatever the flags said.
+
+- `--enable-commands` now also allows `collect_statistics` on AWS and GCP
+  collectors. Helm installs with `--enable-commands` already allowed it.
+
+- Every `collector.toml` the CLI writes now carries a comment above
+  `[commands]`. It says why `explain` and `collect_statistics` are on by
+  default (plans only, never your queries; statistics only, never table
+  rows, so recommendations can be tested), how to turn either off, and links
+  the configuration reference. On AWS the config travels in a stack parameter
+  capped at 4,096 bytes. When a config would not fit with its comments, the
+  CLI drops the comments rather than refuse, so the comment never lowers how
+  many databases one collector can watch.
+
 ### Fixed
 
 - On the AWS Fargate `--fast-fork` install, the deployed config keeps the
@@ -29,6 +92,19 @@
   A chain it cannot resolve that way (an `mfa_serial` role, or more than one
   link) keeps the SDK's error and prints the workaround: export the
   credentials with `aws configure export-credentials --format env`.
+
+- A GCP MySQL install with IAM auth printed Postgres grant SQL
+  (`GRANT pg_monitor ...`) as its final step. It now prints MySQL grants.
+- On an AWS or GCP collector watching several databases, a database you left
+  with no commands could still run every command when another database had
+  commands turned on. Each database now gets only what was chosen for it.
+  Re-running `dbg collector install` on an affected collector applies the
+  fix, which turns commands off for that database.
+- Unticking every command in the interactive checklist, or a `--commands`
+  value that names no command (such as `,`), allowed every command instead of
+  none. Both now mean none.
+- The checklist described `explain` as running `EXPLAIN ANALYZE`. It never
+  does: the collector requests the plan only, so the query is never executed.
 
 ## v0.7.0
 
