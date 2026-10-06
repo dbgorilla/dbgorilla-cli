@@ -1073,7 +1073,10 @@ func dryRunInstall(cmd *cobra.Command) error {
 	}
 	configPath, _ := collector.ConfigPath()
 	envPath, _ := collector.EnvPath()
-	image, _ := cmd.Flags().GetString("image")
+	image, _, err := resolveImage(cmd)
+	if err != nil {
+		return err
+	}
 	caCert, _ := cmd.Flags().GetString("ca-cert")
 	if caCert != "" {
 		if abs, err := filepath.Abs(caCert); err == nil {

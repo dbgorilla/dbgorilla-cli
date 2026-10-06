@@ -152,3 +152,21 @@ func TestRunInstallAWS_LookupFailureStopsBeforeMinting(t *testing.T) {
 		t.Errorf("nothing may be deployed, got %d", deploys.count)
 	}
 }
+
+// The local dry run previews the version a real install would deploy, not the
+// moving tag and not an empty image.
+func TestRunInstall_DryRunPreviewsTheNewestRelease(t *testing.T) {
+	isolate(t)
+	stubLatestRelease(t, "0.12.1", nil)
+	c := installTestCmd()
+	_ = c.Flags().Set("dry-run", "true")
+	_ = c.Flags().Set("db-user", "ro")
+	var err error
+	out := capture(t, func() { err = runInstall(c, nil) })
+	if err != nil {
+		t.Fatalf("dry-run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, collector.ImageRepo+":0.12.1") {
+		t.Errorf("dry run should show the resolved release, got:\n%s", out)
+	}
+}
