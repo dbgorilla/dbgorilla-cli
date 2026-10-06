@@ -241,6 +241,50 @@ func TestBuildInstaclustrRendersAndRoundTrips(t *testing.T) {
 	}
 }
 
+// allow_security_groups has to survive every re-render of a stored config: the
+// update path parses strictly and would refuse it, and refresh-firewall's
+// allow_networks patch would silently drop it.
+func TestAllowSecurityGroupsRoundTrips(t *testing.T) {
+	target := InstaclustrTarget{
+		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",
+	}
+	comp := BuildInstaclustrComponent(target, "10.0.0.10", 5432, nil, "", "", "someone", true, CloudDBPasswordEnv, "")
+	comp.Provider.AllowNetworks = []string{"203.0.113.7/32"}
+	comp.Provider.AllowSecurityGroups = []string{"sg-0123456789abcdef0"}
+	rendered, err := BuildInstaclustr("agent-1", "tenant-1", comp, Endpoints{}).Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, `allow_security_groups = ["sg-0123456789abcdef0"]`) {
+		t.Fatalf("rendered config missing allow_security_groups:\n%s", rendered)
+	}
+	cfg, err := StrictParseConfig(rendered)
+	if err != nil {
+		t.Fatalf("StrictParseConfig rejected allow_security_groups: %v", err)
+	}
+	if got := cfg.Component[0].Provider.AllowSecurityGroups; len(got) != 1 || got[0] != "sg-0123456789abcdef0" {
+		t.Fatalf("allow_security_groups did not round-trip: %v", got)
+	}
+
+	patched, ok, err := PatchAllowNetworks(rendered, "198.51.100.20/32")
+	if err != nil || !ok {
+		t.Fatalf("PatchAllowNetworks: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(patched, `allow_security_groups = ["sg-0123456789abcdef0"]`) {
+		t.Fatalf("patching allow_networks dropped allow_security_groups:\n%s", patched)
+	}
+
+	// Absent, the key is omitted: an older collector must see no new key.
+	comp.Provider.AllowSecurityGroups = nil
+	without, err := BuildInstaclustr("agent-1", "tenant-1", comp, Endpoints{}).Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(without, "allow_security_groups") {
+		t.Fatalf("an empty allow_security_groups must be omitted:\n%s", without)
+	}
+}
+
 func TestAwsStackParamsWithInstaclustrComponents(t *testing.T) {
 	target := InstaclustrTarget{
 		ClusterID: "c-1", Name: "orders", CloudProvider: "AWS_VPC", Region: "US_EAST_1",

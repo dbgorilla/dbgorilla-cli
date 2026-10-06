@@ -302,8 +302,13 @@ func TestInstallFallsBackToSubnetCIDRs(t *testing.T) {
 	}}
 	in := &instaclustrInstall{clusterID: "c-1"}
 
-	if err := allowlistCollectorSecurityGroup(context.Background(), in, p, false, func() { removed = true }); err != nil {
+	fellBack, err := allowlistCollectorSecurityGroup(context.Background(), in, p, false, func() { removed = true })
+	if err != nil {
 		t.Fatalf("the fallback should have admitted the collector: %v", err)
+	}
+	// The install reads this to keep the refused group out of the config.
+	if !fellBack {
+		t.Error("the subnet fallback must be reported to the caller")
 	}
 	// Every candidate subnet, because the scheduler picks which one.
 	if len(seen) != 2 || seen[0] != "10.10.0.0/18" || seen[1] != "10.10.64.0/18" {
@@ -346,33 +351,172 @@ func TestFallbackRefusesWhenThereIsNoNetwork(t *testing.T) {
 	t.Cleanup(func() { ensureSGRule = origSG })
 
 	p := &awsPlacement{securityGroup: "sg-ours", vpc: &collector.VPCPlacement{VpcID: "vpc-1"}}
-	err := allowlistCollectorSecurityGroup(context.Background(), &instaclustrInstall{clusterID: "c-1"}, p, false, func() {})
+	_, err := allowlistCollectorSecurityGroup(context.Background(), &instaclustrInstall{clusterID: "c-1"}, p, false, func() {})
 	if err == nil || !strings.Contains(err.Error(), "no") {
 		t.Fatalf("expected a refusal naming the missing network, got %v", err)
 	}
 }
 
-// Fast forks are unavailable only when a VPC-resident collector ends up with no
-// allow_networks; an operator-supplied --allow-ip still gives it one.
-func TestFastForkUnavailableOnlyOnTheVPCResidentPathWithoutACIDR(t *testing.T) {
-	vpc := awsPlacement{vpc: &collector.VPCPlacement{VpcID: "vpc-1"}}
-	outside := awsPlacement{stableEgress: true}
+// Only a VPC-resident collector that dials private addresses names its group on
+// a fork: from anywhere else the rule could never match its traffic.
+func TestForkSecurityGroups(t *testing.T) {
+	vpc := awsPlacement{securityGroup: "sg-ours", vpc: &collector.VPCPlacement{VpcID: "vpc-1"}}
+	outside := awsPlacement{securityGroup: "sg-operator", stableEgress: true}
+	if got := vpc.forkSecurityGroups(true); len(got) != 1 || got[0] != "sg-ours" {
+		t.Errorf("vpc-resident, private: got %v, want [sg-ours]", got)
+	}
+	if got := vpc.forkSecurityGroups(false); got != nil {
+		t.Errorf("vpc-resident, public: got %v, want none", got)
+	}
+	if got := outside.forkSecurityGroups(true); got != nil {
+		t.Errorf("outside the VPC: got %v, want none (the operator's group is not the collector's to name)", got)
+	}
+}
+
+// Fast forks are unavailable only when the collector has nothing at all to name
+// on a fork's firewall.
+func TestFastForkUnavailableOnlyWithNothingToName(t *testing.T) {
 	cases := []struct {
-		name      string
-		p         awsPlacement
-		fastFork  bool
-		allowCIDR string
-		want      bool
+		name     string
+		fastFork bool
+		p        collector.Provider
+		want     bool
 	}{
-		{"vpc-resident, no CIDR", vpc, true, "", true},
-		{"vpc-resident, --allow-ip", vpc, true, "203.0.113.7/32", false},
-		{"vpc-resident, no --fast-fork", vpc, false, "", false},
-		{"outside the VPC", outside, true, "", false},
+		{"nothing to name", true, collector.Provider{}, true},
+		{"a network", true, collector.Provider{AllowNetworks: []string{"203.0.113.7/32"}}, false},
+		{"a security group", true, collector.Provider{AllowSecurityGroups: []string{"sg-ours"}}, false},
+		{"no --fast-fork", false, collector.Provider{}, false},
 	}
 	for _, c := range cases {
-		if got := c.p.fastForkUnavailable(c.fastFork, c.allowCIDR); got != c.want {
+		if got := fastForkUnavailable(c.fastFork, c.p); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// vpcResidentInstall stubs every side effect of a VPC-resident Fargate install
+// and returns the command, the deploy it made, and the configs pushed after it.
+// refuseSG makes the cluster refuse the security-group rule.
+func vpcResidentInstall(t *testing.T, fastFork, refuseSG bool) (*deployCall, *[]string, func() error) {
+	t.Helper()
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	t.Cleanup(srv.Close)
+	stubAWSOK(t)
+	stubDiscoverInstaclustr(t, byocTarget(), nil)
+	stubVPCPlacement(t, fixtureVPCPlacement(), nil, nil)
+	origSGCreate := ensureCollectorSG
+	ensureCollectorSG = func(p *collector.VPCPlacement, _ context.Context, _, _ string) error {
+		p.SecurityGroupID, p.SecurityGroupCreated = "sg-ours", true
+		return nil
+	}
+	t.Cleanup(func() { ensureCollectorSG = origSGCreate })
+	stubPublicEgressIP(t, "192.0.2.9", nil)
+	stubCreateInstaclustrRole(t, nil)
+	stubDeleteFirewallRule(t, nil)
+	origCIDR := ensureFirewallRule
+	t.Cleanup(func() { ensureFirewallRule = origCIDR })
+	ensureFirewallRule = func(_ context.Context, _ collector.InstaclustrCreds, _, cidr string) (collector.FirewallRule, bool, error) {
+		return collector.FirewallRule{ID: "r-" + cidr, Network: cidr}, true, nil
+	}
+	origSG := ensureSGRule
+	ensureSGRule = func(_ context.Context, _ collector.InstaclustrCreds, _, sg string) (collector.SecurityGroupRule, bool, error) {
+		if refuseSG {
+			return collector.SecurityGroupRule{}, false, errors.New("security group rules are not available here")
+		}
+		return collector.SecurityGroupRule{ID: "sgr-1", SecurityGroupID: sg}, true, nil
+	}
+	t.Cleanup(func() { ensureSGRule = origSG })
+	var pushed []string
+	origUpdate := updateStackConfig
+	updateStackConfig = func(_, _, encoded string) error {
+		pushed = append(pushed, encoded)
+		return nil
+	}
+	t.Cleanup(func() { updateStackConfig = origUpdate })
+	rec := stubDeploy(t, nil)
+
+	cmd := icAwsCmd(t, srv.URL)
+	cmd.Flags().Bool("fast-fork", false, "")
+	cmd.Flags().String("fast-fork-key", "", "")
+	if fastFork {
+		mustSet(t, cmd, "fast-fork", "true")
+		mustSet(t, cmd, "fast-fork-key", "key789")
+	}
+	return rec, &pushed, func() error { return runInstall(cmd, nil) }
+}
+
+// decodedProvider reads the instaclustr provider block out of an encoded
+// CollectorConfig parameter.
+func decodedProvider(t *testing.T, encoded string) collector.Provider {
+	t.Helper()
+	raw, err := collector.DecodeConfig(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := collector.StrictParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Component) != 1 {
+		t.Fatalf("want one component, got %d", len(cfg.Component))
+	}
+	return cfg.Component[0].Provider
+}
+
+// The VPC-resident --fast-fork install names the collector's own group on a
+// fork, alongside the private addressing that lets the rule match — and does it
+// in the first render, so the common case costs no second stack update.
+func TestVPCResidentFastForkWritesTheCollectorsSecurityGroup(t *testing.T) {
+	rec, pushed, run := vpcResidentInstall(t, true, false)
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	p := decodedProvider(t, rec.params["CollectorConfig"])
+	if len(p.AllowSecurityGroups) != 1 || p.AllowSecurityGroups[0] != "sg-ours" {
+		t.Errorf("allow_security_groups = %v, want [sg-ours]", p.AllowSecurityGroups)
+	}
+	if !p.UsePrivateAddresses {
+		t.Error("allow_security_groups without use_private_addresses is refused by the collector")
+	}
+	if p.ProvisioningAPIKey == "" {
+		t.Error("the --fast-fork component lost its provisioning key reference")
+	}
+	if len(*pushed) != 0 {
+		t.Errorf("no second config update expected, got %d", len(*pushed))
+	}
+}
+
+// A cluster that refused the group on the source would refuse it on a fork, so
+// the config must not name it: the collector then withholds fork_create.
+func TestVPCResidentFastForkDropsTheGroupOnSubnetFallback(t *testing.T) {
+	_, pushed, run := vpcResidentInstall(t, true, true)
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	if len(*pushed) != 1 {
+		t.Fatalf("want one config update withdrawing the group, got %d", len(*pushed))
+	}
+	p := decodedProvider(t, (*pushed)[0])
+	if len(p.AllowSecurityGroups) != 0 {
+		t.Errorf("allow_security_groups = %v, want none after the subnet fallback", p.AllowSecurityGroups)
+	}
+	if p.ProvisioningAPIKey == "" {
+		t.Error("withdrawing the group must not drop the rest of the fast-fork component")
+	}
+}
+
+func TestVPCResidentInstallWithoutFastForkNamesNoGroup(t *testing.T) {
+	rec, pushed, run := vpcResidentInstall(t, false, false)
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	if p := decodedProvider(t, rec.params["CollectorConfig"]); len(p.AllowSecurityGroups) != 0 {
+		t.Errorf("allow_security_groups = %v, want none without --fast-fork", p.AllowSecurityGroups)
+	}
+	if len(*pushed) != 0 {
+		t.Errorf("no config update expected, got %d", len(*pushed))
 	}
 }
 
