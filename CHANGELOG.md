@@ -44,6 +44,11 @@
   collectors, the table-statistics copy above. Helm installs with
   `--enable-commands` already allowed it. It needs collector 0.5.0 or later.
 
+- Every `collector.toml` the CLI writes now carries a comment above
+  `[commands]` linking the configuration reference, and noting that `explain`
+  returns query plans only and never runs the query. The comment adds about
+  250 bytes to the AWS stack parameter, which is capped at 4,096.
+
 ### Fixed
 
 - On the AWS Fargate `--fast-fork` install, the deployed config keeps the

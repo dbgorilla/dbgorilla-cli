@@ -287,13 +287,36 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 	return cfg
 }
 
-// Render serializes the Config to collector.toml text.
+// CommandsDocsURL is the reference section that explains [commands].
+const CommandsDocsURL = "https://www.dbgorilla.com/docs/getting-started/collector-installation/config-reference/#database-commands"
+
+// commandsComment sits above [commands] in every rendered config. Commands are
+// the one setting that lets DBGorilla issue statements against a database, so
+// an operator reading the file should not have to guess what granting them means.
+// Two lines because the AWS target carries the whole config in a 4096-byte
+// CloudFormation parameter.
+const commandsComment = "# Database commands: " + CommandsDocsURL + "\n" +
+	"# explain returns query plans only. It never runs the query.\n"
+
+// Render serializes the Config to collector.toml text. The TOML encoder cannot
+// write comments, so the [commands] comment is inserted into its output.
 func (c Config) Render() (string, error) {
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+	return withCommandsComment(buf.String()), nil
+}
+
+// withCommandsComment puts commandsComment directly above the [commands]
+// header. The encoder writes table headers at the start of a line, and only the
+// global table is named exactly [commands].
+func withCommandsComment(rendered string) string {
+	const header = "[commands]\n"
+	if strings.HasPrefix(rendered, header) {
+		return commandsComment + rendered
+	}
+	return strings.Replace(rendered, "\n"+header, "\n"+commandsComment+header, 1)
 }
 
 // LoadConfig decodes an installed collector.toml back into a Config, so `dbg
