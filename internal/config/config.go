@@ -26,9 +26,11 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -216,21 +218,40 @@ func ResolveAPIURL(flagValue string) (string, ResolvedSource) {
 	return DefaultAPIURL, SourceDefault
 }
 
-// ResolveInsecure returns whether TLS verification should be skipped.
+// ResolveInsecure returns whether TLS verification should be skipped for a
+// request to apiURL.
 //
 // If the --insecure flag was explicitly set on the command line, that wins
 // (including --insecure=false to deliberately override a persisted true).
-// Otherwise falls back to user-config api.insecure, then system-config.
-// flagSet should come from cmd.Flags().Changed("insecure").
-func ResolveInsecure(flagValue, flagSet bool) bool {
+// Otherwise a persisted api.insecure applies, but only to the deployment it
+// was persisted with: a user who accepted a self-signed certificate for one
+// host did not accept one for every host --api-url can name. An empty
+// apiURL, or a config with no URL, cannot be compared and keeps the old
+// behaviour. flagSet should come from cmd.Flags().Changed("insecure").
+func ResolveInsecure(apiURL string, flagValue, flagSet bool) bool {
 	if flagSet {
 		return flagValue
 	}
-	if u, _ := LoadUser(); u != nil && u.API.Insecure {
+	if u, _ := LoadUser(); u != nil && u.API.Insecure && sameHostOrUnknown(apiURL, u.API.URL) {
 		return true
 	}
-	if s, _ := LoadSystem(); s != nil && s.API.Insecure {
+	if s, _ := LoadSystem(); s != nil && s.API.Insecure && sameHostOrUnknown(apiURL, s.API.URL) {
 		return true
 	}
 	return false
+}
+
+func sameHostOrUnknown(apiURL, configuredURL string) bool {
+	if apiURL == "" || configuredURL == "" {
+		return true
+	}
+	return hostOf(apiURL) == hostOf(configuredURL)
+}
+
+func hostOf(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return strings.ToLower(strings.TrimSpace(rawURL))
+	}
+	return strings.ToLower(u.Host)
 }

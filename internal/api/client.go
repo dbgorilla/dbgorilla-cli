@@ -130,6 +130,13 @@ func (c *Client) Do(method, path string, body any) ([]byte, int, error) {
 
 	tokens, err := auth.LoadTokens()
 	if err == nil && tokens != nil {
+		// The stored session belongs to one deployment. --api-url (or the env
+		// var, or a config edit) can point this request anywhere, and a Bearer
+		// token sent to the wrong host is a credential handed to that host.
+		if !tokens.IssuedFor(c.BaseURL) {
+			return nil, 0, fmt.Errorf("signed in to %s, not %s. Run: dbgorilla login --api-url %s",
+				auth.HostOf(tokens.APIURL), auth.HostOf(c.BaseURL), c.BaseURL)
+		}
 		if tokens.IsExpired() && tokens.RefreshToken != "" {
 			tokens, err = c.refreshTokens(tokens)
 			if err != nil {
@@ -254,6 +261,7 @@ func (c *Client) refreshTokens(old *auth.Tokens) (*auth.Tokens, error) {
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		APIURL:       old.APIURL,
 	}
 	if err := auth.StoreTokens(newTokens); err != nil {
 		return nil, fmt.Errorf("token refresh succeeded but storing the new tokens failed: %w", err)
@@ -312,6 +320,7 @@ func (c *Client) refreshViaKeycloak(old *auth.Tokens) (*auth.Tokens, error) {
 		ExpiresAt:     time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 		TokenEndpoint: old.TokenEndpoint,
 		ClientID:      old.ClientID,
+		APIURL:        old.APIURL,
 	}
 	if err := auth.StoreTokens(newTokens); err != nil {
 		return nil, fmt.Errorf("token refresh succeeded but storing the new tokens failed: %w", err)

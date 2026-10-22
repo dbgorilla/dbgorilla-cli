@@ -3,8 +3,10 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/config"
@@ -32,6 +34,31 @@ type Tokens struct {
 	TokenEndpoint string `json:"token_endpoint,omitempty"`
 	// ClientID is the OAuth client used for the SSO-flow refresh grant.
 	ClientID string `json:"client_id,omitempty"`
+	// APIURL is the deployment these tokens were issued for. A request to any
+	// other host must not carry them: --api-url is user input, and a token
+	// sent to the wrong host is a token handed to whoever runs that host.
+	// Empty for sessions stored before this field existed.
+	APIURL string `json:"api_url,omitempty"`
+}
+
+// IssuedFor reports whether the tokens may be sent to apiURL. A session that
+// predates APIURL (empty) is accepted, so an upgrade does not sign everyone
+// out; the next login records the host.
+func (t *Tokens) IssuedFor(apiURL string) bool {
+	if t.APIURL == "" {
+		return true
+	}
+	return HostOf(t.APIURL) == HostOf(apiURL)
+}
+
+// HostOf returns the lower-cased host (with port, if any) of a URL, or the
+// input itself when it does not parse as one.
+func HostOf(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return strings.ToLower(strings.TrimSpace(rawURL))
+	}
+	return strings.ToLower(u.Host)
 }
 
 // IsExpired returns true if the access token has expired (with 60s buffer).
