@@ -11,7 +11,7 @@ import (
 
 func init() {
 	logoutCmd.Flags().Bool("revoke-key", false,
-		"Also revoke the MCP API key on the deployment. Every editor on every machine that uses it stops until `dbgorilla setup-ide` is re-run there")
+		"Also revoke the MCP API key on the deployment. Every editor on every machine that uses it stops until dbgorilla setup-ide is re-run there")
 	rootCmd.AddCommand(logoutCmd)
 }
 
