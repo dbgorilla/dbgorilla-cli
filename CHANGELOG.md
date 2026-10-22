@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.1
+
+### Changed
+
+- `dbg logout` no longer revokes the MCP API key. There is one key per user
+  and every editor on every machine shares it, so signing out of one laptop
+  stopped every editor everywhere until `setup-ide` was re-run on each. Logout
+  is now local, like `gh auth logout`: it clears this machine's stored login
+  and leaves the key alone. Revoking stays deliberate: `dbg logout
+  --revoke-key`, `dbg setup-ide --rotate-key`, or the profile page.
+
 ## v0.8.0
 
 ### Added
