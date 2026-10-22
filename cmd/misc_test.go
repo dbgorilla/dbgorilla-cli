@@ -410,12 +410,15 @@ func TestLogout(t *testing.T) {
 	// runLogout drives logoutCmd against a stub deployment. The api-url flag
 	// has to come from a command we build, because logoutCmd only inherits the
 	// real root's persistent flags when it is executed through it -- and
-	// without it, logout would resolve the built-in production URL and try to
-	// revoke a key there.
-	runLogout := func(t *testing.T, apiURL string) string {
+	// without it, logout would resolve the built-in production URL.
+	runLogout := func(t *testing.T, apiURL string, revoke bool) string {
 		t.Helper()
 		c := baseCmd()
+		c.Flags().Bool("revoke-key", false, "")
 		mustSet(t, c, "api-url", apiURL)
+		if revoke {
+			mustSet(t, c, "revoke-key", "true")
+		}
 		return capture(t, func() {
 			if err := logoutCmd.RunE(c, nil); err != nil {
 				t.Fatalf("err=%v", err)
@@ -423,22 +426,39 @@ func TestLogout(t *testing.T) {
 		})
 	}
 
-	t.Run("clears the tokens and revokes the MCP key", func(t *testing.T) {
+	t.Run("clears the tokens and leaves the MCP key alone", func(t *testing.T) {
 		isolate(t)
 		writeTokens(t)
 		srv, seen := keyServer(t, map[string]resp{http.MethodDelete: {200, ""}})
 
-		out := runLogout(t, srv.URL)
+		out := runLogout(t, srv.URL, false)
 		if !strings.Contains(out, "Signed out.") {
 			t.Errorf("out=%q", out)
 		}
 		if tok, _ := auth.LoadTokens(); tok != nil {
 			t.Error("tokens should be cleared after logout")
 		}
-		// Clearing the tokens alone used to leave the MCP key live, so an
-		// editor configured with it kept working after sign-out.
+		// The key is shared by every editor on every machine. Signing out of
+		// one machine must not stop all of them.
+		if len(*seen) != 0 {
+			t.Errorf("plain logout must not touch the key, got methods=%v", *seen)
+		}
+	})
+
+	t.Run("--revoke-key revokes it and says what that breaks", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		srv, seen := keyServer(t, map[string]resp{http.MethodDelete: {200, ""}})
+
+		out := runLogout(t, srv.URL, true)
+		if !strings.Contains(out, "Signed out.") || !strings.Contains(out, "revoked") {
+			t.Errorf("out=%q", out)
+		}
 		if len(*seen) != 1 || (*seen)[0] != http.MethodDelete {
 			t.Errorf("want the key revoked, got methods=%v", *seen)
+		}
+		if !strings.Contains(out, "each machine") {
+			t.Errorf("revoking must say every machine needs setup-ide again:\n%s", out)
 		}
 	})
 
@@ -447,7 +467,7 @@ func TestLogout(t *testing.T) {
 		writeTokens(t)
 		srv, _ := keyServer(t, map[string]resp{http.MethodDelete: {503, ""}})
 
-		out := runLogout(t, srv.URL)
+		out := runLogout(t, srv.URL, true)
 		if !strings.Contains(out, "Signed out.") {
 			t.Errorf("sign-out must still complete:\n%s", out)
 		}
@@ -467,7 +487,7 @@ func TestLogout(t *testing.T) {
 
 		// Nothing listening: the revoke fails at the transport, before any
 		// status code exists to interpret.
-		out := runLogout(t, "http://127.0.0.1:1")
+		out := runLogout(t, "http://127.0.0.1:1", true)
 		if !strings.Contains(out, "Signed out.") {
 			t.Errorf("sign-out must still complete:\n%s", out)
 		}
@@ -479,16 +499,19 @@ func TestLogout(t *testing.T) {
 		}
 	})
 
-	t.Run("no session means nothing to revoke", func(t *testing.T) {
+	t.Run("--revoke-key with no session says the key is still live", func(t *testing.T) {
 		isolate(t)
 		srv, seen := keyServer(t, map[string]resp{})
 
-		out := runLogout(t, srv.URL)
+		out := runLogout(t, srv.URL, true)
 		if !strings.Contains(out, "Signed out.") {
 			t.Errorf("out=%q", out)
 		}
 		if len(*seen) != 0 {
 			t.Errorf("logged-out logout should call nothing, got methods=%v", *seen)
+		}
+		if !strings.Contains(out, "still valid") {
+			t.Errorf("must say the key was not revoked:\n%s", out)
 		}
 	})
 }

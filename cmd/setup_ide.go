@@ -76,7 +76,8 @@ knows to check the live database through these tools before reasoning about
 it from the source alone.
 
 Use --remove to undo all of that for the selected clients. It touches only
-local files and leaves the API key alone; dbgorilla logout revokes the key.
+local files and leaves the API key alone; dbgorilla logout --revoke-key
+revokes the key, and --rotate-key here replaces it.
 
 Use --print-admin-allowlist to get the IT-facing snippet to send to
 whoever manages your Claude admin console (app.claude.com / Team or
@@ -394,7 +395,7 @@ func runRemoveIDE(cmd *cobra.Command) error {
 	}
 	fmt.Println(style.Success(summary))
 	fmt.Println()
-	fmt.Println("The MCP API key is untouched and still valid. `dbgorilla logout` revokes it.")
+	fmt.Println("The MCP API key is untouched and still valid. `dbgorilla logout --revoke-key` revokes it.")
 	return nil
 }
 
