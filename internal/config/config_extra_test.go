@@ -321,7 +321,7 @@ func TestResolveInsecure_FlagSetTrueWins(t *testing.T) {
 	home := setup(t)
 	writeUserConfig(t, home, "[api]\ninsecure = false\n")
 
-	if !ResolveInsecure(true, true) {
+	if !ResolveInsecure("", true, true) {
 		t.Error("explicit --insecure=true should win")
 	}
 }
@@ -331,7 +331,7 @@ func TestResolveInsecure_FlagSetFalseOverridesPersisted(t *testing.T) {
 	writeUserConfig(t, home, "[api]\ninsecure = true\n")
 
 	// --insecure=false explicitly set must override a persisted true.
-	if ResolveInsecure(false, true) {
+	if ResolveInsecure("", false, true) {
 		t.Error("explicit --insecure=false should override persisted true")
 	}
 }
@@ -340,7 +340,7 @@ func TestResolveInsecure_UserConfig(t *testing.T) {
 	home := setup(t)
 	writeUserConfig(t, home, "[api]\ninsecure = true\n")
 
-	if !ResolveInsecure(false, false) {
+	if !ResolveInsecure("", false, false) {
 		t.Error("user-config insecure=true should apply when the flag is unset")
 	}
 }
@@ -349,7 +349,7 @@ func TestResolveInsecure_SystemConfig(t *testing.T) {
 	setup(t) // no user insecure
 	useSystemConfig(t, "[api]\ninsecure = true\n")
 
-	if !ResolveInsecure(false, false) {
+	if !ResolveInsecure("", false, false) {
 		t.Error("system-config insecure=true should apply when nothing else is set")
 	}
 }
@@ -358,7 +358,7 @@ func TestResolveInsecure_DefaultFalse(t *testing.T) {
 	setup(t)
 	useSystemConfig(t, "") // no system config either
 
-	if ResolveInsecure(false, false) {
+	if ResolveInsecure("", false, false) {
 		t.Error("insecure should default to false when nothing is configured")
 	}
 }
@@ -376,5 +376,21 @@ func TestSystemConfigPath_LinuxDefaultBranch(t *testing.T) {
 	setGOOS(t, "linux")
 	if got := SystemConfigPath(); got != "/etc/dbgorilla/cli.toml" {
 		t.Errorf("linux system path = %q", got)
+	}
+}
+
+// A persisted api.insecure was accepted for one deployment. It must not
+// silently disable certificate checks for any other host --api-url names.
+func TestResolveInsecure_PersistedAppliesOnlyToItsHost(t *testing.T) {
+	home := setup(t)
+	writeUserConfig(t, home, "[api]\nurl = \"https://trusted.example\"\ninsecure = true\n")
+	if !ResolveInsecure("https://trusted.example/api", false, false) {
+		t.Error("same host: persisted insecure should apply")
+	}
+	if ResolveInsecure("https://other.example", false, false) {
+		t.Error("other host: persisted insecure must not apply")
+	}
+	if !ResolveInsecure("", false, false) {
+		t.Error("unknown target: keep the old behaviour")
 	}
 }

@@ -131,6 +131,7 @@ func LoginPassword(apiURL string, insecure bool, creds PasswordCredentials) (*To
 		AccessToken:  tr.AccessToken,
 		RefreshToken: tr.RefreshToken,
 		ExpiresAt:    exp,
+		APIURL:       apiURL,
 	}
 	if err := StoreTokens(tok); err != nil {
 		return nil, fmt.Errorf("cannot store tokens: %w", err)

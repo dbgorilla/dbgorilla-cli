@@ -100,7 +100,9 @@ func newAPIClient(cmd *cobra.Command) *api.Client {
 func resolveInsecure(cmd *cobra.Command) bool {
 	flagSet := cmd.Flags().Changed("insecure")
 	flagVal, _ := cmd.Flags().GetBool("insecure")
-	return config.ResolveInsecure(flagVal, flagSet)
+	flagURL, _ := cmd.Flags().GetString("api-url")
+	apiURL, _ := config.ResolveAPIURL(flagURL)
+	return config.ResolveInsecure(apiURL, flagVal, flagSet)
 }
 
 // requireAPIURL returns the resolved API URL. Resolution can no longer come

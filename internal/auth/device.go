@@ -68,6 +68,9 @@ type DeviceConfig struct {
 	TokenEndpoint               string `json:"token_endpoint"`
 	ClientID                    string `json:"client_id"`
 	VerificationURI             string `json:"verification_uri"`
+	// APIURL is the deployment this config was discovered from; it is
+	// recorded on the tokens so they are never sent to another host.
+	APIURL string `json:"-"`
 }
 
 // deviceCodeResponse is the per-RFC-8628 device authorization response.
@@ -165,6 +168,7 @@ func DiscoverDeviceConfig(ctx context.Context, apiURL string, insecure bool) (*D
 		return nil, err
 	}
 	warnOffDomainEndpoints(os.Stderr, apiURL, authHost, tokenHost)
+	cfg.APIURL = apiURL
 	return &cfg, nil
 }
 
@@ -294,6 +298,7 @@ func LoginDeviceWithConfig(ctx context.Context, cfg *DeviceConfig, insecure bool
 	}
 	fmt.Println(" ✓")
 
+	tok.APIURL = cfg.APIURL
 	if err := StoreTokens(tok); err != nil {
 		return nil, fmt.Errorf("cannot store tokens: %w", err)
 	}

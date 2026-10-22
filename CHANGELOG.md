@@ -11,6 +11,16 @@
   and leaves the key alone. Revoking stays deliberate: `dbg logout
   --revoke-key`, `dbg setup-ide --rotate-key`, or the profile page.
 
+### Fixed
+
+- The stored login is now bound to the deployment it was issued for. Before,
+  `dbg <command> --api-url https://other.example` sent the saved access
+  token to that host, and a persisted `insecure = true` turned off
+  certificate checks for it too. The CLI now refuses with "signed in to X,
+  not Y. Run: dbg login --api-url Y", and `insecure` applies only to the host
+  it was accepted for. A login saved by an earlier version carries no host
+  and keeps working until the next `dbg login` records one.
+
 ## v0.8.0
 
 ### Added
