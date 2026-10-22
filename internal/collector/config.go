@@ -293,7 +293,7 @@ func Build(agentID, tenantID string, target Target, eps Endpoints) Config {
 }
 
 // CommandsDocsURL is the reference section that explains [commands].
-const CommandsDocsURL = "https://www.dbgorilla.com/docs/getting-started/collector-installation/config-reference/#database-commands"
+const CommandsDocsURL = "https://www.dbgorilla.com/docs/reference/collector-commands/#database-commands"
 
 // commandsComment sits above [commands] in every rendered config. Commands are
 // the one setting that lets DBGorilla issue statements against a database, so
