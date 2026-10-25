@@ -8,10 +8,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
 	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.82.1
-	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.89.3
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.339.0
-	github.com/aws/aws-sdk-go-v2/service/ecs v1.100.3
-	github.com/aws/aws-sdk-go-v2/service/rds v1.130.3
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.90.1
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.340.0
+	github.com/aws/aws-sdk-go-v2/service/ecs v1.102.0
+	github.com/aws/aws-sdk-go-v2/service/rds v1.131.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/huh/spinner v0.0.0-20260223110133-9dc45e34a40b
@@ -29,7 +29,7 @@ require (
 require (
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.22 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.23 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.6 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.6 // indirect
