@@ -70,6 +70,22 @@ type Writer interface {
 	BuildEntry(mcpURL, apiKey string) map[string]any
 }
 
+// SkillHost is implemented by tools that read Agent Skills -- a SKILL.md
+// with YAML front matter, the format Claude Code introduced and the others
+// adopted -- from a directory on disk. The MCP entry gives the agent the
+// tools; the skill tells it when to reach for them.
+//
+// Only the directory differs per tool. The file written into it is the same
+// for every host, so a user running several agents gets one skill, not one
+// opinion per editor.
+type SkillHost interface {
+	Adapter
+	// SkillDir returns the directory the dbgorilla skill lives in for the
+	// scope: the SKILL.md is written directly inside it. Project-scoped
+	// paths are resolved against the current working directory.
+	SkillDir(scope Scope) (string, error)
+}
+
 // Hinter is implemented by tools we detect but can't auto-configure.
 // Hint() returns a multi-line string with manual setup instructions.
 type Hinter interface {

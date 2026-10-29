@@ -8,7 +8,7 @@ import (
 )
 
 // TestSkillBodyIsUsable guards the two things a broken skill fails silently
-// on: Claude reads the front matter to decide when to load it, so a skill
+// on: the agent reads the front matter to decide when to load it, so a skill
 // without a name or description is inert, and a skill nobody reads is worse
 // than none at all if it is long enough to be skipped.
 func TestSkillBodyIsUsable(t *testing.T) {
@@ -32,28 +32,71 @@ func TestSkillBodyIsUsable(t *testing.T) {
 	}
 }
 
+// TestSkillDir pins where each client reads skills from. A wrong directory
+// installs a skill the agent never loads, which is a silent failure: the
+// MCP tools work, the agent just never thinks to use them.
 func TestSkillDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	got, err := SkillDir(ScopeUser)
-	if err != nil {
-		t.Fatalf("user scope: %v", err)
+	cases := []struct {
+		host    SkillHost
+		user    string // relative to home
+		project string // relative to the working directory
+	}{
+		{&ClaudeCode{}, ".claude/skills", ".claude/skills"},
+		{&Cursor{}, ".cursor/skills", ".cursor/skills"},
+		{&VSCode{}, ".copilot/skills", ".github/skills"},
+		{&Opencode{}, ".config/opencode/skills", ".opencode/skills"},
+		{&Gemini{}, ".gemini/skills", ".gemini/skills"},
 	}
-	if want := filepath.Join(home, ".claude", "skills", "dbgorilla"); got != want {
-		t.Errorf("user scope = %q, want %q", got, want)
+	for _, tc := range cases {
+		t.Run(tc.host.Slug(), func(t *testing.T) {
+			got, err := tc.host.SkillDir(ScopeUser)
+			if err != nil {
+				t.Fatalf("user scope: %v", err)
+			}
+			if want := filepath.Join(home, filepath.FromSlash(tc.user), "dbgorilla"); got != want {
+				t.Errorf("user scope = %q, want %q", got, want)
+			}
+
+			got, err = tc.host.SkillDir(ScopeProject)
+			if err != nil {
+				t.Fatalf("project scope: %v", err)
+			}
+			if !strings.HasSuffix(got, filepath.Join(filepath.FromSlash(tc.project), "dbgorilla")) {
+				t.Errorf("project scope = %q, want a path ending in %s/dbgorilla", got, tc.project)
+			}
+			if strings.HasPrefix(got, home) {
+				t.Errorf("project scope resolved into the home directory: %q", got)
+			}
+		})
 	}
 
-	got, err = SkillDir(ScopeProject)
-	if err != nil {
-		t.Fatalf("project scope: %v", err)
-	}
-	if !strings.HasSuffix(got, filepath.Join(".claude", "skills", "dbgorilla")) {
-		t.Errorf("project scope = %q, want a path under the working directory", got)
-	}
-	if strings.HasPrefix(got, home) {
-		t.Errorf("project scope resolved into the home directory: %q", got)
+	t.Run("no home means no user-scope skill", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+		if _, err := (&ClaudeCode{}).SkillDir(ScopeUser); err == nil {
+			t.Error("expected an error with no resolvable home directory")
+		}
+	})
+}
+
+// TestEveryWriterIsASkillHost keeps the two from drifting: a client whose
+// MCP config we write gets the skill that tells the agent to use it. A new
+// Writer that cannot host skills needs a deliberate exemption here, not a
+// quiet omission.
+func TestEveryWriterIsASkillHost(t *testing.T) {
+	for _, a := range Registry {
+		_, writer := a.(Writer)
+		_, host := a.(SkillHost)
+		if writer && !host {
+			t.Errorf("%s writes MCP config but does not host the skill", a.Slug())
+		}
+		if host && !writer {
+			t.Errorf("%s hosts the skill but has no MCP config to go with it", a.Slug())
+		}
 	}
 }
 
@@ -63,7 +106,7 @@ func TestInstallSkill_IsIdempotentAndSelfUpdating(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	path := filepath.Join(home, ".claude", "skills", "dbgorilla", "SKILL.md")
 
-	res, err := InstallSkill(ScopeUser)
+	res, err := InstallSkill(&ClaudeCode{}, ScopeUser)
 	if err != nil {
 		t.Fatalf("first install: %v", err)
 	}
@@ -75,7 +118,7 @@ func TestInstallSkill_IsIdempotentAndSelfUpdating(t *testing.T) {
 	}
 
 	// Running setup-ide again must not churn the file or say anything new.
-	res, err = InstallSkill(ScopeUser)
+	res, err = InstallSkill(&ClaudeCode{}, ScopeUser)
 	if err != nil {
 		t.Fatalf("second install: %v", err)
 	}
@@ -87,7 +130,7 @@ func TestInstallSkill_IsIdempotentAndSelfUpdating(t *testing.T) {
 	if err := os.WriteFile(path, []byte("stale from an older release\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	res, err = InstallSkill(ScopeUser)
+	res, err = InstallSkill(&ClaudeCode{}, ScopeUser)
 	if err != nil {
 		t.Fatalf("third install: %v", err)
 	}
@@ -105,7 +148,7 @@ func TestRemoveSkill(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	dir := filepath.Join(home, ".claude", "skills", "dbgorilla")
 
-	res, err := RemoveSkill(ScopeUser)
+	res, err := RemoveSkill(&ClaudeCode{}, ScopeUser)
 	if err != nil {
 		t.Fatalf("removing what was never installed: %v", err)
 	}
@@ -113,10 +156,10 @@ func TestRemoveSkill(t *testing.T) {
 		t.Errorf("= %+v, want Absent when nothing is installed", res)
 	}
 
-	if _, err := InstallSkill(ScopeUser); err != nil {
+	if _, err := InstallSkill(&ClaudeCode{}, ScopeUser); err != nil {
 		t.Fatal(err)
 	}
-	if res, err = RemoveSkill(ScopeUser); err != nil {
+	if res, err = RemoveSkill(&ClaudeCode{}, ScopeUser); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if res.Absent {
@@ -143,13 +186,10 @@ func TestSkillPathFailures(t *testing.T) {
 
 	t.Run("no resolvable home directory", func(t *testing.T) {
 		noHome(t)
-		if _, err := SkillDir(ScopeUser); err == nil {
-			t.Error("want an error when the home directory cannot be resolved")
-		}
-		if _, err := InstallSkill(ScopeUser); err == nil {
+		if _, err := InstallSkill(&ClaudeCode{}, ScopeUser); err == nil {
 			t.Error("install should surface the same failure")
 		}
-		if _, err := RemoveSkill(ScopeUser); err == nil {
+		if _, err := RemoveSkill(&ClaudeCode{}, ScopeUser); err == nil {
 			t.Error("removal should surface the same failure")
 		}
 	})
@@ -164,7 +204,7 @@ func TestSkillPathFailures(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(home, ".claude", "skills", "dbgorilla", "SKILL.md"), 0755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := InstallSkill(ScopeUser); err == nil {
+		if _, err := InstallSkill(&ClaudeCode{}, ScopeUser); err == nil {
 			t.Error("want an error when the skill path is not a readable file")
 		}
 	})
@@ -179,7 +219,7 @@ func TestSkillPathFailures(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(home, ".claude", "skills"), []byte("not a dir"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := InstallSkill(ScopeUser); err == nil {
+		if _, err := InstallSkill(&ClaudeCode{}, ScopeUser); err == nil {
 			t.Error("want an error when the skills path cannot be a directory")
 		}
 	})

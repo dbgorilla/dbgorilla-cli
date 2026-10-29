@@ -55,3 +55,11 @@ func (c *ClaudeCode) BuildEntry(mcpURL, apiKey string) map[string]any {
 		},
 	}
 }
+
+// SkillDir: ~/.claude/skills/dbgorilla (user) or .claude/skills/dbgorilla
+// (project). These are the paths the format was defined around, and the
+// ones every other host here also reads for compatibility; the others still
+// get their own copy so that nothing depends on which agent was set up first.
+func (c *ClaudeCode) SkillDir(scope Scope) (string, error) {
+	return skillDir(scope, []string{".claude", "skills"}, []string{".claude", "skills"})
+}
