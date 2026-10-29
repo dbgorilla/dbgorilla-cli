@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `dbg setup-ide --client vscode` now writes `~/.copilot/mcp-config.json`
+  (or `$COPILOT_HOME/mcp-config.json`) under `mcpServers`, which VS Code
+  reads through its GitHub Copilot CLI discovery, on by default. VS Code's
+  add-server flow labels its own `mcp.json` files deprecated. VS Code now has
+  one scope, user; `--scope project` writes the same file.
+- If an older entry is still in `.vscode/mcp.json` or the user-profile
+  `mcp.json`, `setup-ide` names the file so you can delete the entry; VS Code
+  would otherwise list DBGorilla twice. `setup-ide --remove` cleans those
+  files too, and asks for a hand edit when a file has comments.
+
 ## v0.8.1
 
 ### Changed

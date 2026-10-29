@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
@@ -265,6 +266,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		if writer.Slug() == "claude-code" {
 			installSkill(scope, dryRun)
 		}
+		warnLegacyEntries(writer)
 		configured++
 	}
 
@@ -369,6 +371,8 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			fmt.Printf("  Backup: %s\n", res.BackupPath)
 		}
 
+		removeLegacyEntries(writer)
+
 		if writer.Slug() == "claude-code" {
 			skill, err := ide.RemoveSkill(scope)
 			switch {
@@ -397,6 +401,38 @@ func runRemoveIDE(cmd *cobra.Command) error {
 	fmt.Println()
 	fmt.Println("The MCP API key is untouched and still valid. `dbgorilla logout --revoke-key` revokes it.")
 	return nil
+}
+
+// warnLegacyEntries names config files this CLI used to write for the client
+// that still hold a dbgorilla entry. They are left alone: a workspace file may
+// be committed and shared, and the user decides what happens to it.
+func warnLegacyEntries(a ide.Adapter) {
+	for _, path := range ide.LegacyEntries(a) {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  An older dbgorilla entry is still in %s.", path)))
+		fmt.Println(style.Warn("   The client reads both files and will list DBGorilla twice; delete that entry."))
+	}
+}
+
+// removeLegacyEntries clears the dbgorilla entry from files earlier versions
+// wrote for this client, so --remove undoes old setups as well as new ones.
+func removeLegacyEntries(w ide.Writer) {
+	l, ok := w.(ide.LegacyLocator)
+	if !ok {
+		return
+	}
+	stale := ide.LegacyEntries(w)
+	for _, lw := range l.LegacyConfigs() {
+		res, err := ide.RemoveMCPConfig(lw, lw.DefaultScope())
+		switch {
+		case errors.Is(err, ide.ErrJSONCRefused) && slices.Contains(stale, res.Path):
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  %s has comments; remove its dbgorilla entry by hand.", res.Path)))
+		case err != nil && slices.Contains(stale, res.Path):
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  Could not clean %s: %v", res.Path, err)))
+		case res.Removed:
+			fmt.Println(style.Success("✓ Removed the dbgorilla entry from " + res.Path))
+			fmt.Printf("  Backup: %s\n", res.BackupPath)
+		}
+	}
 }
 
 // resolveSelectedAdapters maps the --client flag (or auto-detect) to a list

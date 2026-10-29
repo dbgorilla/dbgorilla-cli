@@ -2,7 +2,6 @@ package ide
 
 import (
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -61,9 +60,9 @@ func TestCursor_BuildEntry_URLOnly(t *testing.T) {
 	}
 }
 
-func TestVSCode_TopLevelKey_IsServers(t *testing.T) {
-	if k := (&VSCode{}).TopLevelKey(); k != "servers" {
-		t.Errorf("VS Code top-level key = %q, want servers (NOT mcpServers)", k)
+func TestVSCode_TopLevelKey_IsMcpServers(t *testing.T) {
+	if k := (&VSCode{}).TopLevelKey(); k != "mcpServers" {
+		t.Errorf("VS Code top-level key = %q, want mcpServers (Copilot portable format)", k)
 	}
 }
 
@@ -74,28 +73,9 @@ func TestVSCode_BuildEntry_HasHTTPType(t *testing.T) {
 	}
 }
 
-func TestVSCode_ConfigPath_ProjectInVscodeDir(t *testing.T) {
-	proj, _ := (&VSCode{}).ConfigPath(ScopeProject)
-	if !strings.HasSuffix(proj, filepath.Join(".vscode", "mcp.json")) {
-		t.Errorf("project path = %q, want suffix .vscode/mcp.json", proj)
-	}
-}
-
-func TestVSCode_ConfigPath_UserPerOS(t *testing.T) {
-	user, _ := (&VSCode{}).ConfigPath(ScopeUser)
-	switch runtime.GOOS {
-	case "darwin":
-		if !strings.Contains(user, filepath.Join("Library", "Application Support", "Code", "User")) {
-			t.Errorf("darwin user path = %q", user)
-		}
-	case "windows":
-		if !strings.Contains(user, filepath.Join("AppData", "Roaming", "Code", "User")) {
-			t.Errorf("windows user path = %q", user)
-		}
-	default:
-		if !strings.Contains(user, filepath.Join(".config", "Code", "User")) {
-			t.Errorf("linux user path = %q", user)
-		}
+func TestVSCode_UserScopeOnly(t *testing.T) {
+	if s := (&VSCode{}).SupportedScopes(); len(s) != 1 || s[0] != ScopeUser {
+		t.Errorf("SupportedScopes = %v, want [user]", s)
 	}
 }
 

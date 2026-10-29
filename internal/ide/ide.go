@@ -77,6 +77,46 @@ type Hinter interface {
 	Hint(mcpURL string) string
 }
 
+// LegacyLocator is implemented by writers whose client still reads config
+// files this CLI used to write. Each returned Writer is bound to one file.
+type LegacyLocator interface {
+	LegacyConfigs() []Writer
+}
+
+// LegacyEntries returns the legacy config files that still hold a dbgorilla
+// entry. Files with comments are not parsed; they count when they mention
+// the server name, since the caller only prints a hint.
+func LegacyEntries(a Adapter) []string {
+	l, ok := a.(LegacyLocator)
+	if !ok {
+		return nil
+	}
+	var found []string
+	for _, w := range l.LegacyConfigs() {
+		path, err := w.ConfigPath(w.DefaultScope())
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var cfg map[string]any
+		if hasJSONCComments(data) || json.Unmarshal(data, &cfg) != nil {
+			if bytes.Contains(data, []byte(`"`+MCPServerName+`"`)) {
+				found = append(found, path)
+			}
+			continue
+		}
+		if servers, ok := cfg[w.TopLevelKey()].(map[string]any); ok {
+			if _, present := servers[MCPServerName]; present {
+				found = append(found, path)
+			}
+		}
+	}
+	return found
+}
+
 // Registry holds every supported tool. Order is preserved -- shows up in
 // help text and detection output the same way.
 var Registry = []Adapter{

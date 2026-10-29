@@ -25,6 +25,7 @@ func isolate(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("HOME", home)
 	t.Setenv("DBGORILLA_API_URL", "")
+	t.Setenv("COPILOT_HOME", "")
 	// A developer's ambient Instaclustr credentials must never leak into (or
 	// satisfy) the resolve paths under test.
 	t.Setenv("INSTACLUSTR_USERNAME", "")
