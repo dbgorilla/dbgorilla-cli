@@ -78,7 +78,7 @@ func TestWriters_DefaultScope(t *testing.T) {
 	}{
 		{&ClaudeCode{}, ScopeUser},
 		{&Cursor{}, ScopeUser},
-		{&VSCode{}, ScopeProject}, // VS Code's MCP UX is workspace-first.
+		{&VSCode{}, ScopeUser}, // Copilot user file; no project destination.
 		{&Opencode{}, ScopeUser},
 		{&Gemini{}, ScopeUser},
 	}
@@ -235,6 +235,7 @@ func TestDetectInstalled_ReportsEveryPresentTool(t *testing.T) {
 func TestAdapters_ConfigPath_BothScopes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("COPILOT_HOME", "")
 
 	cases := []struct {
 		w          Writer
@@ -244,7 +245,7 @@ func TestAdapters_ConfigPath_BothScopes(t *testing.T) {
 	}{
 		{w: &ClaudeCode{}, userSuffix: ".claude.json", projSuffix: ".mcp.json"},
 		{w: &Cursor{}, userSuffix: filepath.Join(".cursor", "mcp.json"), projSuffix: filepath.Join(".cursor", "mcp.json")},
-		{w: &VSCode{}, userSubstr: filepath.Join("Code", "User", "mcp.json"), projSuffix: filepath.Join(".vscode", "mcp.json")},
+		{w: &VSCode{}, userSuffix: filepath.Join(".copilot", "mcp-config.json"), projSuffix: filepath.Join(".copilot", "mcp-config.json")},
 		{w: &Opencode{}, userSuffix: filepath.Join("opencode", "opencode.json"), projSuffix: "opencode.json"},
 		{w: &Gemini{}, userSuffix: filepath.Join(".gemini", "settings.json"), projSuffix: filepath.Join(".gemini", "settings.json")},
 	}
@@ -296,6 +297,7 @@ func TestWriteMCPConfig_RoundTripAllWriters_UserScope(t *testing.T) {
 		t.Run(w.Slug(), func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			t.Setenv("COPILOT_HOME", "")
 
 			res, err := WriteMCPConfig(w, url, key, ScopeUser)
 			if err != nil {

@@ -80,7 +80,7 @@ detected.
 |---|---|---|---|
 | Claude Code | `claude-code` | writer | Prefers `claude mcp add`; falls back to direct file write |
 | Cursor | `cursor` | writer | `~/.cursor/mcp.json` (user) or `.cursor/mcp.json` (project) |
-| VS Code | `vscode` | writer | `.vscode/mcp.json` (project) by default |
+| VS Code | `vscode` | writer | `~/.copilot/mcp-config.json` (user), read by VS Code's Copilot CLI discovery |
 | opencode | `opencode` | writer | `~/.config/opencode/opencode.json` (user) |
 | Gemini CLI | `gemini` | writer | `~/.gemini/settings.json` (user) |
 | Claude Desktop | `claude-desktop` | manual hint | Remote HTTP MCP requires Settings → Connectors UI flow |
