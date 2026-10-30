@@ -71,9 +71,10 @@ Supported writable clients:
 Detect-only clients (printed manual instructions):
   claude-desktop  (HTTP MCP requires Settings -> Connectors UI flow)
 
-For Claude Code, this also installs a short DBGorilla skill, so the agent
-knows to check the live database through these tools before reasoning about
-it from the source alone.
+For clients that read Agent Skills (claude-code, cursor, vscode, opencode,
+gemini), this also installs a short DBGorilla skill, so the agent knows to
+check the live database through these tools before reasoning about it from
+the source alone.
 
 Use --remove to undo all of that for the selected clients. It touches only
 local files and leaves the API key alone; dbgorilla logout --revoke-key
@@ -206,7 +207,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			if _, lookErr := lookPath("claude"); lookErr == nil {
 				if dryRun {
 					fmt.Println(style.Info(fmt.Sprintf("Would run: claude mcp add (scope=%s, name=dbgorilla)", scope)))
-					installSkill(scope, dryRun)
+					installSkill(writer, scope, dryRun)
 					configured++
 					continue
 				}
@@ -216,7 +217,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 					continue
 				}
 				fmt.Println(style.Success("✓ Registered via `claude mcp add`"))
-				installSkill(scope, dryRun)
+				installSkill(writer, scope, dryRun)
 				configured++
 				continue
 			}
@@ -232,6 +233,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 
 		if dryRun {
 			fmt.Println(style.Info(fmt.Sprintf("Would write MCP entry to: %s (scope=%s)", path, scope)))
+			installSkill(writer, scope, dryRun)
 			configured++
 			continue
 		}
@@ -262,9 +264,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 				fmt.Printf("  Backup: %s\n", res.BackupPath)
 			}
 		}
-		if writer.Slug() == "claude-code" {
-			installSkill(scope, dryRun)
-		}
+		installSkill(writer, scope, dryRun)
 		configured++
 	}
 
@@ -326,8 +326,8 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			if path, err := writer.ConfigPath(scope); err == nil {
 				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
 			}
-			if writer.Slug() == "claude-code" {
-				if dir, err := ide.SkillDir(scope); err == nil {
+			if host, ok := writer.(ide.SkillHost); ok {
+				if dir, err := host.SkillDir(scope); err == nil {
 					fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
 				}
 			}
@@ -369,8 +369,8 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			fmt.Printf("  Backup: %s\n", res.BackupPath)
 		}
 
-		if writer.Slug() == "claude-code" {
-			skill, err := ide.RemoveSkill(scope)
+		if host, ok := writer.(ide.SkillHost); ok {
+			skill, err := ide.RemoveSkill(host, scope)
 			switch {
 			case err != nil:
 				fmt.Println(style.Warn(fmt.Sprintf("Could not remove the DBGorilla skill: %v", err)))
@@ -599,22 +599,27 @@ func printAdminAllowlist(apiURL string) {
 }
 
 // installSkill drops the DBGorilla skill next to the MCP registration, so
-// Claude Code knows to consult the tools it now has rather than waiting to be
+// the agent knows to consult the tools it now has rather than waiting to be
 // told. Wiring up the server without it leaves the tools present but unused
-// on exactly the work they exist for.
+// on exactly the work they exist for. Clients that do not read skills are
+// silently skipped.
 //
 // A failure here is reported and stepped over. The MCP registration is the
 // part the user asked for and it has already succeeded; an unwritable skills
 // directory should not turn a working setup into a failed command.
-func installSkill(scope ide.Scope, dryRun bool) {
+func installSkill(client ide.Adapter, scope ide.Scope, dryRun bool) {
+	host, ok := client.(ide.SkillHost)
+	if !ok {
+		return
+	}
 	if dryRun {
-		dir, err := ide.SkillDir(scope)
+		dir, err := host.SkillDir(scope)
 		if err == nil {
 			fmt.Println(style.Info("Would install the DBGorilla skill to: " + dir))
 		}
 		return
 	}
-	res, err := ide.InstallSkill(scope)
+	res, err := ide.InstallSkill(host, scope)
 	switch {
 	case err != nil:
 		fmt.Println(style.Warn(fmt.Sprintf("Could not install the DBGorilla skill: %v", err)))

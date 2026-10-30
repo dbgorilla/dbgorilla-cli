@@ -45,3 +45,9 @@ func (g *Gemini) BuildEntry(mcpURL, apiKey string) map[string]any {
 		"timeout": 30000,
 	}
 }
+
+// SkillDir: ~/.gemini/skills/dbgorilla (user) or .gemini/skills/dbgorilla
+// (project), beside settings.json.
+func (g *Gemini) SkillDir(scope Scope) (string, error) {
+	return skillDir(scope, []string{".gemini", "skills"}, []string{".gemini", "skills"})
+}

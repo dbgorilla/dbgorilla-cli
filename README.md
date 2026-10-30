@@ -76,14 +76,21 @@ machine and configures each one. Pass `--client <slug>` to target a
 specific tool, or `--list-clients` to see what's supported and which are
 detected.
 
-| Client | Slug | Setup type | Notes |
-|---|---|---|---|
-| Claude Code | `claude-code` | writer | Prefers `claude mcp add`; falls back to direct file write |
-| Cursor | `cursor` | writer | `~/.cursor/mcp.json` (user) or `.cursor/mcp.json` (project) |
-| VS Code | `vscode` | writer | `.vscode/mcp.json` (project) by default |
-| opencode | `opencode` | writer | `~/.config/opencode/opencode.json` (user) |
-| Gemini CLI | `gemini` | writer | `~/.gemini/settings.json` (user) |
-| Claude Desktop | `claude-desktop` | manual hint | Remote HTTP MCP requires Settings → Connectors UI flow |
+| Client | Slug | Setup type | MCP config | Skill directory |
+|---|---|---|---|---|
+| Claude Code | `claude-code` | writer | Prefers `claude mcp add`; falls back to direct file write | `~/.claude/skills/` (user) or `.claude/skills/` (project) |
+| Cursor | `cursor` | writer | `~/.cursor/mcp.json` (user) or `.cursor/mcp.json` (project) | `~/.cursor/skills/` or `.cursor/skills/` |
+| VS Code | `vscode` | writer | `.vscode/mcp.json` (project) by default | `~/.copilot/skills/` or `.github/skills/` |
+| opencode | `opencode` | writer | `~/.config/opencode/opencode.json` (user) | `~/.config/opencode/skills/` or `.opencode/skills/` |
+| Gemini CLI | `gemini` | writer | `~/.gemini/settings.json` (user) | `~/.gemini/skills/` or `.gemini/skills/` |
+| Claude Desktop | `claude-desktop` | manual hint | Remote HTTP MCP requires Settings → Connectors UI flow | none (skills are added in the app's settings) |
+
+Alongside the MCP entry, every writer client also gets a short `dbgorilla`
+skill (a `SKILL.md` in the directory listed) that tells the agent to check
+the live database through these tools before reasoning about it from the
+source alone. The skill is the same file for every client; it is written to
+each client's own directory so that it works whichever one you set up.
+`--remove` takes it away again.
 
 Useful flags:
 

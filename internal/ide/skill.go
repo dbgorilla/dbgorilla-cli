@@ -28,33 +28,39 @@ type SkillResult struct {
 	Absent  bool // nothing to remove
 }
 
-// SkillDir returns the directory the skill lives in for a scope. User scope
-// puts it in the home directory, where it applies to every project; project
-// scope puts it beside the code, where it can be committed and shared.
-func SkillDir(scope Scope) (string, error) {
+// skillDir resolves the dbgorilla skill directory for a scope from the
+// host's skills root: user scope is rooted in the home directory, where it
+// applies to every project; project scope is rooted in the working
+// directory, where it can be committed and shared.
+//
+// Every host's layout is <root>/<skill name>/SKILL.md; only the root
+// differs, so the adapters pass their roots and share the rest.
+func skillDir(scope Scope, userRoot, projectRoot []string) (string, error) {
 	if scope == ScopeProject {
 		cwd, err := getCWD()
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(cwd, ".claude", "skills", SkillName), nil
+		parts := append([]string{cwd}, projectRoot...)
+		return filepath.Join(append(parts, SkillName)...), nil
 	}
 	home := homeDir()
 	if home == "" {
 		return "", fmt.Errorf("cannot resolve home directory")
 	}
-	return filepath.Join(home, ".claude", "skills", SkillName), nil
+	parts := append([]string{home}, userRoot...)
+	return filepath.Join(append(parts, SkillName)...), nil
 }
 
-// InstallSkill writes the skill for the given scope.
+// InstallSkill writes the skill for the given host and scope.
 //
 // Idempotent by content, not by existence: re-running rewrites the file only
 // when this build ships something different, so a user who runs setup-ide
 // habitually gets the current text without a write, a backup, or a line of
 // output every time. There is no merge to do -- the directory belongs to this
 // integration and holds one file -- so an out-of-date copy is replaced whole.
-func InstallSkill(scope Scope) (SkillResult, error) {
-	dir, err := SkillDir(scope)
+func InstallSkill(host SkillHost, scope Scope) (SkillResult, error) {
+	dir, err := host.SkillDir(scope)
 	if err != nil {
 		return SkillResult{}, err
 	}
@@ -82,14 +88,14 @@ func InstallSkill(scope Scope) (SkillResult, error) {
 	return res, nil
 }
 
-// RemoveSkill deletes the skill directory for the given scope.
+// RemoveSkill deletes the skill directory for the given host and scope.
 //
 // Removing the directory rather than the one file inside it is safe because
 // nothing else may live there: it is named for this integration, it is created
 // by InstallSkill, and a user with their own instructions to add would put
 // them in a skill of their own name.
-func RemoveSkill(scope Scope) (SkillResult, error) {
-	dir, err := SkillDir(scope)
+func RemoveSkill(host SkillHost, scope Scope) (SkillResult, error) {
+	dir, err := host.SkillDir(scope)
 	if err != nil {
 		return SkillResult{}, err
 	}

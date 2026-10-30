@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.9.0
+
+### Added
+
+- `dbg setup-ide` now installs the DBGorilla skill for every client that
+  reads one. Before, only Claude Code got it. Cursor, VS Code, opencode and
+  Gemini CLI each had the MCP tools connected but nothing telling the agent
+  when to use them, so on a database question they went on reasoning from
+  the source alone.
+
+  Each client gets its own copy in the directory it reads skills from:
+
+  | Client | User scope | Project scope |
+  |---|---|---|
+  | Cursor | `~/.cursor/skills/` | `.cursor/skills/` |
+  | VS Code | `~/.copilot/skills/` | `.github/skills/` |
+  | opencode | `~/.config/opencode/skills/` | `.opencode/skills/` |
+  | Gemini CLI | `~/.gemini/skills/` | `.gemini/skills/` |
+
+  The skill is one short file, the same for every client. Re-running
+  `setup-ide` leaves an up-to-date copy alone, and `setup-ide --remove`
+  deletes it along with the MCP entry. An agent already running needs a
+  restart, or its reload command, before it sees the new skill.
+
+  Claude Desktop is unchanged. It takes skills through its own settings, not
+  from a directory, so it still gets the manual hint only.
+
+- `dbg setup-ide --dry-run` now names the skill it would install on every
+  path. Before, it said so only when `claude mcp add` was going to be used.
+
+### Dependencies
+
+- Go modules and GitHub Actions bumped to current versions.
+
 ## v0.8.1
 
 ### Changed
