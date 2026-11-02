@@ -481,10 +481,11 @@ func TestRunSetupIDE_InstallsTheSkillForClaudeCode(t *testing.T) {
 	// asked for this client, not that one.
 	t.Run("each other client gets a copy in its own directory", func(t *testing.T) {
 		for slug, rel := range map[string]string{
-			"cursor":   filepath.Join(".cursor", "skills"),
-			"vscode":   filepath.Join(".copilot", "skills"),
-			"opencode": filepath.Join(".config", "opencode", "skills"),
-			"gemini":   filepath.Join(".gemini", "skills"),
+			"cursor":    filepath.Join(".cursor", "skills"),
+			"vscode":    filepath.Join(".copilot", "skills"),
+			"opencode":  filepath.Join(".config", "opencode", "skills"),
+			"gemini":    filepath.Join(".gemini", "skills"),
+			"jetbrains": filepath.Join(".junie", "skills"),
 		} {
 			t.Run(slug, func(t *testing.T) {
 				home := isolate(t)

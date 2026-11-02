@@ -30,6 +30,18 @@
 - `dbg setup-ide --dry-run` now names the skill it would install on every
   path. Before, it said so only when `claude mcp add` was going to be used.
 
+- `dbg setup-ide` now sets up JetBrains IDEs. IntelliJ IDEA, PhpStorm,
+  PyCharm, WebStorm, GoLand, DataGrip and the other JetBrains products share
+  one AI Assistant plugin, and it reads its MCP servers from one file per
+  user, `~/.ai/mcp/mcp.json`, or `.ai/mcp/mcp.json` in a project. The new
+  `jetbrains` client writes the DBGorilla entry there, so one run covers
+  every JetBrains IDE on the machine, and puts the skill in
+  `~/.junie/skills/` (or `.junie/skills/`) where Junie reads it.
+
+  This needs AI Assistant 2025.3 or later. The CLI warns when it finds an
+  older IDE and tells you to paste the entry through the settings dialog.
+  `setup-ide --remove --client jetbrains` undoes both.
+
 ### Dependencies
 
 - Go modules and GitHub Actions bumped to current versions.

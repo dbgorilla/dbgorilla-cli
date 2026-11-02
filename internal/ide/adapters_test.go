@@ -157,3 +157,127 @@ func TestAllWriters_TopLevelKeyNonEmpty(t *testing.T) {
 		}
 	}
 }
+
+func TestJetBrains_ConfigPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	j := &JetBrains{}
+	user, _ := j.ConfigPath(ScopeUser)
+	if want := filepath.Join(home, ".ai", "mcp", "mcp.json"); user != want {
+		t.Errorf("user path = %q, want %q (one file shared by every JetBrains IDE)", user, want)
+	}
+	proj, _ := j.ConfigPath(ScopeProject)
+	if !strings.HasSuffix(proj, filepath.Join(".ai", "mcp", "mcp.json")) || strings.HasPrefix(proj, home) {
+		t.Errorf("project path = %q, want .ai/mcp/mcp.json under the working directory", proj)
+	}
+}
+
+func TestJetBrains_BuildEntry_StreamableHTTP(t *testing.T) {
+	got := (&JetBrains{}).BuildEntry("https://x/mcp/", "k")
+	if got["type"] != "streamable-http" {
+		t.Errorf("type = %v, want streamable-http (the type AI Assistant documents)", got["type"])
+	}
+	if got["url"] != "https://x/mcp/" {
+		t.Errorf("url = %v", got["url"])
+	}
+	if hdr := got["headers"].(map[string]string); hdr["Authorization"] != "Bearer k" {
+		t.Errorf("auth header = %q", hdr["Authorization"])
+	}
+	if k := (&JetBrains{}).TopLevelKey(); k != "mcpServers" {
+		t.Errorf("top-level key = %q, want mcpServers", k)
+	}
+}
+
+// TestJetBrains_Detect pins detection to the product configuration
+// directories, which exist for every product and version that has run on
+// the machine, on every platform.
+func TestJetBrains_Detect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	prev := goos
+	t.Cleanup(func() { goos = prev })
+
+	cases := map[string][]string{
+		"darwin":  {"Library", "Application Support", "JetBrains"},
+		"linux":   {".config", "JetBrains"},
+		"windows": {"AppData", "Roaming", "JetBrains"},
+	}
+	for os_, rel := range cases {
+		t.Run(os_, func(t *testing.T) {
+			goos = os_
+			j := &JetBrains{}
+			if os_ != "darwin" && j.Detect() {
+				t.Fatal("detected with no configuration directory")
+			}
+			dir := filepath.Join(append([]string{home}, rel...)...)
+			if err := osMkdirAll(filepath.Join(dir, "PhpStorm2025.2")); err != nil {
+				t.Fatal(err)
+			}
+			if !j.Detect() {
+				t.Errorf("not detected with %s present", filepath.Join(dir, "PhpStorm2025.2"))
+			}
+		})
+	}
+}
+
+func TestJetBrains_Warnings_OnlyForIDEsOlderThan2025_3(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	prev := goos
+	goos = "linux"
+	t.Cleanup(func() { goos = prev })
+	root := filepath.Join(home, ".config", "JetBrains")
+	for _, d := range []string{"PhpStorm2025.3", "IntelliJIdea2026.1", "consentOptions"} {
+		if err := osMkdirAll(filepath.Join(root, d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	j := &JetBrains{}
+	if w := j.Warnings(); len(w) != 0 {
+		t.Errorf("warned for current IDEs: %q", w)
+	}
+	for _, d := range []string{"PyCharmCE2024.3", "IdeaIC2025.2"} {
+		if err := osMkdirAll(filepath.Join(root, d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := j.Warnings()
+	if len(w) != 1 {
+		t.Fatalf("want one warning naming the old IDEs, got %q", w)
+	}
+	for _, name := range []string{"PyCharmCE2024.3", "IdeaIC2025.2", "--print-config"} {
+		if !strings.Contains(w[0], name) {
+			t.Errorf("warning does not mention %s:\n%s", name, w[0])
+		}
+	}
+	if strings.Contains(w[0], "2025.3") || strings.Contains(w[0], "2026.1") {
+		t.Errorf("warning names an IDE that reads mcp.json:\n%s", w[0])
+	}
+}
+
+func TestParseJetBrainsProduct(t *testing.T) {
+	cases := map[string]struct {
+		name string
+		ok   bool
+	}{
+		"PhpStorm2025.2":     {"PhpStorm", true},
+		"PyCharmCE2024.3":    {"PyCharmCE", true}, // longest prefix, not PyCharm + "CE2024.3"
+		"IdeaIC2025.1":       {"IdeaIC", true},
+		"IntelliJIdea2026.2": {"IntelliJIdea", true},
+		"consentOptions":     {"", false},
+		"Toolbox":            {"", false},
+		"PhpStorm":           {"", false},
+	}
+	for dir, want := range cases {
+		got, ok := parseJetBrainsProduct(dir)
+		if ok != want.ok || got.name != want.name {
+			t.Errorf("%s = (%q, %v), want (%q, %v)", dir, got.name, ok, want.name, want.ok)
+		}
+	}
+}

@@ -66,13 +66,13 @@ and configures each one. Use --client to target specific tools, or
 --list-clients to see what's supported and what's currently detected.
 
 Supported writable clients:
-  claude-code, cursor, vscode, opencode, gemini
+  claude-code, cursor, vscode, opencode, gemini, jetbrains
 
 Detect-only clients (printed manual instructions):
   claude-desktop  (HTTP MCP requires Settings -> Connectors UI flow)
 
 For clients that read Agent Skills (claude-code, cursor, vscode, opencode,
-gemini), this also installs a short DBGorilla skill, so the agent knows to
+gemini, jetbrains), this also installs a short DBGorilla skill, so the agent knows to
 check the live database through these tools before reasoning about it from
 the source alone.
 
@@ -265,6 +265,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		installSkill(writer, scope, dryRun)
+		printClientWarnings(writer)
 		configured++
 	}
 
@@ -596,6 +597,19 @@ func printAdminAllowlist(apiURL string) {
 	fmt.Println("  4. Save")
 	fmt.Println()
 	fmt.Println("Once approved, each developer runs `dbgorilla setup-ide` to wire it in.")
+}
+
+// printClientWarnings prints what a client cannot do for itself. A Warner
+// derives these from files on this machine and nothing else, so each one is
+// a step the user has to take by hand, not a guess about their setup.
+func printClientWarnings(client ide.Adapter) {
+	w, ok := client.(ide.Warner)
+	if !ok {
+		return
+	}
+	for _, msg := range w.Warnings() {
+		fmt.Println(style.Warn("⚠ " + msg))
+	}
 }
 
 // installSkill drops the DBGorilla skill next to the MCP registration, so

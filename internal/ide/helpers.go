@@ -31,3 +31,7 @@ func getCWD() (string, error) {
 // directory per platform, and a wrong path writes an MCP config the IDE never
 // reads -- a silent failure this seam lets us pin.
 var goos = runtime.GOOS
+
+// osMkdirAll is os.MkdirAll with the mode the adapters use, for tests that
+// lay out IDE directories.
+func osMkdirAll(path string) error { return os.MkdirAll(path, 0755) }

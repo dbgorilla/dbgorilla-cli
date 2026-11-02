@@ -7,7 +7,7 @@
 [![Go version](https://img.shields.io/github/go-mod/go-version/dbgorilla/dbgorilla-cli)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The DBGorilla CLI. Sign in to a DBGorilla deployment and connect your IDE/agent (Claude Code, Cursor, VS Code, opencode, Gemini CLI) via MCP in three commands.
+The DBGorilla CLI. Sign in to a DBGorilla deployment and connect your IDE/agent (Claude Code, Cursor, VS Code, opencode, Gemini CLI, JetBrains IDEs) via MCP in three commands.
 
 ## Install
 
@@ -83,6 +83,7 @@ detected.
 | VS Code | `vscode` | writer | `.vscode/mcp.json` (project) by default | `~/.copilot/skills/` or `.github/skills/` |
 | opencode | `opencode` | writer | `~/.config/opencode/opencode.json` (user) | `~/.config/opencode/skills/` or `.opencode/skills/` |
 | Gemini CLI | `gemini` | writer | `~/.gemini/settings.json` (user) | `~/.gemini/skills/` or `.gemini/skills/` |
+| JetBrains IDEs | `jetbrains` | writer | `~/.ai/mcp/mcp.json` (user) or `.ai/mcp/mcp.json` (project), read by AI Assistant in every JetBrains IDE | `~/.junie/skills/` or `.junie/skills/` (Junie) |
 | Claude Desktop | `claude-desktop` | manual hint | Remote HTTP MCP requires Settings → Connectors UI flow | none (skills are added in the app's settings) |
 
 Alongside the MCP entry, every writer client also gets a short `dbgorilla`
@@ -91,6 +92,15 @@ the live database through these tools before reasoning about it from the
 source alone. The skill is the same file for every client; it is written to
 each client's own directory so that it works whichever one you set up.
 `--remove` takes it away again.
+
+JetBrains IDEs (IntelliJ IDEA, PhpStorm, PyCharm, WebStorm, GoLand, DataGrip
+and the rest) share one AI Assistant plugin, and it reads one MCP file per
+user, so a single `dbg setup-ide --client jetbrains` covers every JetBrains
+IDE on the machine. This needs AI Assistant 2025.3 or later; the CLI warns
+when it finds an older IDE and tells you to paste the entry through
+Settings > Tools > AI Assistant > Model Context Protocol (MCP) instead. For
+Junie to use the server from inside AI Chat, turn on "Pass custom MCP
+servers" under Settings > Tools > AI Assistant > Agents.
 
 Useful flags:
 

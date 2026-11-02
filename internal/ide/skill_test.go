@@ -50,6 +50,7 @@ func TestSkillDir(t *testing.T) {
 		{&VSCode{}, ".copilot/skills", ".github/skills"},
 		{&Opencode{}, ".config/opencode/skills", ".opencode/skills"},
 		{&Gemini{}, ".gemini/skills", ".gemini/skills"},
+		{&JetBrains{}, ".junie/skills", ".junie/skills"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.host.Slug(), func(t *testing.T) {

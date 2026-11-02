@@ -86,6 +86,14 @@ type SkillHost interface {
 	SkillDir(scope Scope) (string, error)
 }
 
+// Warner is implemented by tools that can tell, from this machine alone,
+// that part of the setup will not take effect and has to be done by hand.
+// Each string is printed after the MCP entry is written.
+type Warner interface {
+	Adapter
+	Warnings() []string
+}
+
 // Hinter is implemented by tools we detect but can't auto-configure.
 // Hint() returns a multi-line string with manual setup instructions.
 type Hinter interface {
@@ -102,6 +110,7 @@ var Registry = []Adapter{
 	&VSCode{},
 	&Opencode{},
 	&Gemini{},
+	&JetBrains{},
 }
 
 // Find returns the adapter matching the given slug, or nil.
