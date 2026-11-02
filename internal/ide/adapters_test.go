@@ -281,3 +281,28 @@ func TestParseJetBrainsProduct(t *testing.T) {
 		}
 	}
 }
+
+// TestJetBrains_Detect_FromAppBundles covers an IDE that is installed but
+// has never been launched, so it has no configuration directory yet. The
+// bundle names are the ones the JetBrains installers and Toolbox create.
+func TestJetBrains_Detect_FromAppBundles(t *testing.T) {
+	prev := goos
+	goos = "darwin"
+	t.Cleanup(func() { goos = prev })
+	for _, app := range []string{"IntelliJ IDEA.app", "PhpStorm.app", "DataGrip.app", "PyCharm Community Edition.app"} {
+		t.Run(app, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			if (&JetBrains{}).Detect() && !exists("/Applications/"+app) {
+				// A real /Applications install would make this check meaningless.
+				t.Skip("a JetBrains IDE is installed system-wide on this machine")
+			}
+			if err := osMkdirAll(filepath.Join(home, "Applications", app)); err != nil {
+				t.Fatal(err)
+			}
+			if !(&JetBrains{}).Detect() {
+				t.Errorf("not detected with ~/Applications/%s present", app)
+			}
+		})
+	}
+}
