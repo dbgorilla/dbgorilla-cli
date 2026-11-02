@@ -42,7 +42,7 @@ func (j *JetBrains) Detect() bool {
 		return true
 	}
 	if goos == "darwin" {
-		for _, root := range []string{"/Applications", filepath.Join(homeDir(), "Applications")} {
+		for _, root := range jetBrainsAppRoots() {
 			if len(jetBrainsAppBundles(root)) > 0 {
 				return true
 			}
@@ -196,6 +196,13 @@ func parseJetBrainsProduct(dir string) (jetBrainsProduct, bool) {
 		return jetBrainsProduct{}, false
 	}
 	return jetBrainsProduct{name: best, version: ver, year: y, minor: m}, true
+}
+
+// jetBrainsAppRoots are the macOS directories IDE bundles are installed in:
+// the system Applications folder for the standalone installers, and the
+// user's for Toolbox. A variable so tests do not see the machine's own IDEs.
+var jetBrainsAppRoots = func() []string {
+	return []string{"/Applications", filepath.Join(homeDir(), "Applications")}
 }
 
 // jetBrainsAppBundles lists the JetBrains IDE application bundles in root,

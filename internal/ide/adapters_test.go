@@ -198,8 +198,9 @@ func TestJetBrains_Detect(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
-	prev := goos
-	t.Cleanup(func() { goos = prev })
+	prev, prevRoots := goos, jetBrainsAppRoots
+	jetBrainsAppRoots = func() []string { return nil }
+	t.Cleanup(func() { goos, jetBrainsAppRoots = prev, prevRoots })
 
 	cases := map[string][]string{
 		"darwin":  {"Library", "Application Support", "JetBrains"},
@@ -210,7 +211,7 @@ func TestJetBrains_Detect(t *testing.T) {
 		t.Run(os_, func(t *testing.T) {
 			goos = os_
 			j := &JetBrains{}
-			if os_ != "darwin" && j.Detect() {
+			if j.Detect() {
 				t.Fatal("detected with no configuration directory")
 			}
 			dir := filepath.Join(append([]string{home}, rel...)...)
@@ -286,16 +287,16 @@ func TestParseJetBrainsProduct(t *testing.T) {
 // has never been launched, so it has no configuration directory yet. The
 // bundle names are the ones the JetBrains installers and Toolbox create.
 func TestJetBrains_Detect_FromAppBundles(t *testing.T) {
-	prev := goos
+	prev, prevRoots := goos, jetBrainsAppRoots
 	goos = "darwin"
-	t.Cleanup(func() { goos = prev })
+	t.Cleanup(func() { goos, jetBrainsAppRoots = prev, prevRoots })
 	for _, app := range []string{"IntelliJ IDEA.app", "PhpStorm.app", "DataGrip.app", "PyCharm Community Edition.app"} {
 		t.Run(app, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
-			if (&JetBrains{}).Detect() && !exists("/Applications/"+app) {
-				// A real /Applications install would make this check meaningless.
-				t.Skip("a JetBrains IDE is installed system-wide on this machine")
+			jetBrainsAppRoots = func() []string { return []string{filepath.Join(home, "Applications")} }
+			if (&JetBrains{}).Detect() {
+				t.Fatal("detected before any bundle exists")
 			}
 			if err := osMkdirAll(filepath.Join(home, "Applications", app)); err != nil {
 				t.Fatal(err)
