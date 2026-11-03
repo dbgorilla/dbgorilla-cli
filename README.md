@@ -104,6 +104,17 @@ Settings > Tools > AI Assistant > Model Context Protocol (MCP) instead. For
 Junie to use the server from inside AI Chat, turn on "Pass custom MCP
 servers" under Settings > Tools > AI Assistant > Agents.
 
+Two things that look like bugs and are not:
+
+- **Close the IDE's Settings window before running `setup-ide`.** An open
+  Settings window holds its own copy of the MCP list, and clicking Apply or
+  OK writes that copy back over the file, old key included.
+- **"Expected status code 200 but was 405" means the key was rejected.**
+  AI Assistant falls back to the older SSE transport whenever the server
+  refuses a request, and DBGorilla does not serve SSE, so the error you see
+  is the fallback failing rather than the real cause. Re-run
+  `dbg setup-ide --client jetbrains`, then Reconnect in the MCP settings.
+
 Useful flags:
 
 ```sh
