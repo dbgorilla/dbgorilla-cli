@@ -13,7 +13,11 @@ paths:
 3. Add entries in `adapters_test.go` pinning the load-bearing facts: top-level
    key (`mcpServers` / `servers` / `mc`), entry shape (client-specific field
    names like `httpUrl` vs `url`), and the config path per scope.
-4. Update the README "Supported MCP clients" section.
+4. If the tool reads Agent Skills (`SKILL.md` with front matter) from a
+   directory, also implement `SkillHost` with that directory per scope, and
+   pin the two paths in `skill_test.go`. `TestEveryWriterIsASkillHost` fails
+   until a `Writer` either hosts the skill or is exempted there on purpose.
+5. Update the README "Supported MCP clients" section.
 
 ## WriteMCPConfig merge contract (mandatory)
 

@@ -1,5 +1,73 @@
 # Changelog
 
+## v0.9.0
+
+### Added
+
+- `dbg setup-ide` now installs the DBGorilla skill for every client that
+  reads one. Before, only Claude Code got it. Cursor, VS Code, opencode and
+  Gemini CLI each had the MCP tools connected but nothing telling the agent
+  when to use them, so on a database question they went on reasoning from
+  the source alone.
+
+  Each client gets its own copy in the directory it reads skills from:
+
+  | Client | User scope | Project scope |
+  |---|---|---|
+  | Cursor | `~/.cursor/skills/` | `.cursor/skills/` |
+  | VS Code | `~/.copilot/skills/` | `.github/skills/` |
+  | opencode | `~/.config/opencode/skills/` | `.opencode/skills/` |
+  | Gemini CLI | `~/.gemini/skills/` | `.gemini/skills/` |
+
+  The skill is one short file, the same for every client. Re-running
+  `setup-ide` leaves an up-to-date copy alone, and `setup-ide --remove`
+  deletes it along with the MCP entry. An agent already running needs a
+  restart, or its reload command, before it sees the new skill.
+
+  Claude Desktop is unchanged. It takes skills through its own settings, not
+  from a directory, so it still gets the manual hint only.
+
+- `dbg setup-ide --dry-run` now names the skill it would install on every
+  path. Before, it said so only when `claude mcp add` was going to be used.
+
+- `dbg setup-ide` now sets up JetBrains IDEs. IntelliJ IDEA, PhpStorm,
+  PyCharm, WebStorm, GoLand, DataGrip and the other JetBrains products share
+  one AI Assistant plugin, and it reads its MCP servers from one file per
+  user, `~/.ai/mcp/mcp.json`, or `.ai/mcp/mcp.json` in a project. The new
+  `jetbrains` client writes the DBGorilla entry there, so one run covers
+  every JetBrains IDE on the machine, and puts the skill in
+  `~/.junie/skills/` (or `.junie/skills/`) where Junie reads it.
+
+  AI Assistant lists the new server switched off. Tick `dbgorilla` under
+  Settings > Tools > AI Assistant > Model Context Protocol (MCP) and click
+  Apply, once in each IDE. The CLI prints this step after writing the file.
+
+  This needs AI Assistant 2025.3 or later. The CLI warns when it finds an
+  older IDE and tells you to paste the entry through the settings dialog.
+  `setup-ide --remove --client jetbrains` undoes both.
+
+### Changed
+
+- `dbg setup-ide --print-config` no longer puts your MCP API key in its
+  output. The entry now carries `YOUR_MCP_API_KEY` where the key goes, and
+  the command says to get the key from `dbg setup-ide --print-key`. Its
+  output is the thing people paste into chats, tickets and screenshots, and
+  a credential should not ride along. If you script `--print-config` to
+  write a config file, substitute the output of `--print-key` for the
+  placeholder.
+
+### Fixed
+
+- `dbg doctor` now finds a client's DBGorilla entry at any scope that client
+  supports, not only its default one. Before, `dbg setup-ide --client vscode
+  --scope user` worked but `doctor` reported VS Code as not configured,
+  because it only looked in the project's `.vscode/mcp.json`. When the entry
+  is missing everywhere, `doctor` still names the default file.
+
+### Dependencies
+
+- Go modules and GitHub Actions bumped to current versions.
+
 ## v0.8.1
 
 ### Changed

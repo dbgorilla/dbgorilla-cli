@@ -56,3 +56,9 @@ func (c *Cursor) BuildEntry(mcpURL, apiKey string) map[string]any {
 		},
 	}
 }
+
+// SkillDir: ~/.cursor/skills/dbgorilla (user) or .cursor/skills/dbgorilla
+// (project). Cursor loads these automatically; no setting is involved.
+func (c *Cursor) SkillDir(scope Scope) (string, error) {
+	return skillDir(scope, []string{".cursor", "skills"}, []string{".cursor", "skills"})
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -42,7 +43,7 @@ func init() {
 	setupIDECmd.Flags().Bool("dry-run", false,
 		"Show what would be written without modifying any files.")
 	setupIDECmd.Flags().Bool("print-config", false,
-		"Print the MCP entry for each selected client (no write, but still calls the API for the key).")
+		"Print the MCP entry for each selected client, with a placeholder for the key (no write). Get the key with --print-key.")
 	setupIDECmd.Flags().Bool("print-key", false,
 		"Print the MCP API key only (for paste-elsewhere flows).")
 	setupIDECmd.Flags().Bool("print-admin-allowlist", false,
@@ -66,14 +67,15 @@ and configures each one. Use --client to target specific tools, or
 --list-clients to see what's supported and what's currently detected.
 
 Supported writable clients:
-  claude-code, cursor, vscode, opencode, gemini
+  claude-code, cursor, vscode, opencode, gemini, jetbrains
 
 Detect-only clients (printed manual instructions):
   claude-desktop  (HTTP MCP requires Settings -> Connectors UI flow)
 
-For Claude Code, this also installs a short DBGorilla skill, so the agent
-knows to check the live database through these tools before reasoning about
-it from the source alone.
+For clients that read Agent Skills (claude-code, cursor, vscode, opencode,
+gemini, jetbrains), this also installs a short DBGorilla skill, so the agent knows to
+check the live database through these tools before reasoning about it from
+the source alone.
 
 Use --remove to undo all of that for the selected clients. It touches only
 local files and leaves the API key alone; dbgorilla logout --revoke-key
@@ -193,7 +195,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		scope := pickScope(writer, scopeOverride)
 
 		if printConfig {
-			if err := emitPrintConfig(writer, mcpURL, mcpKey); err != nil {
+			if err := emitPrintConfig(writer, mcpURL); err != nil {
 				fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
 				failed++
 			}
@@ -206,7 +208,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			if _, lookErr := lookPath("claude"); lookErr == nil {
 				if dryRun {
 					fmt.Println(style.Info(fmt.Sprintf("Would run: claude mcp add (scope=%s, name=dbgorilla)", scope)))
-					installSkill(scope, dryRun)
+					installSkill(writer, scope, dryRun)
 					configured++
 					continue
 				}
@@ -216,7 +218,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 					continue
 				}
 				fmt.Println(style.Success("✓ Registered via `claude mcp add`"))
-				installSkill(scope, dryRun)
+				installSkill(writer, scope, dryRun)
 				configured++
 				continue
 			}
@@ -232,6 +234,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 
 		if dryRun {
 			fmt.Println(style.Info(fmt.Sprintf("Would write MCP entry to: %s (scope=%s)", path, scope)))
+			installSkill(writer, scope, dryRun)
 			configured++
 			continue
 		}
@@ -242,7 +245,8 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			if errors.Is(err, ide.ErrJSONCRefused) {
 				fmt.Println(style.Warn(fmt.Sprintf("Refused to overwrite JSONC config at %s.", path)))
 				fmt.Println("Run `dbgorilla setup-ide --print-config --client " + writer.Slug() +
-					"` and paste the output into the file manually.")
+					"` and paste the output into the file manually,")
+				fmt.Println("replacing " + printConfigKeyPlaceholder + " with the output of `dbgorilla setup-ide --print-key`.")
 				continue
 			}
 			fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
@@ -262,9 +266,8 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 				fmt.Printf("  Backup: %s\n", res.BackupPath)
 			}
 		}
-		if writer.Slug() == "claude-code" {
-			installSkill(scope, dryRun)
-		}
+		installSkill(writer, scope, dryRun)
+		printClientWarnings(writer)
 		configured++
 	}
 
@@ -326,8 +329,8 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			if path, err := writer.ConfigPath(scope); err == nil {
 				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
 			}
-			if writer.Slug() == "claude-code" {
-				if dir, err := ide.SkillDir(scope); err == nil {
+			if host, ok := writer.(ide.SkillHost); ok {
+				if dir, err := host.SkillDir(scope); err == nil {
 					fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
 				}
 			}
@@ -369,8 +372,8 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			fmt.Printf("  Backup: %s\n", res.BackupPath)
 		}
 
-		if writer.Slug() == "claude-code" {
-			skill, err := ide.RemoveSkill(scope)
+		if host, ok := writer.(ide.SkillHost); ok {
+			skill, err := ide.RemoveSkill(host, scope)
 			switch {
 			case err != nil:
 				fmt.Println(style.Warn(fmt.Sprintf("Could not remove the DBGorilla skill: %v", err)))
@@ -455,10 +458,19 @@ func pickScope(w ide.Writer, override ide.Scope) ide.Scope {
 	return w.DefaultScope()
 }
 
-// emitPrintConfig prints the JSON entry for the writer to stdout, using
-// the writer's actual top-level key.
-func emitPrintConfig(w ide.Writer, mcpURL, apiKey string) error {
-	entry := w.BuildEntry(mcpURL, apiKey)
+// printConfigKeyPlaceholder stands in for the API key in --print-config
+// output.
+const printConfigKeyPlaceholder = "YOUR_MCP_API_KEY"
+
+// emitPrintConfig prints the JSON entry for the writer to stdout, using the
+// writer's actual top-level key, with a placeholder where the key goes.
+//
+// The key is left out so that the one command whose output people paste
+// into chats, tickets and screenshots does not carry a credential. The key
+// itself comes from --print-key, which says plainly that it prints a secret.
+// The hint goes to stderr so stdout stays exactly the JSON to paste.
+func emitPrintConfig(w ide.Writer, mcpURL string) error {
+	entry := w.BuildEntry(mcpURL, printConfigKeyPlaceholder)
 	blob, err := json.MarshalIndent(map[string]any{
 		w.TopLevelKey(): map[string]any{ide.MCPServerName: entry},
 	}, "", "  ")
@@ -466,6 +478,7 @@ func emitPrintConfig(w ide.Writer, mcpURL, apiKey string) error {
 		return err
 	}
 	fmt.Println(string(blob))
+	fmt.Fprintln(os.Stderr, "Replace "+printConfigKeyPlaceholder+" with the output of: dbgorilla setup-ide --print-key")
 	return nil
 }
 
@@ -598,23 +611,41 @@ func printAdminAllowlist(apiURL string) {
 	fmt.Println("Once approved, each developer runs `dbgorilla setup-ide` to wire it in.")
 }
 
+// printClientWarnings prints what a client cannot do for itself. A Warner
+// derives these from files on this machine and nothing else, so each one is
+// a step the user has to take by hand, not a guess about their setup.
+func printClientWarnings(client ide.Adapter) {
+	w, ok := client.(ide.Warner)
+	if !ok {
+		return
+	}
+	for _, msg := range w.Warnings() {
+		fmt.Println(style.Warn("⚠ " + msg))
+	}
+}
+
 // installSkill drops the DBGorilla skill next to the MCP registration, so
-// Claude Code knows to consult the tools it now has rather than waiting to be
+// the agent knows to consult the tools it now has rather than waiting to be
 // told. Wiring up the server without it leaves the tools present but unused
-// on exactly the work they exist for.
+// on exactly the work they exist for. Clients that do not read skills are
+// silently skipped.
 //
 // A failure here is reported and stepped over. The MCP registration is the
 // part the user asked for and it has already succeeded; an unwritable skills
 // directory should not turn a working setup into a failed command.
-func installSkill(scope ide.Scope, dryRun bool) {
+func installSkill(client ide.Adapter, scope ide.Scope, dryRun bool) {
+	host, ok := client.(ide.SkillHost)
+	if !ok {
+		return
+	}
 	if dryRun {
-		dir, err := ide.SkillDir(scope)
+		dir, err := host.SkillDir(scope)
 		if err == nil {
 			fmt.Println(style.Info("Would install the DBGorilla skill to: " + dir))
 		}
 		return
 	}
-	res, err := ide.InstallSkill(scope)
+	res, err := ide.InstallSkill(host, scope)
 	switch {
 	case err != nil:
 		fmt.Println(style.Warn(fmt.Sprintf("Could not install the DBGorilla skill: %v", err)))

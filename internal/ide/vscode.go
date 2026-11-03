@@ -69,3 +69,11 @@ func (v *VSCode) BuildEntry(mcpURL, apiKey string) map[string]any {
 		},
 	}
 }
+
+// SkillDir: ~/.copilot/skills/dbgorilla (user) or .github/skills/dbgorilla
+// (project). The project root is .github, not .vscode: skills belong to
+// Copilot rather than to the editor, and that is where both the editor's
+// local sessions and the Copilot coding agent look for them.
+func (v *VSCode) SkillDir(scope Scope) (string, error) {
+	return skillDir(scope, []string{".copilot", "skills"}, []string{".github", "skills"})
+}

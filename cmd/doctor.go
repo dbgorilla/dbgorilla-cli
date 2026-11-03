@@ -210,8 +210,15 @@ func printCheck(name string, ok bool, detail string) {
 
 // checkClientConfigured returns (ok, message) for one writer adapter.
 // For Claude Code, prefers `claude mcp list` (authoritative across the
-// CLI's own scope precedence); for everything else, parses the writer's
-// default-scope config file directly and looks for the dbgorilla entry.
+// CLI's own scope precedence); for everything else, looks for the dbgorilla
+// entry in the writer's config file at every scope it supports.
+//
+// Every scope, not only the default, because setup-ide --scope writes to
+// whichever one the user picked: a VS Code user who chose --scope user has a
+// working setup that the default (project) file knows nothing about, and
+// reporting that as a failure sends them to re-run a setup that already
+// worked. When no scope has the entry, the message names the default
+// scope's file, which is where a plain setup-ide would put it.
 func checkClientConfigured(w ide.Writer) (bool, string) {
 	if w.Slug() == "claude-code" {
 		if _, err := lookPath("claude"); err == nil {
@@ -222,9 +229,37 @@ func checkClientConfigured(w ide.Writer) (bool, string) {
 			return false, "not registered -- run: dbgorilla setup-ide --client claude-code"
 		}
 	}
-	path, err := w.ConfigPath(w.DefaultScope())
-	if err != nil {
-		return false, "cannot resolve config path: " + err.Error()
+	scopes := []ide.Scope{w.DefaultScope()}
+	for _, s := range w.SupportedScopes() {
+		if s != w.DefaultScope() {
+			scopes = append(scopes, s)
+		}
+	}
+	var firstOK bool
+	var firstMsg string
+	seen := map[string]bool{}
+	for i, scope := range scopes {
+		path, err := w.ConfigPath(scope)
+		if err == nil && seen[path] {
+			continue // two scopes sharing one file; it has already been read
+		}
+		seen[path] = true
+		ok, msg := checkScopeConfigured(w, path, err)
+		if ok {
+			return true, msg
+		}
+		if i == 0 {
+			firstOK, firstMsg = ok, msg
+		}
+	}
+	return firstOK, firstMsg
+}
+
+// checkScopeConfigured reports whether the config file at path holds the
+// dbgorilla entry. pathErr is the error from resolving the path, if any.
+func checkScopeConfigured(w ide.Writer, path string, pathErr error) (bool, string) {
+	if pathErr != nil {
+		return false, "cannot resolve config path: " + pathErr.Error()
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

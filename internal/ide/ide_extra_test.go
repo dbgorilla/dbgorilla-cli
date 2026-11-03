@@ -190,7 +190,7 @@ func TestAppBundleAdapters_DetectViaHomeBundle(t *testing.T) {
 
 func TestSupportedSlugs_MatchesRegistryOrder(t *testing.T) {
 	got := SupportedSlugs()
-	want := []string{"claude-code", "claude-desktop", "cursor", "vscode", "opencode", "gemini"}
+	want := []string{"claude-code", "claude-desktop", "cursor", "vscode", "opencode", "gemini", "jetbrains"}
 	if len(got) != len(want) {
 		t.Fatalf("SupportedSlugs() len = %d (%v), want %d (%v)", len(got), got, len(want), want)
 	}
@@ -214,6 +214,14 @@ func TestDetectInstalled_ReportsEveryPresentTool(t *testing.T) {
 		}
 	}
 	materializeClaudeDesktop(t, home)
+	// JetBrains: AI Assistant's own config file is the one signal that is
+	// the same on every platform.
+	if err := os.MkdirAll(filepath.Join(home, ".ai", "mcp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ai", "mcp", "mcp.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	found := DetectInstalled()
 	if len(found) != len(Registry) {
