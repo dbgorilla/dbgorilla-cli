@@ -38,6 +38,10 @@
   every JetBrains IDE on the machine, and puts the skill in
   `~/.junie/skills/` (or `.junie/skills/`) where Junie reads it.
 
+  AI Assistant lists the new server switched off. Tick `dbgorilla` under
+  Settings > Tools > AI Assistant > Model Context Protocol (MCP) and click
+  Apply, once in each IDE. The CLI prints this step after writing the file.
+
   This needs AI Assistant 2025.3 or later. The CLI warns when it finds an
   older IDE and tells you to paste the entry through the settings dialog.
   `setup-ide --remove --client jetbrains` undoes both.

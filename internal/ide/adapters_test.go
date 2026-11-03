@@ -240,25 +240,26 @@ func TestJetBrains_Warnings_OnlyForIDEsOlderThan2025_3(t *testing.T) {
 		}
 	}
 	j := &JetBrains{}
-	if w := j.Warnings(); len(w) != 0 {
-		t.Errorf("warned for current IDEs: %q", w)
+	w := j.Warnings()
+	if len(w) != 1 || !strings.Contains(w[0], "switched off") {
+		t.Errorf("current IDEs should get only the switch-it-on step: %q", w)
 	}
 	for _, d := range []string{"PyCharmCE2024.3", "IdeaIC2025.2"} {
 		if err := osMkdirAll(filepath.Join(root, d)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	w := j.Warnings()
-	if len(w) != 1 {
-		t.Fatalf("want one warning naming the old IDEs, got %q", w)
+	w = j.Warnings()
+	if len(w) != 2 {
+		t.Fatalf("want the switch-it-on step plus one naming the old IDEs, got %q", w)
 	}
 	for _, name := range []string{"PyCharmCE2024.3", "IdeaIC2025.2", "--print-config"} {
-		if !strings.Contains(w[0], name) {
-			t.Errorf("warning does not mention %s:\n%s", name, w[0])
+		if !strings.Contains(w[1], name) {
+			t.Errorf("warning does not mention %s:\n%s", name, w[1])
 		}
 	}
-	if strings.Contains(w[0], "2025.3") || strings.Contains(w[0], "2026.1") {
-		t.Errorf("warning names an IDE that reads mcp.json:\n%s", w[0])
+	if strings.Contains(w[1], "2025.3") || strings.Contains(w[1], "2026.1") {
+		t.Errorf("warning names an IDE that reads mcp.json:\n%s", w[1])
 	}
 }
 

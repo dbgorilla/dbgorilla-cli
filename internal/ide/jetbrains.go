@@ -90,11 +90,21 @@ func (j *JetBrains) SkillDir(scope Scope) (string, error) {
 	return skillDir(scope, []string{".junie", "skills"}, []string{".junie", "skills"})
 }
 
-// Warnings lists what the user has to do by hand, derived from the IDE
-// configuration directories on this machine and nothing else. Today that is
-// one thing: an IDE older than 2025.3 has an AI Assistant that does not read
+// Warnings lists what the user has to do by hand.
+//
+// The first is always true: AI Assistant lists a server it finds in mcp.json
+// but leaves it switched off until someone ticks it, unless "Automatically
+// enable new and changed MCP servers" is already on. Without this line the
+// setup looks finished and the tools never appear.
+//
+// The second is derived from the IDE configuration directories on this
+// machine: an IDE older than 2025.3 has an AI Assistant that does not read
 // mcp.json, so the entry has to go in through its settings dialog.
 func (j *JetBrains) Warnings() []string {
+	out := []string{
+		"AI Assistant adds dbgorilla switched off. In each JetBrains IDE: Settings > Tools >\n" +
+			"   AI Assistant > Model Context Protocol (MCP), tick dbgorilla, then Apply.",
+	}
 	var old []string
 	for _, p := range j.installedProducts() {
 		if p.year < 2025 || (p.year == 2025 && p.minor < 3) {
@@ -102,13 +112,12 @@ func (j *JetBrains) Warnings() []string {
 		}
 	}
 	if len(old) == 0 {
-		return nil
+		return out
 	}
-	return []string{
-		"AI Assistant in " + strings.Join(old, ", ") + " predates mcp.json and will not see this entry.\n" +
-			"   In that IDE: Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add,\n" +
-			"   and paste the output of `dbgorilla setup-ide --print-config --client jetbrains`.",
-	}
+	return append(out,
+		"AI Assistant in "+strings.Join(old, ", ")+" predates mcp.json and will not see this entry.\n"+
+			"   In that IDE: Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add,\n"+
+			"   and paste the output of `dbgorilla setup-ide --print-config --client jetbrains`.")
 }
 
 // jetBrainsProduct is one <Product><Version> configuration directory, such

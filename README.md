@@ -96,7 +96,9 @@ each client's own directory so that it works whichever one you set up.
 JetBrains IDEs (IntelliJ IDEA, PhpStorm, PyCharm, WebStorm, GoLand, DataGrip
 and the rest) share one AI Assistant plugin, and it reads one MCP file per
 user, so a single `dbg setup-ide --client jetbrains` covers every JetBrains
-IDE on the machine. This needs AI Assistant 2025.3 or later; the CLI warns
+IDE on the machine. AI Assistant lists the server switched off: tick
+dbgorilla under Settings > Tools > AI Assistant > Model Context Protocol (MCP)
+and click Apply, once per IDE. This needs AI Assistant 2025.3 or later; the CLI warns
 when it finds an older IDE and tells you to paste the entry through
 Settings > Tools > AI Assistant > Model Context Protocol (MCP) instead. For
 Junie to use the server from inside AI Chat, turn on "Pass custom MCP
