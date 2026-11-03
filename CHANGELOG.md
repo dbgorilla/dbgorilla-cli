@@ -46,6 +46,14 @@
   older IDE and tells you to paste the entry through the settings dialog.
   `setup-ide --remove --client jetbrains` undoes both.
 
+### Fixed
+
+- `dbg doctor` now finds a client's DBGorilla entry at any scope that client
+  supports, not only its default one. Before, `dbg setup-ide --client vscode
+  --scope user` worked but `doctor` reported VS Code as not configured,
+  because it only looked in the project's `.vscode/mcp.json`. When the entry
+  is missing everywhere, `doctor` still names the default file.
+
 ### Dependencies
 
 - Go modules and GitHub Actions bumped to current versions.
