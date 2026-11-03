@@ -46,6 +46,16 @@
   older IDE and tells you to paste the entry through the settings dialog.
   `setup-ide --remove --client jetbrains` undoes both.
 
+### Changed
+
+- `dbg setup-ide --print-config` no longer puts your MCP API key in its
+  output. The entry now carries `YOUR_MCP_API_KEY` where the key goes, and
+  the command says to get the key from `dbg setup-ide --print-key`. Its
+  output is the thing people paste into chats, tickets and screenshots, and
+  a credential should not ride along. If you script `--print-config` to
+  write a config file, substitute the output of `--print-key` for the
+  placeholder.
+
 ### Fixed
 
 - `dbg doctor` now finds a client's DBGorilla entry at any scope that client

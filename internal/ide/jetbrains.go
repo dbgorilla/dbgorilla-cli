@@ -117,7 +117,8 @@ func (j *JetBrains) Warnings() []string {
 	return append(out,
 		"AI Assistant in "+strings.Join(old, ", ")+" predates mcp.json and will not see this entry.\n"+
 			"   In that IDE: Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add,\n"+
-			"   and paste the output of `dbgorilla setup-ide --print-config --client jetbrains`.")
+			"   and paste the output of `dbgorilla setup-ide --print-config --client jetbrains`,\n"+
+			"   with the key from `dbgorilla setup-ide --print-key` in place of the placeholder.")
 }
 
 // jetBrainsProduct is one <Product><Version> configuration directory, such

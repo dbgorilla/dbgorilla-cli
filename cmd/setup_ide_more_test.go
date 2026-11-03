@@ -69,15 +69,15 @@ func TestPickScope(t *testing.T) {
 
 func TestEmitPrintConfig(t *testing.T) {
 	out := capture(t, func() {
-		if err := emitPrintConfig(&ide.Cursor{}, "https://dep/mcp/", "key-1"); err != nil {
+		if err := emitPrintConfig(&ide.Cursor{}, "https://dep/mcp/"); err != nil {
 			t.Fatalf("err=%v", err)
 		}
 	})
 	if !strings.Contains(out, "mcpServers") || !strings.Contains(out, "https://dep/mcp/") {
 		t.Errorf("print-config output wrong:\n%s", out)
 	}
-	if !strings.Contains(out, "Bearer key-1") {
-		t.Errorf("entry should carry the bearer header:\n%s", out)
+	if !strings.Contains(out, "Bearer "+printConfigKeyPlaceholder) {
+		t.Errorf("entry should carry the bearer header with the placeholder:\n%s", out)
 	}
 }
 
@@ -208,6 +208,14 @@ func TestRunSetupIDE_PrintConfig(t *testing.T) {
 	})
 	if !strings.Contains(out, "mcpServers") || !strings.Contains(out, "/mcp/") {
 		t.Errorf("print-config output wrong:\n%s", out)
+	}
+	// The key the server issued must not appear: --print-config output is
+	// what people paste into chats and tickets.
+	if strings.Contains(out, "mcp-key-xyz") {
+		t.Errorf("print-config leaked the API key:\n%s", out)
+	}
+	if !strings.Contains(out, printConfigKeyPlaceholder) || !strings.Contains(out, "--print-key") {
+		t.Errorf("print-config should show the placeholder and say where the key comes from:\n%s", out)
 	}
 }
 

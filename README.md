@@ -123,7 +123,8 @@ dbg setup-ide --client cursor             # target one
 dbg setup-ide --client cursor,vscode      # target several
 dbg setup-ide --scope project             # override the per-client default scope
 dbg setup-ide --dry-run                   # show what would be written
-dbg setup-ide --print-config --client X   # print the entry to paste manually
+dbg setup-ide --print-config --client X   # print the entry to paste manually (key left as a placeholder)
+dbg setup-ide --print-key                 # print the MCP API key that goes in it
 ```
 
 The merge is safe: existing MCP servers and unrelated config keys are

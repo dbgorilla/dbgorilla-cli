@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -42,7 +43,7 @@ func init() {
 	setupIDECmd.Flags().Bool("dry-run", false,
 		"Show what would be written without modifying any files.")
 	setupIDECmd.Flags().Bool("print-config", false,
-		"Print the MCP entry for each selected client (no write, but still calls the API for the key).")
+		"Print the MCP entry for each selected client, with a placeholder for the key (no write). Get the key with --print-key.")
 	setupIDECmd.Flags().Bool("print-key", false,
 		"Print the MCP API key only (for paste-elsewhere flows).")
 	setupIDECmd.Flags().Bool("print-admin-allowlist", false,
@@ -194,7 +195,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		scope := pickScope(writer, scopeOverride)
 
 		if printConfig {
-			if err := emitPrintConfig(writer, mcpURL, mcpKey); err != nil {
+			if err := emitPrintConfig(writer, mcpURL); err != nil {
 				fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
 				failed++
 			}
@@ -244,7 +245,8 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 			if errors.Is(err, ide.ErrJSONCRefused) {
 				fmt.Println(style.Warn(fmt.Sprintf("Refused to overwrite JSONC config at %s.", path)))
 				fmt.Println("Run `dbgorilla setup-ide --print-config --client " + writer.Slug() +
-					"` and paste the output into the file manually.")
+					"` and paste the output into the file manually,")
+				fmt.Println("replacing " + printConfigKeyPlaceholder + " with the output of `dbgorilla setup-ide --print-key`.")
 				continue
 			}
 			fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
@@ -456,10 +458,19 @@ func pickScope(w ide.Writer, override ide.Scope) ide.Scope {
 	return w.DefaultScope()
 }
 
-// emitPrintConfig prints the JSON entry for the writer to stdout, using
-// the writer's actual top-level key.
-func emitPrintConfig(w ide.Writer, mcpURL, apiKey string) error {
-	entry := w.BuildEntry(mcpURL, apiKey)
+// printConfigKeyPlaceholder stands in for the API key in --print-config
+// output.
+const printConfigKeyPlaceholder = "YOUR_MCP_API_KEY"
+
+// emitPrintConfig prints the JSON entry for the writer to stdout, using the
+// writer's actual top-level key, with a placeholder where the key goes.
+//
+// The key is left out so that the one command whose output people paste
+// into chats, tickets and screenshots does not carry a credential. The key
+// itself comes from --print-key, which says plainly that it prints a secret.
+// The hint goes to stderr so stdout stays exactly the JSON to paste.
+func emitPrintConfig(w ide.Writer, mcpURL string) error {
+	entry := w.BuildEntry(mcpURL, printConfigKeyPlaceholder)
 	blob, err := json.MarshalIndent(map[string]any{
 		w.TopLevelKey(): map[string]any{ide.MCPServerName: entry},
 	}, "", "  ")
@@ -467,6 +478,7 @@ func emitPrintConfig(w ide.Writer, mcpURL, apiKey string) error {
 		return err
 	}
 	fmt.Println(string(blob))
+	fmt.Fprintln(os.Stderr, "Replace "+printConfigKeyPlaceholder+" with the output of: dbgorilla setup-ide --print-key")
 	return nil
 }
 

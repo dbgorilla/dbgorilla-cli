@@ -160,7 +160,8 @@ type WriteResult struct {
 // instruct the user to paste manually.
 var ErrJSONCRefused = fmt.Errorf(
 	"target config file appears to be JSONC (has // comments); refusing to " +
-		"write -- run with --print-config to get the entry to paste manually",
+		"write -- run with --print-config to get the entry to paste manually, and " +
+		"--print-key for the key that goes in it",
 )
 
 // WriteMCPConfig merges the dbgorilla MCP entry into the tool's config
@@ -209,7 +210,8 @@ func WriteMCPConfig(w Writer, mcpURL, apiKey string, scope Scope) (WriteResult, 
 		if err := json.Unmarshal(data, &existing); err != nil {
 			return res, fmt.Errorf(
 				"cannot parse existing config at %s: %w\n"+
-					"Refusing to overwrite. Use --print-config to get the entry to paste manually.",
+					"Refusing to overwrite. Use --print-config to get the entry to paste manually,\n"+
+					"and --print-key for the key that goes in it.",
 				path, err,
 			)
 		}
