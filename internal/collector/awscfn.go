@@ -299,29 +299,60 @@ func StackStatus(stackName, region string) (string, error) {
 // unresolved ${DBG_DB_PASSWORD} reference.
 func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword string, keepCommands bool) error {
 	ctx := context.Background()
-	cfg, err := loadAWSConfig(ctx, region)
+	plan, err := planComponentUpdate(ctx, stackName, region, targets, dbPassword, keepCommands)
 	if err != nil {
 		return err
+	}
+	// Reuse the stack's own template: an update to the monitored set must not
+	// also swap the template out from under a running collector.
+	if err := updateStack(ctx, plan.client, stackName, templateRef{UsePreviousTemplate: true}, plan.params); err != nil && !errors.Is(err, errNoStackUpdates) {
+		return err
+	}
+	return nil
+}
+
+// PreviewComponentUpdate returns the collector config UpdateComponents would
+// deploy, without changing the stack. A dry run of a re-install calls it, so the
+// preview is built by the same code as the update itself: the stored config, each
+// database's current commands, and the same defaults for a database new to it.
+func PreviewComponentUpdate(stackName, region string, targets []AwsTarget, keepCommands bool) (string, error) {
+	plan, err := planComponentUpdate(context.Background(), stackName, region, targets, "", keepCommands)
+	if err != nil {
+		return "", err
+	}
+	return plan.rendered, nil
+}
+
+type componentUpdate struct {
+	client   *cloudformation.Client
+	rendered string
+	params   []cfntypes.Parameter
+}
+
+func planComponentUpdate(ctx context.Context, stackName, region string, targets []AwsTarget, dbPassword string, keepCommands bool) (*componentUpdate, error) {
+	cfg, err := loadAWSConfig(ctx, region)
+	if err != nil {
+		return nil, err
 	}
 	client := cloudformation.NewFromConfig(cfg)
 
 	encoded, err := stackParam(ctx, client, stackName, configParamKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	current, err := DecodeConfig(encoded)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Strict: this re-renders the stored config, so a key we cannot model would
 	// be silently dropped from a running collector rather than preserved.
 	conf, err := StrictParseConfig(current)
 	if err != nil {
-		return fmt.Errorf("could not read the collector config stored on stack %q: %w", stackName, err)
+		return nil, fmt.Errorf("could not read the collector config stored on stack %q: %w", stackName, err)
 	}
 	accountID, err := AwsAccountID()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// This path rebuilds the component list from RDS/Aurora targets. A stack
 	// whose config carries any other provider (an instaclustr source) would be
@@ -329,7 +360,7 @@ func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword 
 	// bound to the other provider's credential. Refuse instead.
 	for _, c := range conf.Component {
 		if c.Provider.Type != "aws_rds" && c.Provider.Type != "aws_aurora" {
-			return fmt.Errorf("stack %q monitors a %s source, which this update path cannot modify. "+
+			return nil, fmt.Errorf("stack %q monitors a %s source, which this update path cannot modify. "+
 				"Uninstall and re-run the matching `dbg collector install --provider %s` instead",
 				stackName, c.Provider.Type, c.Provider.Type)
 		}
@@ -362,16 +393,16 @@ func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword 
 	conf.Commands = perDatabaseCommands(enabled)
 	rendered, err := conf.Render()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	next, err := encodeStackConfig(rendered)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	declared, err := stackParamKeys(ctx, client, stackName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	params := make([]cfntypes.Parameter, 0, len(fargateParamKeys))
 	for _, k := range fargateParamKeys {
@@ -397,12 +428,7 @@ func UpdateComponents(stackName, region string, targets []AwsTarget, dbPassword 
 		}
 		params = append(params, p)
 	}
-	// Reuse the stack's own template: an update to the monitored set must not
-	// also swap the template out from under a running collector.
-	if err := updateStack(ctx, client, stackName, templateRef{UsePreviousTemplate: true}, params); err != nil && !errors.Is(err, errNoStackUpdates) {
-		return err
-	}
-	return nil
+	return &componentUpdate{client: client, rendered: rendered, params: params}, nil
 }
 
 // stackParam reads one parameter value off an existing stack.

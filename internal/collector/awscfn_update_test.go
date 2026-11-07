@@ -256,3 +256,45 @@ func TestUpdateComponents_KeepCommandsPreservesEachDatabase(t *testing.T) {
 		t.Errorf("want enabled with allowed = [], got %+v", conf.Commands)
 	}
 }
+
+// A dry run of a re-install previews what UpdateComponents would deploy: the
+// same kept commands, and nothing sent to the stack.
+func TestPreviewComponentUpdate_MatchesTheUpdateAndChangesNothing(t *testing.T) {
+	kept := updateTarget("kept", "db-kept")
+	kept.Commands = []string{CmdExplain}
+	f := newAWSFake(t).
+		onSeq("DescribeStacks",
+			stacksXML("CREATE_COMPLETE", stackParamXML(configParamKey, storedConfig(t, []AwsTarget{kept}))),
+			stacksXML("CREATE_COMPLETE", declaredParamsXML()...),
+		).
+		on("GetCallerIdentity", callerIdentityXML)
+	stubAWS(t, f)
+
+	rendered, err := PreviewComponentUpdate("dbg-collector", "us-east-1",
+		[]AwsTarget{updateTarget("kept", "db-kept"), updateTarget("new", "db-new")}, true)
+	if err != nil {
+		t.Fatalf("PreviewComponentUpdate: %v", err)
+	}
+	conf, err := StrictParseConfig(rendered)
+	if err != nil {
+		t.Fatalf("StrictParseConfig: %v", err)
+	}
+	got := map[string]Component{}
+	for _, c := range conf.Component {
+		got[c.Name] = c
+	}
+	if !slices.Equal(got["kept"].Commands, []string{CmdExplain}) {
+		t.Errorf("kept: want the installed [explain], got %v", got["kept"].Commands)
+	}
+	if !slices.Equal(got["new"].Commands, DefaultCommands("postgres")) {
+		t.Errorf("new: want the default %v, got %v", DefaultCommands("postgres"), got["new"].Commands)
+	}
+	if got["kept"].Connect.SSLMode != "require" {
+		t.Errorf("kept: want the target's ssl_mode require, got %q", got["kept"].Connect.SSLMode)
+	}
+	for _, body := range f.bodies {
+		if q, _ := url.ParseQuery(body); q.Get("Action") == "UpdateStack" {
+			t.Fatal("a preview must not update the stack")
+		}
+	}
+}

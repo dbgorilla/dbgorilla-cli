@@ -508,7 +508,7 @@ func TestRunUpdateAWS_PassesTheFullDesiredSet(t *testing.T) {
 	mustSet(t, c, "yes", "true")
 
 	var err error
-	out := capture(t, func() { err = runUpdateAWS(c, st) })
+	out := capture(t, func() { err = runUpdateAWS(c, st, false) })
 	if err != nil {
 		t.Fatalf("runUpdateAWS: %v\n%s", err, out)
 	}
@@ -538,7 +538,7 @@ func TestRunUpdateAWS_CarriesTheNewPassword(t *testing.T) {
 
 	var err error
 	capture(t, func() {
-		err = runUpdateAWS(c, &collector.State{AgentID: "a", StackName: "s", Region: "us-east-1"})
+		err = runUpdateAWS(c, &collector.State{AgentID: "a", StackName: "s", Region: "us-east-1"}, false)
 	})
 	if err != nil {
 		t.Fatalf("runUpdateAWS: %v", err)
@@ -560,7 +560,7 @@ func TestRunUpdateAWS_SurfacesTheUpdateError(t *testing.T) {
 
 	var err error
 	capture(t, func() {
-		err = runUpdateAWS(c, &collector.State{AgentID: "a", StackName: "s"})
+		err = runUpdateAWS(c, &collector.State{AgentID: "a", StackName: "s"}, false)
 	})
 	if err == nil || !strings.Contains(err.Error(), "UPDATE_IN_PROGRESS") {
 		t.Fatalf("err = %v", err)
@@ -575,7 +575,7 @@ func TestRunUpdateAWS_StopsWithoutCredentials(t *testing.T) {
 	c := awsCmd(t)
 	mustSet(t, c, "yes", "true")
 	var err error
-	capture(t, func() { err = runUpdateAWS(c, &collector.State{}) })
+	capture(t, func() { err = runUpdateAWS(c, &collector.State{}, false) })
 	if err == nil {
 		t.Fatal("expected the credential error")
 	}
@@ -840,5 +840,48 @@ func TestRunInstallAWS_DeploysADigestPinnedImage(t *testing.T) {
 	img := deploys.params["CollectorImage"]
 	if !strings.Contains(img, "@sha256:") {
 		t.Errorf("CollectorImage = %q, want a digest-pinned reference", img)
+	}
+}
+
+// A dry run on a machine with an installed collector previews the in-place
+// update a real re-run makes: the database keeps its commands. It must
+// not preview a fresh install, whose default commands the re-run would not use.
+func TestRunInstallAWS_DryRunOnAnExistingStackPreviewsTheUpdate(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	stubStackStatus(t, "CREATE_COMPLETE", nil)
+	update := stubUpdateComponents(t, nil)
+	preview := stubPreviewUpdate(t, "[[component]]\nname = \"prod-db\"\ncommands = [\"explain\"]\n")
+	deploys := stubDeploy(t, nil)
+	if err := collector.SaveState(&collector.State{
+		AgentID: "agent-aws", Target: "aws", StackName: "dbg-collector", Region: "us-east-1",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := awsCmd(t)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+	mustSet(t, c, "dry-run", "true")
+
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("runInstallAWS: %v\n%s", err, out)
+	}
+	if deploys.count != 0 {
+		t.Fatalf("a dry run on an installed collector previewed a fresh install:\n%s", out)
+	}
+	if update.called {
+		t.Fatal("a dry run must not update the stack")
+	}
+	if !preview.called || !preview.keepCommands || preview.stack != "dbg-collector" {
+		t.Fatalf("want the update preview with kept commands on dbg-collector, got %+v", preview)
+	}
+	if !strings.Contains(out, `commands = ["explain"]`) || !strings.Contains(out, "updates it in place") {
+		t.Errorf("output does not show the update it would make:\n%s", out)
 	}
 }
