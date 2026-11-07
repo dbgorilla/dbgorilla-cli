@@ -7,7 +7,7 @@
 [![Go version](https://img.shields.io/github/go-mod/go-version/dbgorilla/dbgorilla-cli)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The DBGorilla CLI. Sign in to a DBGorilla deployment and connect your IDE/agent (Claude Code, Cursor, VS Code, opencode, Gemini CLI) via MCP in three commands.
+The DBGorilla CLI. Sign in to a DBGorilla deployment and connect your IDE/agent (Claude Code, Cursor, VS Code, opencode, Gemini CLI, JetBrains IDEs) via MCP in three commands.
 
 ## Install
 
@@ -76,14 +76,44 @@ machine and configures each one. Pass `--client <slug>` to target a
 specific tool, or `--list-clients` to see what's supported and which are
 detected.
 
-| Client | Slug | Setup type | Notes |
-|---|---|---|---|
-| Claude Code | `claude-code` | writer | Prefers `claude mcp add`; falls back to direct file write |
-| Cursor | `cursor` | writer | `~/.cursor/mcp.json` (user) or `.cursor/mcp.json` (project) |
-| VS Code | `vscode` | writer | `~/.copilot/mcp-config.json` (user), read by VS Code's Copilot CLI discovery |
-| opencode | `opencode` | writer | `~/.config/opencode/opencode.json` (user) |
-| Gemini CLI | `gemini` | writer | `~/.gemini/settings.json` (user) |
-| Claude Desktop | `claude-desktop` | manual hint | Remote HTTP MCP requires Settings → Connectors UI flow |
+| Client | Slug | Setup type | MCP config | Skill directory |
+|---|---|---|---|---|
+| Claude Code | `claude-code` | writer | Prefers `claude mcp add`; falls back to direct file write | `~/.claude/skills/` (user) or `.claude/skills/` (project) |
+| Cursor | `cursor` | writer | `~/.cursor/mcp.json` (user) or `.cursor/mcp.json` (project) | `~/.cursor/skills/` or `.cursor/skills/` |
+| VS Code | `vscode` | writer | `~/.copilot/mcp-config.json` (user), read by VS Code's Copilot CLI discovery | `~/.copilot/skills/` or `.github/skills/` |
+| opencode | `opencode` | writer | `~/.config/opencode/opencode.json` (user) | `~/.config/opencode/skills/` or `.opencode/skills/` |
+| Gemini CLI | `gemini` | writer | `~/.gemini/settings.json` (user) | `~/.gemini/skills/` or `.gemini/skills/` |
+| JetBrains IDEs | `jetbrains` | writer | `~/.ai/mcp/mcp.json` (user) or `.ai/mcp/mcp.json` (project), read by AI Assistant in every JetBrains IDE | `~/.junie/skills/` or `.junie/skills/` (Junie) |
+| Claude Desktop | `claude-desktop` | manual hint | Remote HTTP MCP requires Settings → Connectors UI flow | none (skills are added in the app's settings) |
+
+Alongside the MCP entry, every writer client also gets a short `dbgorilla`
+skill (a `SKILL.md` in the directory listed) that tells the agent to check
+the live database through these tools before reasoning about it from the
+source alone. The skill is the same file for every client; it is written to
+each client's own directory so that it works whichever one you set up.
+`--remove` takes it away again.
+
+JetBrains IDEs (IntelliJ IDEA, PhpStorm, PyCharm, WebStorm, GoLand, DataGrip
+and the rest) share one AI Assistant plugin, and it reads one MCP file per
+user, so a single `dbg setup-ide --client jetbrains` covers every JetBrains
+IDE on the machine. AI Assistant lists the server switched off: tick
+dbgorilla under Settings > Tools > AI Assistant > Model Context Protocol (MCP)
+and click Apply, once per IDE. This needs AI Assistant 2025.3 or later; the CLI warns
+when it finds an older IDE and tells you to paste the entry through
+Settings > Tools > AI Assistant > Model Context Protocol (MCP) instead. For
+Junie to use the server from inside AI Chat, turn on "Pass custom MCP
+servers" under Settings > Tools > AI Assistant > Agents.
+
+Two things that look like bugs and are not:
+
+- **Close the IDE's Settings window before running `setup-ide`.** An open
+  Settings window holds its own copy of the MCP list, and clicking Apply or
+  OK writes that copy back over the file, old key included.
+- **"Expected status code 200 but was 405" means the key was rejected.**
+  AI Assistant falls back to the older SSE transport whenever the server
+  refuses a request, and DBGorilla does not serve SSE, so the error you see
+  is the fallback failing rather than the real cause. Re-run
+  `dbg setup-ide --client jetbrains`, then Reconnect in the MCP settings.
 
 Useful flags:
 
@@ -93,7 +123,8 @@ dbg setup-ide --client cursor             # target one
 dbg setup-ide --client cursor,vscode      # target several
 dbg setup-ide --scope project             # override the per-client default scope
 dbg setup-ide --dry-run                   # show what would be written
-dbg setup-ide --print-config --client X   # print the entry to paste manually
+dbg setup-ide --print-config --client X   # print the entry to paste manually (key left as a placeholder)
+dbg setup-ide --print-key                 # print the MCP API key that goes in it
 ```
 
 The merge is safe: existing MCP servers and unrelated config keys are

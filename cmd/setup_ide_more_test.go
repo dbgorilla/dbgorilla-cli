@@ -69,15 +69,15 @@ func TestPickScope(t *testing.T) {
 
 func TestEmitPrintConfig(t *testing.T) {
 	out := capture(t, func() {
-		if err := emitPrintConfig(&ide.Cursor{}, "https://dep/mcp/", "key-1"); err != nil {
+		if err := emitPrintConfig(&ide.Cursor{}, "https://dep/mcp/"); err != nil {
 			t.Fatalf("err=%v", err)
 		}
 	})
 	if !strings.Contains(out, "mcpServers") || !strings.Contains(out, "https://dep/mcp/") {
 		t.Errorf("print-config output wrong:\n%s", out)
 	}
-	if !strings.Contains(out, "Bearer key-1") {
-		t.Errorf("entry should carry the bearer header:\n%s", out)
+	if !strings.Contains(out, "Bearer "+printConfigKeyPlaceholder) {
+		t.Errorf("entry should carry the bearer header with the placeholder:\n%s", out)
 	}
 }
 
@@ -208,6 +208,14 @@ func TestRunSetupIDE_PrintConfig(t *testing.T) {
 	})
 	if !strings.Contains(out, "mcpServers") || !strings.Contains(out, "/mcp/") {
 		t.Errorf("print-config output wrong:\n%s", out)
+	}
+	// The key the server issued must not appear: --print-config output is
+	// what people paste into chats and tickets.
+	if strings.Contains(out, "mcp-key-xyz") {
+		t.Errorf("print-config leaked the API key:\n%s", out)
+	}
+	if !strings.Contains(out, printConfigKeyPlaceholder) || !strings.Contains(out, "--print-key") {
+		t.Errorf("print-config should show the placeholder and say where the key comes from:\n%s", out)
 	}
 }
 
@@ -475,21 +483,42 @@ func TestRunSetupIDE_InstallsTheSkillForClaudeCode(t *testing.T) {
 		}
 	})
 
-	t.Run("no skill for clients that have no such thing", func(t *testing.T) {
-		home := isolate(t)
-		writeTokens(t)
-		srv := statusServer(t, 200, `"mcp-key-xyz"`)
-		defer srv.Close()
-		c := setupIDETestCmd()
-		mustSet(t, c, "api-url", srv.URL)
-		_ = c.Flags().Set("client", "cursor")
-		capture(t, func() {
-			if err := runSetupIDE(c, nil); err != nil {
-				t.Fatalf("err=%v", err)
-			}
-		})
-		if _, err := os.Stat(skillPath(home)); !os.IsNotExist(err) {
-			t.Errorf("configuring another client installed a Claude skill (err=%v)", err)
+	// Every other skill-reading client gets its own copy in its own
+	// directory. A copy in Claude Code's directory would be read by most of
+	// them too, but only if Claude Code had been set up first, and the user
+	// asked for this client, not that one.
+	t.Run("each other client gets a copy in its own directory", func(t *testing.T) {
+		for slug, rel := range map[string]string{
+			"cursor":    filepath.Join(".cursor", "skills"),
+			"vscode":    filepath.Join(".copilot", "skills"),
+			"opencode":  filepath.Join(".config", "opencode", "skills"),
+			"gemini":    filepath.Join(".gemini", "skills"),
+			"jetbrains": filepath.Join(".junie", "skills"),
+		} {
+			t.Run(slug, func(t *testing.T) {
+				home := isolate(t)
+				writeTokens(t)
+				srv := statusServer(t, 200, `"mcp-key-xyz"`)
+				defer srv.Close()
+				c := setupIDETestCmd()
+				mustSet(t, c, "api-url", srv.URL)
+				_ = c.Flags().Set("client", slug)
+				_ = c.Flags().Set("scope", "user")
+				out := capture(t, func() {
+					if err := runSetupIDE(c, nil); err != nil {
+						t.Fatalf("err=%v", err)
+					}
+				})
+				if !strings.Contains(out, "Installed the DBGorilla skill") {
+					t.Errorf("out=%q", out)
+				}
+				if _, err := os.Stat(filepath.Join(home, rel, "dbgorilla", "SKILL.md")); err != nil {
+					t.Errorf("skill not on disk: %v", err)
+				}
+				if _, err := os.Stat(skillPath(home)); !os.IsNotExist(err) {
+					t.Errorf("configuring %s installed a Claude Code skill (err=%v)", slug, err)
+				}
+			})
 		}
 	})
 
@@ -848,7 +877,7 @@ func TestInstallSkill_ReportsWhatItDid(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("from an older release\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		out := capture(t, func() { installSkill(ide.ScopeUser, false) })
+		out := capture(t, func() { installSkill(&ide.ClaudeCode{}, ide.ScopeUser, false) })
 		if !strings.Contains(out, "Updated the DBGorilla skill") {
 			t.Errorf("out=%q", out)
 		}
@@ -860,7 +889,7 @@ func TestInstallSkill_ReportsWhatItDid(t *testing.T) {
 		// has already succeeded, so this must not read as the command failing.
 		t.Setenv("HOME", "")
 		t.Setenv("USERPROFILE", "")
-		out := capture(t, func() { installSkill(ide.ScopeUser, false) })
+		out := capture(t, func() { installSkill(&ide.ClaudeCode{}, ide.ScopeUser, false) })
 		if !strings.Contains(out, "Could not install the DBGorilla skill") {
 			t.Errorf("out=%q", out)
 		}
@@ -870,7 +899,7 @@ func TestInstallSkill_ReportsWhatItDid(t *testing.T) {
 		isolate(t)
 		t.Setenv("HOME", "")
 		t.Setenv("USERPROFILE", "")
-		if out := capture(t, func() { installSkill(ide.ScopeUser, true) }); out != "" {
+		if out := capture(t, func() { installSkill(&ide.ClaudeCode{}, ide.ScopeUser, true) }); out != "" {
 			t.Errorf("out=%q, want silence", out)
 		}
 	})

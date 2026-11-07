@@ -70,6 +70,30 @@ type Writer interface {
 	BuildEntry(mcpURL, apiKey string) map[string]any
 }
 
+// SkillHost is implemented by tools that read Agent Skills -- a SKILL.md
+// with YAML front matter, the format Claude Code introduced and the others
+// adopted -- from a directory on disk. The MCP entry gives the agent the
+// tools; the skill tells it when to reach for them.
+//
+// Only the directory differs per tool. The file written into it is the same
+// for every host, so a user running several agents gets one skill, not one
+// opinion per editor.
+type SkillHost interface {
+	Adapter
+	// SkillDir returns the directory the dbgorilla skill lives in for the
+	// scope: the SKILL.md is written directly inside it. Project-scoped
+	// paths are resolved against the current working directory.
+	SkillDir(scope Scope) (string, error)
+}
+
+// Warner is implemented by tools that can tell, from this machine alone,
+// that part of the setup will not take effect and has to be done by hand.
+// Each string is printed after the MCP entry is written.
+type Warner interface {
+	Adapter
+	Warnings() []string
+}
+
 // Hinter is implemented by tools we detect but can't auto-configure.
 // Hint() returns a multi-line string with manual setup instructions.
 type Hinter interface {
@@ -126,6 +150,7 @@ var Registry = []Adapter{
 	&VSCode{},
 	&Opencode{},
 	&Gemini{},
+	&JetBrains{},
 }
 
 // Find returns the adapter matching the given slug, or nil.
@@ -175,7 +200,8 @@ type WriteResult struct {
 // instruct the user to paste manually.
 var ErrJSONCRefused = fmt.Errorf(
 	"target config file appears to be JSONC (has // comments); refusing to " +
-		"write -- run with --print-config to get the entry to paste manually",
+		"write -- run with --print-config to get the entry to paste manually, and " +
+		"--print-key for the key that goes in it",
 )
 
 // WriteMCPConfig merges the dbgorilla MCP entry into the tool's config
@@ -224,7 +250,8 @@ func WriteMCPConfig(w Writer, mcpURL, apiKey string, scope Scope) (WriteResult, 
 		if err := json.Unmarshal(data, &existing); err != nil {
 			return res, fmt.Errorf(
 				"cannot parse existing config at %s: %w\n"+
-					"Refusing to overwrite. Use --print-config to get the entry to paste manually.",
+					"Refusing to overwrite. Use --print-config to get the entry to paste manually,\n"+
+					"and --print-key for the key that goes in it.",
 				path, err,
 			)
 		}

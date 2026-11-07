@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"github.com/dbgorilla/dbgorilla-cli/internal/ide"
+
 	"bytes"
 	"io"
 	"net/http"
@@ -220,6 +222,59 @@ func TestCheckClientConfigured_FileBased(t *testing.T) {
 			}
 		})
 	}
+}
+
+// scopedWriter is a fakeWriter with a different config file per scope, the
+// way every real client has.
+type scopedWriter struct {
+	fakeWriter
+	def   ide.Scope
+	paths map[ide.Scope]string
+}
+
+func (s scopedWriter) DefaultScope() ide.Scope { return s.def }
+func (s scopedWriter) ConfigPath(scope ide.Scope) (string, error) {
+	return s.paths[scope], nil
+}
+
+// TestCheckClientConfigured_AnyScope pins that an entry written at a scope
+// other than the default counts. setup-ide --scope user for VS Code, whose
+// default is project, is the case that showed this: the setup worked and
+// doctor reported it missing.
+func TestCheckClientConfigured_AnyScope(t *testing.T) {
+	entry := `{"servers":{"dbgorilla":{"url":"x"}}}`
+	missing := filepath.Join(t.TempDir(), "none.json")
+	w := func(user, project string) scopedWriter {
+		return scopedWriter{
+			fakeWriter: fakeWriter{slug: "vscode", topKey: "servers"},
+			def:        ide.ScopeProject,
+			paths:      map[ide.Scope]string{ide.ScopeUser: user, ide.ScopeProject: project},
+		}
+	}
+
+	t.Run("entry only at the non-default scope", func(t *testing.T) {
+		user := writeJSONFile(t, entry)
+		ok, msg := checkClientConfigured(w(user, missing))
+		if !ok || !strings.Contains(msg, user) {
+			t.Fatalf("ok=%v msg=%q, want OK naming %s", ok, msg, user)
+		}
+	})
+
+	t.Run("entry at the default scope wins", func(t *testing.T) {
+		project := writeJSONFile(t, entry)
+		ok, msg := checkClientConfigured(w(writeJSONFile(t, entry), project))
+		if !ok || !strings.Contains(msg, project) {
+			t.Fatalf("ok=%v msg=%q, want OK naming the default-scope file %s", ok, msg, project)
+		}
+	})
+
+	t.Run("nowhere: the message names the default-scope file", func(t *testing.T) {
+		user := writeJSONFile(t, `{"servers":{}}`)
+		ok, msg := checkClientConfigured(w(user, missing))
+		if ok || !strings.Contains(msg, "no config at "+missing) {
+			t.Fatalf("ok=%v msg=%q, want a failure naming %s", ok, msg, missing)
+		}
+	})
 }
 
 func TestCheckClientConfigured_ClaudeCode(t *testing.T) {

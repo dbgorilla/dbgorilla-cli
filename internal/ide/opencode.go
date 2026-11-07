@@ -48,3 +48,9 @@ func (o *Opencode) BuildEntry(mcpURL, apiKey string) map[string]any {
 		},
 	}
 }
+
+// SkillDir: ~/.config/opencode/skills/dbgorilla (user) or
+// .opencode/skills/dbgorilla (project), beside the config written above.
+func (o *Opencode) SkillDir(scope Scope) (string, error) {
+	return skillDir(scope, []string{".config", "opencode", "skills"}, []string{".opencode", "skills"})
+}
