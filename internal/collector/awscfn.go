@@ -232,19 +232,61 @@ func updateStack(ctx context.Context, client *cloudformation.Client, name string
 	return nil
 }
 
-// stackFailureReason returns a short "reason: …" from the most recent failed
-// stack event (best-effort), to make a waiter failure actionable.
+// stackFailureReason returns a short "reason: …" naming the first resource
+// that failed in the stack's latest operation (best-effort), to make a waiter
+// failure actionable. The first failure is the cause: once one resource fails,
+// CloudFormation cancels the others still in flight, and those newer
+// "Resource creation cancelled" events name the wrong resource.
 func stackFailureReason(ctx context.Context, client *cloudformation.Client, name string) string {
-	out, err := client.DescribeStackEvents(ctx, &cloudformation.DescribeStackEventsInput{StackName: aws.String(name)})
-	if err != nil {
+	var first *cfntypes.StackEvent // oldest failure seen so far in the latest operation
+	in := &cloudformation.DescribeStackEventsInput{StackName: aws.String(name)}
+	for pages := 0; pages < maxEventPages; pages++ {
+		out, err := client.DescribeStackEvents(ctx, in)
+		if err != nil {
+			break
+		}
+		for i := range out.StackEvents { // newest first
+			e := &out.StackEvents[i]
+			if isOperationStart(e, name) {
+				return formatFailure(first)
+			}
+			if e.ResourceStatusReason == nil || !strings.Contains(string(e.ResourceStatus), "FAILED") {
+				continue
+			}
+			// The stack's own event only summarises its resources' failures.
+			if aws.ToString(e.ResourceType) == stackResourceType && first != nil {
+				continue
+			}
+			first = e
+		}
+		if out.NextToken == nil {
+			break
+		}
+		in.NextToken = out.NextToken
+	}
+	return formatFailure(first)
+}
+
+// maxEventPages bounds the event walk on a stack with a long history.
+const maxEventPages = 10
+
+const stackResourceType = "AWS::CloudFormation::Stack"
+
+// isOperationStart reports the stack's own CREATE/UPDATE_IN_PROGRESS event:
+// everything older belongs to an earlier operation.
+func isOperationStart(e *cfntypes.StackEvent, name string) bool {
+	if aws.ToString(e.ResourceType) != stackResourceType || aws.ToString(e.LogicalResourceId) != name {
+		return false
+	}
+	return e.ResourceStatus == cfntypes.ResourceStatusCreateInProgress ||
+		e.ResourceStatus == cfntypes.ResourceStatusUpdateInProgress
+}
+
+func formatFailure(e *cfntypes.StackEvent) string {
+	if e == nil {
 		return ""
 	}
-	for _, e := range out.StackEvents { // newest first
-		if strings.Contains(string(e.ResourceStatus), "FAILED") && e.ResourceStatusReason != nil {
-			return fmt.Sprintf("\n  reason: %s (%s)", aws.ToString(e.ResourceStatusReason), aws.ToString(e.LogicalResourceId))
-		}
-	}
-	return ""
+	return fmt.Sprintf("\n  reason: %s (%s)", aws.ToString(e.ResourceStatusReason), aws.ToString(e.LogicalResourceId))
 }
 
 // DeleteStack initiates deletion of the collector's stack (uninstall / rollback).

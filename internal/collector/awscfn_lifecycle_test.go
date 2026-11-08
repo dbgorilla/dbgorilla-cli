@@ -447,6 +447,50 @@ func TestStackFailureReason(t *testing.T) {
 	})
 }
 
+// One stack event, for stackEventsPageXML (newest first, as the API returns).
+type evt struct{ typ, status, reason, id string }
+
+func stackEventsPageXML(next string, events ...evt) string {
+	var b strings.Builder
+	b.WriteString(`<DescribeStackEventsResponse xmlns="http://cloudformation.amazonaws.com/doc/2010-05-15/"><DescribeStackEventsResult><StackEvents>`)
+	for _, e := range events {
+		b.WriteString(`<member><ResourceType>` + e.typ + `</ResourceType><ResourceStatus>` + e.status +
+			`</ResourceStatus><ResourceStatusReason>` + e.reason + `</ResourceStatusReason><LogicalResourceId>` + e.id +
+			`</LogicalResourceId></member>`)
+	}
+	b.WriteString(`</StackEvents>`)
+	if next != "" {
+		b.WriteString(`<NextToken>` + next + `</NextToken>`)
+	}
+	b.WriteString(`</DescribeStackEventsResult></DescribeStackEventsResponse>`)
+	return b.String()
+}
+
+// A failed create cancels the resources still in flight, and those
+// "Resource creation cancelled" events are the newest. The customer needs the
+// first failure, which is the cause (seen on a real AWS install: a denied
+// secretsmanager:CreateSecret was reported as "Resource creation cancelled
+// (Cluster)").
+func TestStackFailureReason_ReportsTheFirstFailureOfTheLatestOperation(t *testing.T) {
+	const stack = "AWS::CloudFormation::Stack"
+	newest := stackEventsPageXML("page2",
+		evt{stack, "ROLLBACK_IN_PROGRESS", "The following resource(s) failed to create: [Cluster, ServerSecretStore]. Rollback requested by user.", "dbg-collector"},
+		evt{"AWS::ECS::Cluster", "CREATE_FAILED", "Resource creation cancelled", "Cluster"},
+	)
+	older := stackEventsPageXML("",
+		evt{"AWS::SecretsManager::Secret", "CREATE_FAILED", "User is not authorized to perform: secretsmanager:CreateSecret", "ServerSecretStore"},
+		evt{"AWS::ECS::Cluster", "CREATE_IN_PROGRESS", "", "Cluster"},
+		evt{stack, "CREATE_IN_PROGRESS", "User Initiated", "dbg-collector"},
+		// An earlier operation on the same stack name; not this failure.
+		evt{"AWS::IAM::Role", "CREATE_FAILED", "an older, unrelated failure", "TaskRole"},
+	)
+	stubAWS(t, newAWSFake(t).onSeq("DescribeStackEvents", newest, older))
+	got := stackFailureReason(context.Background(), cfnClient(t), "dbg-collector")
+	if !strings.Contains(got, "secretsmanager:CreateSecret") || !strings.Contains(got, "ServerSecretStore") {
+		t.Errorf("reason = %q, want the first failure (ServerSecretStore, CreateSecret denied)", got)
+	}
+}
+
 // --- top-level stack operations --------------------------------------------
 
 func TestDeleteStack(t *testing.T) {
