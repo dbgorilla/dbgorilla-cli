@@ -56,11 +56,16 @@ var (
 	discoverAwsTarget = collector.DiscoverAwsTarget
 	stackStatus       = collector.StackStatus
 	updateComponents  = collector.UpdateComponents
-	deleteStack       = collector.DeleteStack
-	upgradeImage      = collector.UpgradeImage
-	checkNetworkPath  = collector.VerifyNetworkPath
-	runGrant          = collector.RunGrant
-	reachable         = collector.Reachable
+	// The RDS/Aurora collector's own security group, and the database rules
+	// that admit it.
+	ensureCollectorNetwork  = collector.EnsureCollectorNetwork
+	releaseCollectorNetwork = collector.ReleaseCollectorNetwork
+	admitCollector          = collector.AdmitCollector
+	deleteStack             = collector.DeleteStack
+	upgradeImage            = collector.UpgradeImage
+	checkNetworkPath        = collector.VerifyNetworkPath
+	runGrant                = collector.RunGrant
+	reachable               = collector.Reachable
 	// runFargateDeploy / runFargateDeployQuiet are method expressions (not
 	// wrapping closures) so the production defaults carry no uncovered
 	// statement of their own.
@@ -423,6 +428,7 @@ func runInstallAWS(cmd *cobra.Command) error {
 	if len(subnets) == 0 || sg == "" {
 		return errors.New("could not determine task networking (no subnets/security group discovered); pass --subnets and --security-group-id")
 	}
+	ownGroup := wantsOwnSecurityGroup(cmd, targets)
 
 	// Network-path preflight: statically verify (via VPC security-group rules)
 	// that the collector's task networking can reach each database, so an
@@ -471,6 +477,9 @@ func runInstallAWS(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Printf("\nDry run — validating the template for stack %q (%d database(s), no identity minted):\n", stackName, len(targets))
+		if ownGroup {
+			printOwnSecurityGroupPlan(stackName, targets)
+		}
 		printAwsParams(params, secrets)
 		return runFargateDeploy(collector.FargateDeploy{
 			StackName: stackName, Params: params, Secrets: secrets, DryRun: true, TemplateURL: templateURL,
@@ -494,6 +503,19 @@ func runInstallAWS(cmd *cobra.Command) error {
 	fmt.Println(style.Success(fmt.Sprintf("✓ Collector image: %s (%s)", image, imageSource)))
 	warnCommandSupport(image, commandsOf[collector.AwsTarget](targets))
 
+	var network collector.CollectorNetwork
+	if ownGroup {
+		network, err = ensureCollectorNetwork(cmd.Context(), region, stackName, subnets, targets)
+		if err != nil {
+			deprovisionOrWarn(client, creds.AgentID)
+			return fmt.Errorf("could not give the collector its own security group: %w "+
+				"(pass --security-group-id to run it in an existing group instead)", err)
+		}
+		sg = network.SecurityGroupID
+		fmt.Println(style.Success(fmt.Sprintf("✓ Collector security group %s (no inbound rules); admitted to %d database rule(s)",
+			sg, len(network.Rules))))
+	}
+
 	params, secrets, err := collector.AwsStackParams(collector.AwsStackInput{
 		AgentID:         creds.AgentID,
 		TenantID:        creds.TenantID,
@@ -510,27 +532,38 @@ func runInstallAWS(cmd *cobra.Command) error {
 		DBPassword:      dbPassword,
 	})
 	if err != nil {
+		releaseOwnNetworkOrWarn(cmd.Context(), region, network)
 		deprovisionOrWarn(client, creds.AgentID)
 		return err
 	}
 
 	saveStateOrWarn(&collector.State{
-		AgentID:    creds.AgentID,
-		TenantID:   creds.TenantID,
-		Domain:     creds.Domain,
-		Target:     "aws",
-		Image:      image,
-		TargetName: targetsSummary(targets),
-		StackName:  stackName,
-		Region:     region,
-		CreatedAt:  time.Now().UTC(),
+		AgentID:                       creds.AgentID,
+		TenantID:                      creds.TenantID,
+		Domain:                        creds.Domain,
+		Target:                        "aws",
+		Image:                         image,
+		TargetName:                    targetsSummary(targets),
+		StackName:                     stackName,
+		Region:                        region,
+		CreatedAt:                     time.Now().UTC(),
+		CollectorSecurityGroupID:      network.SecurityGroupID,
+		CollectorSecurityGroupCreated: network.SecurityGroupCreated,
+		DBIngressRules:                network.Rules,
 	})
 
 	fmt.Printf("Deploying to Fargate (stack %q, %d database(s))...\n", stackName, len(targets))
 	deploy := collector.FargateDeploy{StackName: stackName, Params: params, Secrets: secrets, TemplateURL: templateURL}
 	if err := deployStack(deploy, "Deploying to Fargate…"); err != nil {
 		kept, derr := cloudDeployFailed(err, client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
-			func() error { return deleteStack(stackName, region) }, nil,
+			func() error {
+				derr := deleteStack(stackName, region)
+				// The group cannot go while the stack still holds it; the
+				// database rules can, and must not outlive the collector.
+				releaseOwnNetworkOrWarn(context.Background(), region,
+					collector.CollectorNetwork{Rules: network.Rules})
+				return derr
+			}, nil,
 			"   Watch it with: dbg collector status\n"+
 				"   If it ends up failed, remove it with: dbg collector uninstall\n")
 		if kept {
@@ -578,6 +611,16 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 		}
 	} else {
 		resolveCommands(cmd, targets, awsTargetLabel)
+	}
+	if st.CollectorSecurityGroupID != "" && st.InstaclustrClusterID == "" {
+		// The collector runs in its own group: a database added since install
+		// has to admit it, or the updated task cannot connect.
+		rules, err := admitCollector(cmd.Context(), st.Region, st.CollectorSecurityGroupID, targets)
+		st.DBIngressRules = append(st.DBIngressRules, rules...)
+		if err != nil {
+			saveStateOrWarn(st)
+			return fmt.Errorf("could not admit the collector to the databases' security groups: %w", err)
+		}
 	}
 	fmt.Printf("Updating collector %s in place to monitor %d database(s)...\n", st.AgentID, len(targets))
 	if err := withSpinner("Updating collector…", func() error {
@@ -810,6 +853,54 @@ func taskNetworking(cmd *cobra.Command, targets []collector.AwsTarget) (subnets 
 		sg = targets[0].SecurityGroup
 	}
 	return subnets, sg
+}
+
+// wantsOwnSecurityGroup reports whether the Fargate task gets a security group
+// of its own (no inbound rules) instead of running in the first database's.
+// The database's group usually admits more than the collector should be
+// reachable from. Not when --security-group-id names one, and not when a
+// database's security groups are unknown (it skipped discovery), since then
+// there is nothing to admit the new group to and the task could not connect.
+func wantsOwnSecurityGroup(cmd *cobra.Command, targets []collector.AwsTarget) bool {
+	if v, _ := cmd.Flags().GetString("security-group-id"); v != "" {
+		return false
+	}
+	for _, t := range targets {
+		if len(t.DBSecurityGroups) == 0 {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  %s's security groups are unknown, so the collector runs in the "+
+				"database's group. Pass --security-group-id to choose one.", t.Name)))
+			return false
+		}
+	}
+	return len(targets) > 0
+}
+
+// printOwnSecurityGroupPlan says, in a dry run, what the install would create.
+func printOwnSecurityGroupPlan(stackName string, targets []collector.AwsTarget) {
+	fmt.Printf("Would create security group %s (no inbound rules; outbound to ports %v) and admit it to:\n",
+		collector.CollectorSecurityGroupName(stackName), collector.CollectorEgressPortsFor(targets))
+	for _, n := range collector.DBIngressNeeds(targets) {
+		fmt.Printf("  %s on port %d\n", n.GroupID, n.Port)
+	}
+}
+
+// releaseOwnNetworkOrWarn removes what EnsureCollectorNetwork made, saying so
+// when it cannot.
+func releaseOwnNetworkOrWarn(ctx context.Context, region string, net collector.CollectorNetwork) {
+	if len(net.Rules) == 0 && !net.SecurityGroupCreated {
+		return
+	}
+	if err := releaseCollectorNetwork(ctx, region, net); err != nil {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  Could not remove the collector's security group rules: %v", err)))
+		for _, r := range net.Rules {
+			fmt.Printf("     aws ec2 revoke-security-group-ingress --group-id %s --security-group-rule-ids %s --region %s\n",
+				r.GroupID, r.RuleID, region)
+		}
+		return
+	}
+	if len(net.Rules) > 0 {
+		fmt.Println(style.Success(fmt.Sprintf("✓ Removed %d database security group rule(s) for the collector", len(net.Rules))))
+	}
 }
 
 // verifyNetworkPath runs the static VPC reachability check and reports it: a
@@ -1624,6 +1715,8 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		} else {
 			fmt.Println(style.Success(fmt.Sprintf("✓ Stack %s deletion started", st.StackName)))
 		}
+		// EC2 will not delete a group another group's rule still names.
+		releaseOwnNetworkOrWarn(cmd.Context(), st.Region, collector.CollectorNetwork{Rules: st.DBIngressRules})
 		releaseCollectorSecurityGroup(cmd.Context(), st)
 	} else if st.IsGCP() {
 		// Infrastructure Manager answers only once the resources are destroyed.

@@ -94,6 +94,10 @@ type State struct {
 	// CollectorSecurityGroupCreated records that the install made the group,
 	// so uninstall removes only a group this CLI is responsible for.
 	CollectorSecurityGroupCreated bool `json:"collector_security_group_created,omitempty"`
+	// DBIngressRules are the rules an AWS RDS/Aurora install added to the
+	// databases' security groups to admit CollectorSecurityGroupID. Uninstall
+	// revokes these before it removes the group.
+	DBIngressRules []DBIngressRule `json:"db_ingress_rules,omitempty"`
 	// CollectorSubnetCIDRs is the fallback: the networks a VPC-resident
 	// collector was allowlisted by when the security-group rule could not be
 	// used. It selects that mode the way CollectorSecurityGroupID selects the
