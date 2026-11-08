@@ -44,6 +44,13 @@ func CollectorSecurityGroupName(stackName string) string {
 // allow-all egress rule to every new group, so that default is revoked; leaving
 // it would make the narrowing cosmetic.
 func EnsureCollectorSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, stackName string) (string, bool, error) {
+	return ensureCollectorSecurityGroupWithPorts(ctx, client, vpcID, stackName, CollectorEgressPorts, false)
+}
+
+// ensureCollectorSecurityGroupWithPorts is EnsureCollectorSecurityGroup with
+// the egress ports given (a MySQL database needs 3306, a custom port its own).
+// With topUp, an existing group gains any of those ports it lacks.
+func ensureCollectorSecurityGroupWithPorts(ctx context.Context, client *ec2.Client, vpcID, stackName string, ports []int32, topUp bool) (string, bool, error) {
 	if vpcID == "" {
 		return "", false, errors.New("cannot create the collector security group without a VPC id")
 	}
@@ -51,7 +58,15 @@ func EnsureCollectorSecurityGroup(ctx context.Context, client *ec2.Client, vpcID
 
 	if id, err := findCollectorSecurityGroup(ctx, client, vpcID, name); err != nil {
 		return "", false, err
+	} else if id != "" && !topUp {
+		return id, false, nil
 	} else if id != "" {
+		for _, port := range ports {
+			if err := authorizeEgress(ctx, client, id, []int32{port}); err != nil &&
+				!awsErrorCodeIs(err, "InvalidPermission.Duplicate") {
+				return "", false, err
+			}
+		}
 		return id, false, nil
 	}
 
@@ -79,7 +94,7 @@ func EnsureCollectorSecurityGroup(ctx context.Context, client *ec2.Client, vpcID
 	}
 	id := aws.ToString(out.GroupId)
 
-	if err := narrowCollectorEgress(ctx, client, id); err != nil {
+	if err := narrowCollectorEgress(ctx, client, id, ports); err != nil {
 		// Leaving a half-configured group behind would allow all egress under a
 		// name that claims to be narrowed.
 		_, _ = client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(id)})
@@ -90,9 +105,16 @@ func EnsureCollectorSecurityGroup(ctx context.Context, client *ec2.Client, vpcID
 
 // narrowCollectorEgress authorizes the ports the collector needs and removes
 // the allow-all rule EC2 adds to every new group.
-func narrowCollectorEgress(ctx context.Context, client *ec2.Client, groupID string) error {
-	perms := make([]ec2types.IpPermission, 0, len(CollectorEgressPorts))
-	for _, p := range CollectorEgressPorts {
+func narrowCollectorEgress(ctx context.Context, client *ec2.Client, groupID string, ports []int32) error {
+	if err := authorizeEgress(ctx, client, groupID, ports); err != nil {
+		return err
+	}
+	return revokeDefaultEgress(ctx, client, groupID)
+}
+
+func authorizeEgress(ctx context.Context, client *ec2.Client, groupID string, ports []int32) error {
+	perms := make([]ec2types.IpPermission, 0, len(ports))
+	for _, p := range ports {
 		perms = append(perms, ec2types.IpPermission{
 			IpProtocol: aws.String("tcp"),
 			FromPort:   aws.Int32(p),
@@ -109,6 +131,10 @@ func narrowCollectorEgress(ctx context.Context, client *ec2.Client, groupID stri
 	}); err != nil {
 		return fmt.Errorf("cannot authorize collector egress on %s: %w", groupID, err)
 	}
+	return nil
+}
+
+func revokeDefaultEgress(ctx context.Context, client *ec2.Client, groupID string) error {
 
 	// Revoke the default allow-all. Its absence is not an error: a group that
 	// never had it is already in the state we want.
