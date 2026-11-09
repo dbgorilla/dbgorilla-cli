@@ -90,9 +90,10 @@ func runInstallGCP(cmd *cobra.Command) error {
 	// An existing gcp collector isn't a conflict — it's an update: re-run with
 	// a different --db-instance-id to change which database it monitors, or
 	// with none to re-discover the same one (a new read replica joins the
-	// login condition), in place (no re-mint, no teardown). Dry runs always
-	// take the fresh path below.
-	prior, status, err := priorCloudInstall(dryRun, (*collector.State).IsGCP,
+	// login condition), in place (no re-mint, no teardown). A dry run takes
+	// the same branch, so it previews the update a real re-run would make
+	// rather than a fresh install.
+	prior, status, err := priorCloudInstall(false, (*collector.State).IsGCP,
 		func(st *collector.State) (string, error) {
 			return gcpDeploymentStatus(st.Project, st.Region, st.DeploymentName)
 		},
@@ -101,7 +102,7 @@ func runInstallGCP(cmd *cobra.Command) error {
 		return err
 	}
 	if prior != nil {
-		return runUpdateGCP(cmd, prior, status)
+		return runUpdateGCP(cmd, prior, status, dryRun)
 	}
 
 	deployServiceAccount, _ := cmd.Flags().GetString("deploy-service-account")
@@ -467,7 +468,8 @@ func gcpStatus(cmd *cobra.Command, st *collector.State) error {
 // a new read replica joins the login condition), its auth, and its
 // query-analysis commands. Identity, endpoints, image and networking come
 // from the deployment itself — nothing is re-minted, nothing torn down.
-func runUpdateGCP(cmd *cobra.Command, st *collector.State, status string) error {
+// dryRun prints the inputs the update would apply and changes nothing.
+func runUpdateGCP(cmd *cobra.Command, st *collector.State, status string, dryRun bool) error {
 	// Where the collector runs cannot change in place.
 	for _, f := range []string{"network", "subnetwork", "deploy-service-account"} {
 		if cmd.Flags().Changed(f) {
@@ -583,6 +585,13 @@ func runUpdateGCP(cmd *cobra.Command, st *collector.State, status string) error 
 	})
 	if err != nil {
 		return err
+	}
+
+	if dryRun {
+		fmt.Printf("\nDry run — collector %s is installed (deployment %q, %s), so this re-run updates it in place. Inputs it would apply:\n",
+			st.AgentID, st.DeploymentName, status)
+		printDeployParams(inputs, nil, "collector_config")
+		return nil
 	}
 
 	if dbPassword != "" {
