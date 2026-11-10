@@ -80,7 +80,7 @@ detected.
 |---|---|---|---|---|
 | Claude Code | `claude-code` | writer | Prefers `claude mcp add`; falls back to direct file write | `~/.claude/skills/` (user) or `.claude/skills/` (project) |
 | Cursor | `cursor` | writer | `~/.cursor/mcp.json` (user) or `.cursor/mcp.json` (project) | `~/.cursor/skills/` or `.cursor/skills/` |
-| VS Code | `vscode` | writer | `.vscode/mcp.json` (project) by default | `~/.copilot/skills/` or `.github/skills/` |
+| VS Code | `vscode` | writer | `~/.copilot/mcp-config.json` (user), read by VS Code's Copilot CLI discovery | `~/.copilot/skills/` or `.github/skills/` |
 | opencode | `opencode` | writer | `~/.config/opencode/opencode.json` (user) | `~/.config/opencode/skills/` or `.opencode/skills/` |
 | Gemini CLI | `gemini` | writer | `~/.gemini/settings.json` (user) | `~/.gemini/skills/` or `.gemini/skills/` |
 | JetBrains IDEs | `jetbrains` | writer | `~/.ai/mcp/mcp.json` (user) or `.ai/mcp/mcp.json` (project), read by AI Assistant in every JetBrains IDE | `~/.junie/skills/` or `.junie/skills/` (Junie) |
