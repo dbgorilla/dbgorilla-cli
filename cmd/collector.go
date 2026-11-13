@@ -213,16 +213,8 @@ func runInstallLocal(cmd *cobra.Command) error {
 
 	// Reachability preflight from the host (the CLI runs on the host, so the
 	// original loopback host is correct here, not the container rewrite).
-	if err := checkReachable(target.HostDial()); err != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s", err)))
-		if !confirm(cmd, "Continue anyway?") {
-			return errors.New("aborted")
-		}
-	} else {
-		fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", target.HostDial())))
-		if err := requirePostgres(target.HostDial()); err != nil {
-			return err
-		}
+	if err := checkTargetIsPostgres(cmd, target.HostDial()); err != nil {
+		return err
 	}
 
 	// Settle the TLS mode against what the server actually supports, before the
@@ -2144,6 +2136,22 @@ func errNotPostgres(addr string) error {
 		"  For Cassandra or another database: in DBGorilla open Admin > Collectors, click\n"+
 		"  \"Create credentials\" under \"Deploy with your infrastructure as code\", and follow\n"+
 		"  the guide for your database at https://www.dbgorilla.com/docs/connect/", addr)
+}
+
+// checkTargetIsPostgres is the installer's first look at the database: is
+// anything listening, and is it PostgreSQL. An unreachable database only
+// warns, because it may be started later; a reachable one that is not
+// PostgreSQL stops the install.
+func checkTargetIsPostgres(cmd *cobra.Command, addr string) error {
+	if err := checkReachable(addr); err != nil {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s", err)))
+		if !confirm(cmd, "Continue anyway?") {
+			return errors.New("aborted")
+		}
+		return nil
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", addr)))
+	return requirePostgres(addr)
 }
 
 // requirePostgres stops the install when the target answers but is not

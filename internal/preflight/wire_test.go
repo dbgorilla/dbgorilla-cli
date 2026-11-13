@@ -57,3 +57,19 @@ func TestProbePostgresNoListener(t *testing.T) {
 		t.Fatalf("got %v, want SpeaksUnknown", got)
 	}
 }
+
+func TestProbePostgresOldServerError(t *testing.T) {
+	addr := serve(t, func(c net.Conn) { _, _ = c.Write([]byte("E")) })
+	if got := ProbePostgres(addr, 200*time.Millisecond); got != SpeaksPostgres {
+		t.Fatalf("got %v, want SpeaksPostgres", got)
+	}
+}
+
+func TestProbeConnWriteFails(t *testing.T) {
+	ours, theirs := net.Pipe()
+	_ = theirs.Close()
+	defer func() { _ = ours.Close() }()
+	if got := probeConn(ours, 200*time.Millisecond); got != SpeaksOther {
+		t.Fatalf("got %v, want SpeaksOther", got)
+	}
+}

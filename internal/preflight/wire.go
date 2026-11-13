@@ -38,6 +38,11 @@ func ProbePostgres(addr string, timeout time.Duration) Speaks {
 		return SpeaksUnknown
 	}
 	defer func() { _ = conn.Close() }()
+	return probeConn(conn, timeout)
+}
+
+// probeConn runs the SSLRequest exchange on an open connection.
+func probeConn(conn net.Conn, timeout time.Duration) Speaks {
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write(sslRequest); err != nil {
 		return SpeaksOther
