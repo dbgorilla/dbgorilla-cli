@@ -220,6 +220,9 @@ func runInstallLocal(cmd *cobra.Command) error {
 		}
 	} else {
 		fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", target.HostDial())))
+		if err := requirePostgres(target.HostDial()); err != nil {
+			return err
+		}
 	}
 
 	// Settle the TLS mode against what the server actually supports, before the
@@ -2130,6 +2133,26 @@ func resolveDBPassword(cmd *cobra.Command) (string, error) {
 		return "", errors.New("a database password is required")
 	}
 	return pw, nil
+}
+
+// errNotPostgres is returned when the target answers but is not PostgreSQL.
+// The installer only sets up PostgreSQL collectors; other engines take
+// credentials from the app and a hand-written collector.toml.
+func errNotPostgres(addr string) error {
+	return fmt.Errorf("%s is not a PostgreSQL server.\n"+
+		"  `dbg collector install --target docker` sets up PostgreSQL collectors only. Nothing has been provisioned.\n"+
+		"  For Cassandra or another database: in DBGorilla open Admin > Collectors, click\n"+
+		"  \"Create credentials\" under \"Deploy with your infrastructure as code\", and follow\n"+
+		"  the guide for your database at https://www.dbgorilla.com/docs/connect/", addr)
+}
+
+// requirePostgres stops the install when the target answers but is not
+// PostgreSQL, before any identity is minted. An inconclusive probe carries on.
+func requirePostgres(addr string) error {
+	if preflight.ProbePostgres(addr, 3*time.Second) == preflight.SpeaksOther {
+		return errNotPostgres(addr)
+	}
+	return nil
 }
 
 // checkReachable does a quick TCP dial so the most common local-dev failure
