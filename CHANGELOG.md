@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `dbg collector install --target docker` pointed at a database that is not
+  PostgreSQL, such as Cassandra on port 9042, now stops before provisioning
+  anything and says so. It also tells you how to connect that database:
+  create credentials in Admin > Collectors and follow the guide for it.
+  Before, it reported the database as reachable and then failed with a
+  PostgreSQL error ("unexpected EOF") that named the wrong cause.
+
 ## v0.9.0
 
 ### Added
