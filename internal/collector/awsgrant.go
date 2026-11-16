@@ -1,10 +1,16 @@
 package collector
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The policy behind the collector's database grant: which databases need one,
@@ -116,4 +122,75 @@ func AdminDSN(user, password string, t AwsTarget) string {
 		Path:     "/postgres",
 		RawQuery: q.Encode(),
 	}).String()
+}
+
+// GrantFailure says why running the grant failed, so the CLI can name the fix
+// instead of guessing. Each kind has a different remedy: a wrong admin login
+// is fixed by re-running with the right one, an unreachable database by
+// running the SQL somewhere that can reach it.
+type GrantFailure int
+
+const (
+	// GrantFailedOther is anything not classified below; the error itself is shown.
+	GrantFailedOther GrantFailure = iota
+	// GrantFailedAuth: the server rejected the admin login (wrong password, or
+	// a user that doesn't exist — Postgres reports both the same way).
+	GrantFailedAuth
+	// GrantFailedUnreachable: no connection from here (refused, timed out,
+	// unresolvable). Typical of a private database.
+	GrantFailedUnreachable
+	// GrantFailedTLS: connected, but the server's certificate didn't verify.
+	GrantFailedTLS
+	// GrantFailedPrivilege: logged in, but that user may not create roles or
+	// grant them.
+	GrantFailedPrivilege
+)
+
+// ClassifyGrantError sorts a RunGrant error into a GrantFailure.
+func ClassifyGrantError(err error) GrantFailure {
+	if err == nil {
+		return GrantFailedOther
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		// 28P01 invalid_password; 28000 invalid_authorization_specification
+		// (no such role, or no pg_hba entry for it).
+		case "28P01", "28000":
+			return GrantFailedAuth
+		// 42501 insufficient_privilege.
+		case "42501":
+			return GrantFailedPrivilege
+		}
+		return GrantFailedOther
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var verify *tls.CertificateVerificationError
+	if errors.As(err, &unknownAuthority) || errors.As(err, &hostname) ||
+		errors.As(err, &invalid) || errors.As(err, &verify) {
+		return GrantFailedTLS
+	}
+	var netErr net.Error
+	var dnsErr *net.DNSError
+	var opErr *net.OpError
+	if errors.As(err, &dnsErr) || errors.As(err, &opErr) || errors.As(err, &netErr) {
+		return GrantFailedUnreachable
+	}
+	// Fall back to the message for errors that arrive without their type
+	// (flattened by a wrapper upstream).
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "SQLSTATE 28P01"), strings.Contains(msg, "SQLSTATE 28000"):
+		return GrantFailedAuth
+	case strings.Contains(msg, "SQLSTATE 42501"):
+		return GrantFailedPrivilege
+	case strings.Contains(msg, "x509:"), strings.Contains(msg, "tls: failed to verify"):
+		return GrantFailedTLS
+	case strings.Contains(msg, "dial "), strings.Contains(msg, "i/o timeout"),
+		strings.Contains(msg, "connection refused"), strings.Contains(msg, "no such host"):
+		return GrantFailedUnreachable
+	}
+	return GrantFailedOther
 }

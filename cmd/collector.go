@@ -116,7 +116,7 @@ func init() {
 	installCmd.Flags().Bool("enable-commands", false, "Allow all three commands on each new database: real execution plans for slow queries (explain), a copy of optimizer statistics so recommendations can be tested on a replay of your planner (collect_statistics), and read-only checks (execute_query). Without this flag a new database gets explain and collect_statistics: plans only, never your queries; statistics only, never table rows. Checks run in a read-only transaction that is always rolled back, with a 30-second limit and at most 1,000 rows. --enable-commands=false allows none. On MySQL, collect_statistics needs SELECT on mysql.innodb_table_stats and mysql.innodb_index_stats")
 	installCmd.Flags().String("commands", "", "Comma-separated commands to allow on every database ("+strings.Join(collector.CommandCatalog("postgres"), ", ")+"). Default: explain and collect_statistics, which return query plans and optimizer statistics and never run your queries or read table rows; an interactive AWS or GCP run asks per database with both ticked. --commands=\"\" allows none")
 	installCmd.Flags().Bool("run-grant", false, "AWS: run the IAM grant automatically against each database, needing an admin DB login reachable from here (prompted when interactive; otherwise the SQL is printed)")
-	installCmd.Flags().String("grant-user", "postgres", "AWS: admin database user for --run-grant")
+	installCmd.Flags().String("grant-user", "", "AWS: admin database user for the one-time grant (default: the database's master user as RDS reports it, else \"postgres\")")
 	installCmd.Flags().String("grant-password", "", "AWS: admin database password for --run-grant (prompted without echo if omitted)")
 
 	uninstallCmd.Flags().Bool("yes", false, "Skip the confirmation prompt")
@@ -638,33 +638,127 @@ func applyGrants(cmd *cobra.Command, targets []collector.AwsTarget) {
 			fmt.Printf("(%s isn't reachable from here — printing the grant SQL to run where it is.)\n",
 				strings.Join(plan.Unreachable, ", "))
 		} else {
-			run = promptYesNo("Run the collector's DB grant now? (needs a DB admin login)", false)
+			printGrantWhy(plan.Targets)
+			run = promptYesNo("Run it now? (needs the database's admin password, once)", false)
 		}
 	}
 	if !run {
 		fmt.Println("\nFinal step — grant the collector's IAM user access inside each database:")
+		if !offer {
+			printGrantWhy(plan.Targets)
+		}
 		for _, t := range plan.Targets {
 			printGrantFor(t)
 		}
 		return
 	}
 
-	adminUser, _ := cmd.Flags().GetString("grant-user")
-	adminPass, _ := cmd.Flags().GetString("grant-password")
-	if adminPass == "" {
-		adminPass = promptGrantPassword(adminUser)
+	// Settle every database's admin login before connecting anywhere, asking
+	// once per distinct admin user rather than once per database.
+	flagPass, _ := cmd.Flags().GetString("grant-password")
+	passwords := map[string]string{}
+	admins := make([]grantAdmin, len(plan.Targets))
+	for i, t := range plan.Targets {
+		admins[i] = resolveGrantAdmin(cmd, t)
+		if _, ok := passwords[admins[i].user]; ok {
+			continue
+		}
+		pass := flagPass
+		if pass == "" {
+			pass = promptGrantPassword(admins[i], t.InstanceID)
+		}
+		passwords[admins[i].user] = pass
 	}
+
 	fmt.Println("\nGranting the collector's IAM user access inside each database...")
-	for _, t := range plan.Targets {
-		dsn := collector.AdminDSN(adminUser, adminPass, t)
+	for i, t := range plan.Targets {
+		admin := admins[i]
+		dsn := collector.AdminDSN(admin.user, passwords[admin.user], t)
 		if err := runGrant(cmd.Context(), dsn, collector.GrantStatements(t.User, t.Databases)); err != nil {
-			fmt.Println(style.Warn(fmt.Sprintf("⚠  couldn't reach/grant %s from here (%v).\n"+
-				"   A private database often isn't reachable from where you run the CLI — run this SQL where it is:", t.InstanceID, err)))
-			printGrantFor(t)
+			reportGrantFailure(t, admin, err)
 			continue
 		}
 		fmt.Println(style.Success(fmt.Sprintf("✓ Granted %s access on %s", t.User, t.InstanceID)))
 	}
+}
+
+// grantAdmin is the admin login that runs a database's one-time grant, and
+// where its name came from — which decides how a rejected login is explained.
+type grantAdmin struct {
+	user   string
+	source grantAdminSource
+}
+
+type grantAdminSource int
+
+const (
+	grantAdminFromFlag grantAdminSource = iota // --grant-user
+	grantAdminFromRDS                          // the master user RDS reports
+	grantAdminFallback                         // nothing known: "postgres"
+)
+
+// fallbackGrantUser is assumed only when neither --grant-user nor discovery
+// names the admin. It is the RDS console's default master username.
+const fallbackGrantUser = "postgres"
+
+// resolveGrantAdmin picks the admin login for t's grant: an explicit
+// --grant-user wins, then the master user discovery read from RDS, then
+// "postgres".
+func resolveGrantAdmin(cmd *cobra.Command, t collector.AwsTarget) grantAdmin {
+	if u, _ := cmd.Flags().GetString("grant-user"); u != "" {
+		return grantAdmin{user: u, source: grantAdminFromFlag}
+	}
+	if t.MasterUser != "" {
+		return grantAdmin{user: t.MasterUser, source: grantAdminFromRDS}
+	}
+	return grantAdmin{user: fallbackGrantUser, source: grantAdminFallback}
+}
+
+// printGrantWhy explains, before anything is asked, why an IAM install still
+// needs an admin password: without it the prompt reads as a contradiction.
+func printGrantWhy(targets []collector.AwsTarget) {
+	user := collector.DefaultDBUser
+	if len(targets) > 0 && targets[0].User != "" {
+		user = targets[0].User
+	}
+	fmt.Printf("\nOne-time database setup for IAM login:\n"+
+		"  The collector signs in as %q with an IAM token, so it never needs a password.\n"+
+		"  Postgres still needs that user created and granted rds_iam once, by an admin login.\n", user)
+}
+
+// reportGrantFailure explains a failed grant by its cause and always ends with
+// the SQL, so the user is never left without a way to finish.
+func reportGrantFailure(t collector.AwsTarget, admin grantAdmin, err error) {
+	var msg string
+	switch collector.ClassifyGrantError(err) {
+	case collector.GrantFailedAuth:
+		msg = fmt.Sprintf("⚠  %s rejected the admin login %q: wrong password, or no such user.", t.InstanceID, admin.user)
+		switch admin.source {
+		case grantAdminFallback:
+			msg += fmt.Sprintf("\n   RDS didn't report this database's admin user, so %q was assumed. "+
+				"The RDS console shows it under Configuration → Master username.", admin.user)
+		case grantAdminFromRDS:
+			msg += fmt.Sprintf("\n   %q is this database's master user, as RDS reports it; check the password.", admin.user)
+		}
+		msg += "\n   Re-run with the right login:  dbg collector install --target aws --run-grant --grant-user <admin-user>" +
+			"\n   Or run this SQL as an admin:"
+	case collector.GrantFailedPrivilege:
+		msg = fmt.Sprintf("⚠  %q signed in to %s but isn't allowed to create or grant roles (%v).\n"+
+			"   Use the database's master user:  dbg collector install --target aws --run-grant --grant-user <master-user>\n"+
+			"   Or run this SQL as one:", admin.user, t.InstanceID, err)
+	case collector.GrantFailedTLS:
+		msg = fmt.Sprintf("⚠  couldn't verify %s's TLS certificate (%v).\n"+
+			"   Run this SQL from a client that trusts the database's certificate authority"+
+			" (for RDS, sslrootcert=global-bundle.pem from https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem):",
+			t.InstanceID, err)
+	case collector.GrantFailedUnreachable:
+		msg = fmt.Sprintf("⚠  couldn't reach %s from here (%v).\n"+
+			"   A private database often isn't reachable from where you run the CLI — run this SQL where it is:", t.InstanceID, err)
+	default:
+		msg = fmt.Sprintf("⚠  the grant on %s failed (%v).\n   Run this SQL as an admin where the database is reachable:", t.InstanceID, err)
+	}
+	fmt.Println(style.Warn(msg))
+	printGrantFor(t)
 }
 
 // deployStack runs a Fargate deploy under a spinner when interactive (output
@@ -687,14 +781,22 @@ func deployStack(deploy collector.FargateDeploy, title string) error {
 }
 
 func printGrantFor(t collector.AwsTarget) {
-	fmt.Printf("    -- on %s:\n", t.InstanceID)
+	if t.MasterUser != "" {
+		fmt.Printf("    -- on %s, connected as its admin user (%q):\n", t.InstanceID, t.MasterUser)
+	} else {
+		fmt.Printf("    -- on %s, connected as an admin user:\n", t.InstanceID)
+	}
 	for _, s := range collector.GrantStatements(t.User, t.Databases) {
 		fmt.Printf("    %s\n", s)
 	}
 }
 
-func promptGrantPassword(adminUser string) string {
-	return promptPasswordOptional(fmt.Sprintf("Admin DB password for %q (to run the grant)", adminUser))
+func promptGrantPassword(admin grantAdmin, instance string) string {
+	label := fmt.Sprintf("Admin password for %q on %s (used once for this grant, not stored)", admin.user, instance)
+	if admin.source == grantAdminFromRDS {
+		label = fmt.Sprintf("Password for %q, %s's master user (used once for this grant, not stored)", admin.user, instance)
+	}
+	return promptPasswordOptional(label)
 }
 
 // resolveAwsTargets resolves every database the collector will monitor: the N
