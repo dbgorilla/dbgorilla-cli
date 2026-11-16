@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The `--target aws` install is the most destructive path in the CLI: it mints
@@ -976,5 +980,128 @@ func TestRunInstallAWS_UnknownECSRoleWarnsAndContinues(t *testing.T) {
 	}
 	if deploys.count != 1 {
 		t.Errorf("deploys = %d, want 1", deploys.count)
+	}
+}
+
+// --- grant admin login and failure messages -------------------------------
+
+// grantWith runs applyGrants with --run-grant and a fixed password, so no
+// prompt is involved; it returns the output and the DSNs the grant used.
+func grantWith(t *testing.T, target collector.AwsTarget, grantUser string, grantErr error) (string, []string) {
+	t.Helper()
+	isolate(t)
+	dsns := stubRunGrantDSNs(t, grantErr)
+	c := awsCmd(t)
+	mustSet(t, c, "run-grant", "true")
+	mustSet(t, c, "grant-password", "pw123")
+	mustSet(t, c, "yes", "true")
+	if grantUser != "" {
+		mustSet(t, c, "grant-user", grantUser)
+	}
+	out := capture(t, func() { applyGrants(c, []collector.AwsTarget{target}) })
+	return out, *dsns
+}
+
+func dsnUser(t *testing.T, dsn string) string {
+	t.Helper()
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse %q: %v", dsn, err)
+	}
+	return u.User.Username()
+}
+
+func TestApplyGrants_AdminLogin(t *testing.T) {
+	withMaster := completeTarget()
+	withMaster.MasterUser = "db_admin"
+
+	t.Run("the master user RDS reports is used by default", func(t *testing.T) {
+		_, dsns := grantWith(t, withMaster, "", nil)
+		if len(dsns) != 1 || dsnUser(t, dsns[0]) != "db_admin" {
+			t.Fatalf("dsns = %v, want one grant as db_admin", dsns)
+		}
+	})
+	t.Run("an explicit --grant-user wins", func(t *testing.T) {
+		_, dsns := grantWith(t, withMaster, "ops", nil)
+		if len(dsns) != 1 || dsnUser(t, dsns[0]) != "ops" {
+			t.Fatalf("dsns = %v, want one grant as ops", dsns)
+		}
+	})
+	t.Run("with nothing known, postgres is assumed", func(t *testing.T) {
+		_, dsns := grantWith(t, completeTarget(), "", nil)
+		if len(dsns) != 1 || dsnUser(t, dsns[0]) != "postgres" {
+			t.Fatalf("dsns = %v, want one grant as postgres", dsns)
+		}
+	})
+}
+
+func TestApplyGrants_FailureNamesTheCause(t *testing.T) {
+	authErr := fmt.Errorf("failed to connect: %w", &pgconn.PgError{Code: "28P01", Message: "password authentication failed"})
+	withMaster := completeTarget()
+	withMaster.MasterUser = "db_admin"
+
+	cases := []struct {
+		name   string
+		target collector.AwsTarget
+		err    error
+		want   []string
+		reject []string
+	}{
+		{"a guessed admin is called a guess, with where to look", completeTarget(), authErr,
+			[]string{`rejected the admin login "postgres"`, "was assumed", "Master username", "--grant-user <admin-user>"},
+			[]string{"private database"}},
+		{"the RDS master user points at the password", withMaster, authErr,
+			[]string{`rejected the admin login "db_admin"`, "master user, as RDS reports it", "--grant-user"},
+			[]string{"was assumed", "private database"}},
+		{"an untrusted certificate is not blamed on the network", withMaster,
+			fmt.Errorf("tls: %w", x509.UnknownAuthorityError{}),
+			[]string{"couldn't verify", "TLS certificate", "truststore.pki.rds.amazonaws.com"},
+			[]string{"private database"}},
+		{"a login without CREATEROLE says so", withMaster,
+			fmt.Errorf("CREATE USER -> %w", &pgconn.PgError{Code: "42501"}),
+			[]string{"isn't allowed to create or grant roles", "--grant-user <master-user>"},
+			[]string{"private database"}},
+		{"an unreachable database keeps the private-network hint", withMaster,
+			&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("i/o timeout")},
+			[]string{"couldn't reach", "private database"}, nil},
+		{"anything else shows the error itself", withMaster, errors.New("something odd"),
+			[]string{"the grant on prod-db failed (something odd)"}, []string{"private database"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, _ := grantWith(t, c.target, "", c.err)
+			for _, w := range c.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("output lacks %q:\n%s", w, out)
+				}
+			}
+			for _, r := range c.reject {
+				if strings.Contains(out, r) {
+					t.Errorf("output should not say %q:\n%s", r, out)
+				}
+			}
+			// Whatever the cause, the user is never left without the SQL.
+			if !strings.Contains(out, "GRANT rds_iam") {
+				t.Errorf("the SQL must always be printed on failure:\n%s", out)
+			}
+		})
+	}
+}
+
+// When the SQL is only printed, it says why an IAM install needs it and which
+// login to run it as.
+func TestApplyGrants_PrintedSQLExplainsItself(t *testing.T) {
+	isolate(t)
+	stubRunGrant(t, nil)
+	c := awsCmd(t)
+	mustSet(t, c, "yes", "true")
+	target := completeTarget()
+	target.MasterUser = "db_admin"
+
+	out := capture(t, func() { applyGrants(c, []collector.AwsTarget{target}) })
+	for _, w := range []string{"never needs a password", "rds_iam once", `connected as its admin user ("db_admin")`} {
+		if !strings.Contains(out, w) {
+			t.Errorf("output lacks %q:\n%s", w, out)
+		}
 	}
 }
