@@ -167,6 +167,20 @@ func stubNetworkPath(t *testing.T, findings []collector.NetworkFinding, err erro
 	t.Cleanup(func() { checkNetworkPath = orig })
 }
 
+// stubECSRole fixes the ECS service-linked-role check's answer and records the
+// dryRun it was asked with.
+func stubECSRole(t *testing.T, status collector.ECSRoleStatus, err error) *[]bool {
+	t.Helper()
+	calls := new([]bool)
+	orig := ensureECSRole
+	ensureECSRole = func(dryRun bool) (collector.ECSRoleStatus, error) {
+		*calls = append(*calls, dryRun)
+		return status, err
+	}
+	t.Cleanup(func() { ensureECSRole = orig })
+	return calls
+}
+
 func stubRunGrant(t *testing.T, err error) *int {
 	t.Helper()
 	n := new(int)

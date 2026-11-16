@@ -885,3 +885,96 @@ func TestRunInstallAWS_DryRunOnAnExistingStackPreviewsTheUpdate(t *testing.T) {
 		t.Errorf("output does not show the update it would make:\n%s", out)
 	}
 }
+
+// --- ECS service-linked role ---------------------------------------------
+
+func ecsRoleInstall(t *testing.T, status collector.ECSRoleStatus, roleErr error, dryRun bool) (string, *[]bool, *deployCall, error) {
+	t.Helper()
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	calls := stubECSRole(t, status, roleErr)
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	srv := installServer(t, "agent-aws")
+	t.Cleanup(srv.Close)
+
+	c := awsCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+	if dryRun {
+		mustSet(t, c, "dry-run", "true")
+	}
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	return out, calls, deploys, err
+}
+
+// An account that has never used ECS gets the role before anything is minted,
+// so the stack's cluster doesn't fail on first install.
+func TestRunInstallAWS_CreatesTheECSRoleOnFirstUse(t *testing.T) {
+	out, calls, deploys, err := ecsRoleInstall(t, collector.ECSRoleCreated, nil, false)
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if len(*calls) != 1 || (*calls)[0] {
+		t.Fatalf("ECS role check calls = %v, want one real (non-dry-run) call", *calls)
+	}
+	if !strings.Contains(out, "Created the AWSServiceRoleForECS role") {
+		t.Errorf("output should say the role was created:\n%s", out)
+	}
+	if deploys.count != 1 {
+		t.Errorf("deploys = %d, want 1", deploys.count)
+	}
+}
+
+// A role that is missing and can't be created means the deploy would fail, so
+// stop before an identity is minted.
+func TestRunInstallAWS_StopsWhenTheECSRoleCannotBeCreated(t *testing.T) {
+	roleErr := errors.New("its AWSServiceRoleForECS role could not be created: AccessDenied\n" +
+		"   Ask an account administrator to run, once:\n     " + collector.ECSRoleCreateCommand)
+	out, _, deploys, err := ecsRoleInstall(t, collector.ECSRoleMissing, roleErr, false)
+	if err == nil || !strings.Contains(err.Error(), collector.ECSRoleCreateCommand) {
+		t.Fatalf("err = %v, want the role error with its fix", err)
+	}
+	if deploys.count != 0 {
+		t.Error("nothing should deploy without the ECS role")
+	}
+	if strings.Contains(out, "Provisioning collector identity") {
+		t.Error("no identity should be minted when the install can't proceed")
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		t.Error("no state should be saved")
+	}
+}
+
+// A dry run asks without creating, and says what the real run will do.
+func TestRunInstallAWS_DryRunReportsAMissingECSRole(t *testing.T) {
+	out, calls, _, err := ecsRoleInstall(t, collector.ECSRoleMissing, nil, true)
+	if err != nil {
+		t.Fatalf("dry run: %v\n%s", err, out)
+	}
+	if len(*calls) != 1 || !(*calls)[0] {
+		t.Fatalf("ECS role check calls = %v, want one dry-run call", *calls)
+	}
+	if !strings.Contains(out, "a real install will first create the AWSServiceRoleForECS role") {
+		t.Errorf("dry run should say the role will be created:\n%s", out)
+	}
+}
+
+// Without iam:GetRole the check can't tell. The role most likely exists, so
+// the install warns, names the symptom to watch for, and carries on.
+func TestRunInstallAWS_UnknownECSRoleWarnsAndContinues(t *testing.T) {
+	out, _, deploys, err := ecsRoleInstall(t, collector.ECSRoleUnknown,
+		errors.New("could not check for the AWSServiceRoleForECS role: AccessDenied"), false)
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Unable to assume the service linked role") || !strings.Contains(out, collector.ECSRoleCreateCommand) {
+		t.Errorf("warning should name the symptom and the fix:\n%s", out)
+	}
+	if deploys.count != 1 {
+		t.Errorf("deploys = %d, want 1", deploys.count)
+	}
+}

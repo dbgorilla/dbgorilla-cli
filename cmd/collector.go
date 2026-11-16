@@ -60,6 +60,7 @@ var (
 	deleteStack       = collector.DeleteStack
 	upgradeImage      = collector.UpgradeImage
 	checkNetworkPath  = collector.VerifyNetworkPath
+	ensureECSRole     = collector.EnsureECSServiceLinkedRole
 	runGrant          = collector.RunGrant
 	reachable         = collector.Reachable
 	// runFargateDeploy / runFargateDeployQuiet are method expressions (not
@@ -401,6 +402,9 @@ func runInstallAWS(cmd *cobra.Command) error {
 	}
 
 	if err := printCloudIdentity("AWS", awsAvailable, awsIdentity); err != nil {
+		return err
+	}
+	if err := ensureECSServiceRole(dryRun); err != nil {
 		return err
 	}
 	client, err := requireCollectorSupport(cmd, apiURL)
@@ -857,6 +861,36 @@ func verifyNetworkPath(cmd *cobra.Command, sg string, subnets []string, targets 
 		}
 	}
 	return nil
+}
+
+// ensureECSServiceRole makes sure the account has ECS's service-linked role
+// before anything is minted or deployed. In an account that has never used ECS
+// the role is missing, and the stack's cluster fails on first install while
+// ECS creates it. A real run creates it here; a dry run reports that it will.
+// Only a role that is missing and can't be created stops the install — a
+// failed lookup warns, since the role most likely exists.
+func ensureECSServiceRole(dryRun bool) error {
+	status, err := ensureECSRole(dryRun)
+	switch status {
+	case collector.ECSRolePresent:
+		return nil
+	case collector.ECSRoleCreated:
+		fmt.Println(style.Success(fmt.Sprintf("✓ Created the %s role (first use of ECS in this account)",
+			collector.ECSServiceLinkedRoleName)))
+		return nil
+	case collector.ECSRoleMissing:
+		if err != nil {
+			return err
+		}
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  This account has never used ECS: a real install will first create the %s role "+
+			"(needs iam:CreateServiceLinkedRole, or an administrator can run: %s)",
+			collector.ECSServiceLinkedRoleName, collector.ECSRoleCreateCommand)))
+		return nil
+	default:
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %v\n   Continuing. If the deploy fails with \"Unable to assume the service linked role\", "+
+			"have an administrator run: %s", err, collector.ECSRoleCreateCommand)))
+		return nil
+	}
 }
 
 // targetsSummary is a short human label for the monitored databases, stored in

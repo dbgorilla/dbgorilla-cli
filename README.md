@@ -155,6 +155,8 @@ dbg collector install --target aws                 # discover the database, depl
 dbg collector install --target aws --dry-run       # show the config + validate, deploy nothing
 ```
 
+In an account that has never used ECS, the install first creates ECS's service-linked role (`AWSServiceRoleForECS`), which ECS needs before it can create the collector's cluster. That needs `iam:CreateServiceLinkedRole`; without it, the install stops before deploying anything and prints the one command an administrator runs instead (`aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com`). A dry run only reports that the role is missing.
+
 ### The CloudFormation template
 
 The stack is defined by a template DBGorilla publishes, so you can read exactly what will be created before running anything:
