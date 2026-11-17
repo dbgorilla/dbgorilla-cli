@@ -162,3 +162,57 @@ func TestAdmitCollectorOpensANewDatabasePort(t *testing.T) {
 		t.Error("egress to the new database port was not opened")
 	}
 }
+
+func describeOurGroupXML(id, extra string) string {
+	return `<DescribeSecurityGroupsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <securityGroupInfo><item><groupId>` + id + `</groupId>` + extra + `</item></securityGroupInfo>
+</DescribeSecurityGroupsResponse>`
+}
+
+// A group an earlier install made and could not remove is claimed, so this
+// install's uninstall removes it. One the CLI did not make is left alone.
+func TestAnOrphanedGroupOfOursIsClaimed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		extra string
+		ours  bool
+	}{
+		"our description": {`<groupDescription>` + collectorSGDescription + `</groupDescription>`, true},
+		"our tag":         {`<tagSet><item><key>ManagedBy</key><value>dbgorilla-cli</value></item></tagSet>`, true},
+		"someone else's":  {`<groupDescription>prod db</groupDescription>`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubAWS(t, newAWSFake(t).
+				on("DescribeSubnets", describeSubnetsVPC1XML).
+				on("DescribeSecurityGroups", describeOurGroupXML("sg-old", tc.extra)).
+				on("AuthorizeSecurityGroupEgress", authorizeEgressXML).
+				on("AuthorizeSecurityGroupIngress", authorizeIngressXML))
+			net, err := EnsureCollectorNetwork(context.Background(), "us-east-1", "dbg-collector",
+				[]string{"subnet-a"}, rdsTargets()[:1])
+			if err != nil {
+				t.Fatalf("EnsureCollectorNetwork: %v", err)
+			}
+			if net.SecurityGroupID != "sg-old" || net.SecurityGroupCreated != tc.ours {
+				t.Fatalf("got %+v, want claimed=%v", net, tc.ours)
+			}
+		})
+	}
+}
+
+// After the stack is gone, the task's interface can hold the group a little
+// longer; the release retries rather than giving up at once.
+func TestReleaseRetriesAGroupStillInUse(t *testing.T) {
+	oa, od := sgReleaseAttempts, sgReleaseDelay
+	sgReleaseAttempts, sgReleaseDelay = 3, 0
+	t.Cleanup(func() { sgReleaseAttempts, sgReleaseDelay = oa, od })
+	fake := newAWSFake(t).
+		fail("DeleteSecurityGroup", http.StatusBadRequest, ec2ErrorXML("DependencyViolation", "in use"))
+	stubAWS(t, fake)
+	err := ReleaseCollectorNetwork(context.Background(), "us-east-1",
+		CollectorNetwork{SecurityGroupID: "sg-own", SecurityGroupCreated: true})
+	if err == nil {
+		t.Fatal("expected the in-use group to be reported")
+	}
+	if n := fake.called("DeleteSecurityGroup"); n != 3 {
+		t.Errorf("tried %d times, want 3", n)
+	}
+}

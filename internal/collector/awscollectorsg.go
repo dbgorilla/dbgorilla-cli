@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -56,7 +57,7 @@ func ensureCollectorSecurityGroupWithPorts(ctx context.Context, client *ec2.Clie
 	}
 	name := CollectorSecurityGroupName(stackName)
 
-	if id, err := findCollectorSecurityGroup(ctx, client, vpcID, name); err != nil {
+	if id, ours, err := findCollectorSecurityGroup(ctx, client, vpcID, name); err != nil {
 		return "", false, err
 	} else if id != "" && !topUp {
 		return id, false, nil
@@ -67,7 +68,11 @@ func ensureCollectorSecurityGroupWithPorts(ctx context.Context, client *ec2.Clie
 				return "", false, err
 			}
 		}
-		return id, false, nil
+		// A group under this name that carries the CLI's own description or
+		// tag is one an earlier install made and could not remove (its uninstall
+		// ran before the task let go of it). Claim it, so this install's
+		// uninstall removes it instead of leaving it behind for good.
+		return id, ours, nil
 	}
 
 	out, err := client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
@@ -86,7 +91,7 @@ func ensureCollectorSecurityGroupWithPorts(ctx context.Context, client *ec2.Clie
 		// A concurrent install may have won the race; adopt its group rather
 		// than failing an otherwise fine install.
 		if isDuplicateSGError(err) {
-			if id, ferr := findCollectorSecurityGroup(ctx, client, vpcID, name); ferr == nil && id != "" {
+			if id, _, ferr := findCollectorSecurityGroup(ctx, client, vpcID, name); ferr == nil && id != "" {
 				return id, false, nil
 			}
 		}
@@ -152,8 +157,9 @@ func revokeDefaultEgress(ctx context.Context, client *ec2.Client, groupID string
 }
 
 // findCollectorSecurityGroup looks the group up by name within the VPC, where
-// names are unique. An empty id means it does not exist.
-func findCollectorSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, name string) (string, error) {
+// names are unique. An empty id means it does not exist. ours reports that the
+// group carries this CLI's description or ManagedBy tag.
+func findCollectorSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, name string) (id string, ours bool, err error) {
 	out, err := client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
 		Filters: []ec2types.Filter{
 			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
@@ -161,12 +167,54 @@ func findCollectorSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, 
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot look up the collector security group in %s: %w", vpcID, err)
+		return "", false, fmt.Errorf("cannot look up the collector security group in %s: %w", vpcID, err)
 	}
 	if len(out.SecurityGroups) == 0 {
-		return "", nil
+		return "", false, nil
 	}
-	return aws.ToString(out.SecurityGroups[0].GroupId), nil
+	g := out.SecurityGroups[0]
+	return aws.ToString(g.GroupId), managedByCLI(g), nil
+}
+
+// managedByCLI reports whether a group carries the provenance this CLI stamps
+// on the groups it creates.
+func managedByCLI(g ec2types.SecurityGroup) bool {
+	if aws.ToString(g.Description) == collectorSGDescription {
+		return true
+	}
+	for _, t := range g.Tags {
+		if aws.ToString(t.Key) == "ManagedBy" && aws.ToString(t.Value) == "dbgorilla-cli" {
+			return true
+		}
+	}
+	return false
+}
+
+// sgReleaseAttempts and sgReleaseDelay bound how long a release keeps retrying
+// a group EC2 still reports in use. Even after the stack is gone, a Fargate
+// task's network interface can take a minute or two to be released.
+var (
+	sgReleaseAttempts = 12
+	sgReleaseDelay    = 10 * time.Second
+)
+
+// deleteCollectorSecurityGroupWhenFree is DeleteCollectorSecurityGroup,
+// retried while EC2 reports the group still in use.
+func deleteCollectorSecurityGroupWhenFree(ctx context.Context, client *ec2.Client, groupID string) error {
+	var err error
+	for i := 0; i < sgReleaseAttempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(sgReleaseDelay):
+			}
+		}
+		if err = DeleteCollectorSecurityGroup(ctx, client, groupID); err == nil || !isDependencyViolation(err) {
+			return err
+		}
+	}
+	return err
 }
 
 // DeleteCollectorSecurityGroup removes the group. It is safe to call when the
@@ -214,11 +262,9 @@ func awsErrorCodeIs(err error, code string) bool {
 // ReleaseCollectorSecurityGroup removes a collector security group by id,
 // resolving its own EC2 client for the region.
 //
-// Uninstall calls this straight after starting the stack deletion, which is
-// asynchronous — so the task's network interface may still hold the group and
-// EC2 refuses with DependencyViolation. That refusal is returned as-is rather
-// than retried here: uninstall should report it and move on, not block for the
-// minutes a stack takes to drain.
+// Uninstall calls this once the stack has finished deleting. The task's network
+// interface can still hold the group for a short while after that, so an
+// in-use refusal is retried for a bounded time before it is returned.
 func ReleaseCollectorSecurityGroup(ctx context.Context, region, groupID string) error {
 	if groupID == "" {
 		return nil
@@ -227,5 +273,5 @@ func ReleaseCollectorSecurityGroup(ctx context.Context, region, groupID string) 
 	if err != nil {
 		return err
 	}
-	return DeleteCollectorSecurityGroup(ctx, ec2.NewFromConfig(cfg), groupID)
+	return deleteCollectorSecurityGroupWhenFree(ctx, ec2.NewFromConfig(cfg), groupID)
 }

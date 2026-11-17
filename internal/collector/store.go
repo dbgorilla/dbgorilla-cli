@@ -98,6 +98,11 @@ type State struct {
 	// databases' security groups to admit CollectorSecurityGroupID. Uninstall
 	// revokes these before it removes the group.
 	DBIngressRules []DBIngressRule `json:"db_ingress_rules,omitempty"`
+	// PendingNetworkCleanup marks a record kept only because the collector's
+	// security group or database rules outlived it: the stack is deleted and
+	// the identity deprovisioned, and `dbg collector uninstall` retries just
+	// the network cleanup.
+	PendingNetworkCleanup bool `json:"pending_network_cleanup,omitempty"`
 	// CollectorSubnetCIDRs is the fallback: the networks a VPC-resident
 	// collector was allowlisted by when the security-group rule could not be
 	// used. It selects that mode the way CollectorSecurityGroupID selects the

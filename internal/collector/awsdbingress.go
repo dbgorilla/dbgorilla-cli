@@ -173,7 +173,7 @@ func EnsureCollectorNetwork(ctx context.Context, region, stackName string, subne
 
 // ReleaseCollectorNetwork revokes the database rules first (EC2 will not
 // delete a group another group's rule refers to), then the group if this
-// install created it.
+// install created it, retrying for a bounded time while it is still in use.
 func ReleaseCollectorNetwork(ctx context.Context, region string, net CollectorNetwork) error {
 	cfg, err := loadAWSConfig(ctx, region)
 	if err != nil {
@@ -186,7 +186,7 @@ func ReleaseCollectorNetwork(ctx context.Context, region string, net CollectorNe
 	if !net.SecurityGroupCreated {
 		return nil
 	}
-	return DeleteCollectorSecurityGroup(ctx, client, net.SecurityGroupID)
+	return deleteCollectorSecurityGroupWhenFree(ctx, client, net.SecurityGroupID)
 }
 
 // AdmitCollector is the update-path half of EnsureCollectorNetwork: the group
