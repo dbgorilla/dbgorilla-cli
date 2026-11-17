@@ -51,13 +51,13 @@ func stubCollectorNetwork(t *testing.T, ensureErr error) *networkRec {
 	return rec
 }
 
-func installAWS(t *testing.T, target collector.AwsTarget, flags map[string]string) (*deployCall, error, string) {
+func installAWS(t *testing.T, target collector.AwsTarget, flags map[string]string) (*deployCall, string, error) {
 	t.Helper()
 	return installAWSDeploying(t, target, flags, nil)
 }
 
 // installAWSDeploying is installAWS with the deploy returning deployErr.
-func installAWSDeploying(t *testing.T, target collector.AwsTarget, flags map[string]string, deployErr error) (*deployCall, error, string) {
+func installAWSDeploying(t *testing.T, target collector.AwsTarget, flags map[string]string, deployErr error) (*deployCall, string, error) {
 	t.Helper()
 	isolate(t)
 	writeTokens(t)
@@ -75,14 +75,14 @@ func installAWSDeploying(t *testing.T, target collector.AwsTarget, flags map[str
 	}
 	var err error
 	out := capture(t, func() { err = runInstallAWS(c) })
-	return deploys, err, out
+	return deploys, out, err
 }
 
 // The task no longer runs in the database's group, which usually admits far
 // more than the collector should be reachable from.
 func TestRunInstallAWS_TheCollectorGetsItsOwnSecurityGroup(t *testing.T) {
 	net := stubCollectorNetwork(t, nil)
-	deploys, err, out := installAWS(t, discoveredTarget(), nil)
+	deploys, out, err := installAWS(t, discoveredTarget(), nil)
 	if err != nil {
 		t.Fatalf("runInstallAWS: %v\n%s", err, out)
 	}
@@ -101,7 +101,7 @@ func TestRunInstallAWS_TheCollectorGetsItsOwnSecurityGroup(t *testing.T) {
 
 func TestRunInstallAWS_AnExplicitSecurityGroupIsUsedAsIs(t *testing.T) {
 	net := stubCollectorNetwork(t, nil)
-	deploys, err, out := installAWS(t, discoveredTarget(), map[string]string{"security-group-id": "sg-mine"})
+	deploys, out, err := installAWS(t, discoveredTarget(), map[string]string{"security-group-id": "sg-mine"})
 	if err != nil {
 		t.Fatalf("runInstallAWS: %v\n%s", err, out)
 	}
@@ -114,7 +114,7 @@ func TestRunInstallAWS_AnExplicitSecurityGroupIsUsedAsIs(t *testing.T) {
 // the task stays where it can connect.
 func TestRunInstallAWS_UnknownDatabaseGroupsKeepTheDatabaseGroup(t *testing.T) {
 	net := stubCollectorNetwork(t, nil)
-	deploys, err, out := installAWS(t, completeTarget(), nil)
+	deploys, out, err := installAWS(t, completeTarget(), nil)
 	if err != nil {
 		t.Fatalf("runInstallAWS: %v\n%s", err, out)
 	}
@@ -125,7 +125,7 @@ func TestRunInstallAWS_UnknownDatabaseGroupsKeepTheDatabaseGroup(t *testing.T) {
 
 func TestRunInstallAWS_ASecurityGroupFailureDeploysNothing(t *testing.T) {
 	stubCollectorNetwork(t, errors.New("UnauthorizedOperation"))
-	deploys, err, _ := installAWS(t, discoveredTarget(), nil)
+	deploys, _, err := installAWS(t, discoveredTarget(), nil)
 	if err == nil {
 		t.Fatal("expected the security group failure to stop the install")
 	}
@@ -136,7 +136,7 @@ func TestRunInstallAWS_ASecurityGroupFailureDeploysNothing(t *testing.T) {
 
 func TestRunInstallAWS_DryRunCreatesNoSecurityGroup(t *testing.T) {
 	net := stubCollectorNetwork(t, nil)
-	_, err, out := installAWS(t, discoveredTarget(), map[string]string{"dry-run": "true"})
+	_, out, err := installAWS(t, discoveredTarget(), map[string]string{"dry-run": "true"})
 	if err != nil {
 		t.Fatalf("dry run: %v\n%s", err, out)
 	}
@@ -186,7 +186,7 @@ func TestReleaseOwnNetworkRevokesTheRecordedRules(t *testing.T) {
 func TestRunInstallAWS_AFailedDeployRemovesTheGroupAndRules(t *testing.T) {
 	net := stubCollectorNetwork(t, nil)
 	deleted := stubDeleteStack(t, nil)
-	_, err, out := installAWSDeploying(t, discoveredTarget(), nil, errors.New("CREATE_FAILED"))
+	_, out, err := installAWSDeploying(t, discoveredTarget(), nil, errors.New("CREATE_FAILED"))
 	if err == nil {
 		t.Fatalf("expected the deploy failure to surface\n%s", out)
 	}
@@ -207,7 +207,7 @@ func TestRunInstallAWS_AFailedDeployKeepsARecordOfWhatItCouldNotRemove(t *testin
 	net := stubCollectorNetwork(t, nil)
 	net.releaseErr = errors.New("DependencyViolation")
 	stubDeleteStack(t, nil)
-	_, err, out := installAWSDeploying(t, discoveredTarget(), nil, errors.New("CREATE_FAILED"))
+	_, out, err := installAWSDeploying(t, discoveredTarget(), nil, errors.New("CREATE_FAILED"))
 	if err == nil {
 		t.Fatalf("expected the deploy failure to surface\n%s", out)
 	}
@@ -225,7 +225,7 @@ func TestRunInstallAWS_AFailedDeployKeepsARecordOfWhatItCouldNotRemove(t *testin
 func TestRunInstallAWS_ABusyStackRemovesTheGroupAndRules(t *testing.T) {
 	net := stubCollectorNetwork(t, nil)
 	deleted := stubDeleteStack(t, nil)
-	_, err, out := installAWSDeploying(t, discoveredTarget(), nil, collector.ErrDeployBusy)
+	_, out, err := installAWSDeploying(t, discoveredTarget(), nil, collector.ErrDeployBusy)
 	if err == nil {
 		t.Fatalf("expected the busy stack to surface\n%s", out)
 	}
@@ -262,7 +262,7 @@ func uninstallAWSState(t *testing.T) {
 	}
 }
 
-func runUninstallAWS(t *testing.T) (error, string) {
+func runUninstallAWS(t *testing.T) (string, error) {
 	t.Helper()
 	srv := statusServer(t, 204, "")
 	t.Cleanup(srv.Close)
@@ -271,7 +271,7 @@ func runUninstallAWS(t *testing.T) (error, string) {
 	mustSet(t, c, "api-url", srv.URL)
 	var err error
 	out := capture(t, func() { err = runUninstall(c, nil) })
-	return err, out
+	return out, err
 }
 
 // Uninstall waits for the stack, then removes the rules and then the group.
@@ -282,7 +282,7 @@ func TestRunUninstall_AWSRemovesTheRulesThenTheGroup(t *testing.T) {
 	released := stubReleaseCollectorSG(t, nil)
 	deleted := stubDeleteStack(t, nil)
 	uninstallAWSState(t)
-	if err, out := runUninstallAWS(t); err != nil {
+	if out, err := runUninstallAWS(t); err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	if !*deleted || len(net.released) != 1 || len(*released) != 1 || (*released)[0] != "sg-own" {
@@ -302,7 +302,7 @@ func TestRunUninstall_AWSGroupStillInUseIsRetriedByARerun(t *testing.T) {
 	stubDeleteStack(t, nil)
 	stubReleaseCollectorSG(t, errors.New("DependencyViolation"))
 	uninstallAWSState(t)
-	if err, out := runUninstallAWS(t); err != nil {
+	if out, err := runUninstallAWS(t); err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	st, _ := collector.LoadState()
