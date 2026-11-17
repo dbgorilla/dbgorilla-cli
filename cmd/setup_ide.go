@@ -331,6 +331,9 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			if path, err := writer.ConfigPath(scope); err == nil {
 				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
 			}
+			for _, path := range ide.LegacyEntries(writer) {
+				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
+			}
 			if host, ok := writer.(ide.SkillHost); ok {
 				if dir, err := host.SkillDir(scope); err == nil {
 					fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
@@ -366,6 +369,9 @@ func runRemoveIDE(cmd *cobra.Command) error {
 		case err != nil:
 			failed++
 			fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
+			// The old files are independent of the new one: a failure here
+			// (say, comments in the Copilot file) must not leave them behind.
+			removeLegacyEntries(writer)
 			continue
 		case res.Absent:
 			fmt.Printf("Nothing to remove: %s\n", res.Path)

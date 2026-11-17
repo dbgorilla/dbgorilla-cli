@@ -48,10 +48,14 @@ func (v *VSCode) ConfigPath(scope Scope) (string, error) {
 
 func (v *VSCode) TopLevelKey() string { return "mcpServers" }
 
+// BuildEntry: the Copilot CLI reads this same file and lists "tools" as
+// required for a remote server (CLI command reference, "Remote server
+// configuration fields"), so every tool is enabled explicitly.
 func (v *VSCode) BuildEntry(mcpURL, apiKey string) map[string]any {
 	return map[string]any{
-		"type": "http",
-		"url":  mcpURL,
+		"type":  "http",
+		"url":   mcpURL,
+		"tools": []string{"*"},
 		"headers": map[string]string{
 			"Authorization": "Bearer " + apiKey,
 		},

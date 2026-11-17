@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,11 +26,14 @@ func TestRunSetupIDE_VSCode(t *testing.T) {
 			}
 		})
 	}
-	removeVSCode := func(t *testing.T) string {
+	removeVSCode := func(t *testing.T, extra ...string) string {
 		t.Helper()
 		c := setupIDETestCmd()
 		_ = c.Flags().Set("client", "vscode")
 		_ = c.Flags().Set("remove", "true")
+		for _, f := range extra {
+			_ = c.Flags().Set(f, "true")
+		}
 		return capture(t, func() {
 			if err := runSetupIDE(c, nil); err != nil {
 				t.Fatalf("remove: %v", err)
@@ -45,10 +49,17 @@ func TestRunSetupIDE_VSCode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Linux paths: the tests set HOME, and the user-profile legacy file on
-	// Linux is the only one rooted directly under it.
+	// The user-profile mcp.json earlier versions wrote, per OS. Spelled out
+	// here rather than asked of the adapter, so a wrong product path fails.
 	legacyUser := func(home string) string {
-		return filepath.Join(home, ".config", "Code", "User", "mcp.json")
+		switch runtime.GOOS {
+		case "darwin":
+			return filepath.Join(home, "Library", "Application Support", "Code", "User", "mcp.json")
+		case "windows":
+			return filepath.Join(home, "AppData", "Roaming", "Code", "User", "mcp.json")
+		default:
+			return filepath.Join(home, ".config", "Code", "User", "mcp.json")
+		}
 	}
 
 	t.Run("writes mcpServers to ~/.copilot/mcp-config.json", func(t *testing.T) {
@@ -174,6 +185,45 @@ func TestRunSetupIDE_VSCode(t *testing.T) {
 		write(t, legacyUser(home), "// mine\n{\"servers\":{}}\n")
 		if out := removeVSCode(t); strings.Contains(out, "by hand") || strings.Contains(out, "Could not clean") {
 			t.Errorf("spurious warning:\n%s", out)
+		}
+	})
+
+	t.Run("--remove still cleans old files when the Copilot file fails", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		t.Chdir(t.TempDir())
+		write(t, filepath.Join(home, ".copilot", "mcp-config.json"),
+			"// hand-edited\n{\"mcpServers\":{\"dbgorilla\":{}}}\n")
+		write(t, legacyUser(home), `{"servers":{"dbgorilla":{}}}`)
+		c := setupIDETestCmd()
+		_ = c.Flags().Set("client", "vscode")
+		_ = c.Flags().Set("remove", "true")
+		var runErr error
+		out := capture(t, func() { runErr = runSetupIDE(c, nil) })
+		if runErr == nil {
+			t.Error("the Copilot file failed, so remove should report a failure")
+		}
+		if data, _ := os.ReadFile(legacyUser(home)); strings.Contains(string(data), "dbgorilla") {
+			t.Errorf("old entry survived:\n%s\noutput:\n%s", data, out)
+		}
+	})
+
+	t.Run("--remove --dry-run lists the old files and touches nothing", func(t *testing.T) {
+		home := isolate(t)
+		writeTokens(t)
+		t.Chdir(t.TempDir())
+		body := `{"servers":{"dbgorilla":{}}}`
+		write(t, legacyUser(home), body)
+		write(t, filepath.Join(".vscode", "mcp.json"), `{"servers":{"other":{}}}`)
+		out := removeVSCode(t, "dry-run")
+		if !strings.Contains(out, "Would remove the dbgorilla entry from: "+legacyUser(home)) {
+			t.Errorf("old file not listed:\n%s", out)
+		}
+		if strings.Contains(out, filepath.Join(".vscode", "mcp.json")) {
+			t.Errorf("listed a file without our entry:\n%s", out)
+		}
+		if data, _ := os.ReadFile(legacyUser(home)); string(data) != body {
+			t.Error("dry run rewrote the old file")
 		}
 	})
 }

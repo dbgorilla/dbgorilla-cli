@@ -71,6 +71,10 @@ func TestVSCode_BuildEntry_HasHTTPType(t *testing.T) {
 	if got["type"] != "http" {
 		t.Errorf("type = %v, want http", got["type"])
 	}
+	// The Copilot CLI reads the same file and requires "tools" on a remote server.
+	if tools, _ := got["tools"].([]string); len(tools) != 1 || tools[0] != "*" {
+		t.Errorf("tools = %v, want [\"*\"]", got["tools"])
+	}
 }
 
 func TestVSCode_UserScopeOnly(t *testing.T) {
