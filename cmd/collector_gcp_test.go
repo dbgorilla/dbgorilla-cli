@@ -1693,3 +1693,30 @@ func TestRunUninstall_GCPInterruptedDeleteKeepsTheIdentity(t *testing.T) {
 		t.Error("secrets must not be deleted while the deployment may still be reading them")
 	}
 }
+
+// A dry run on a machine with an installed collector previews the in-place
+// update a real re-run makes: the database keeps its commands. It must not
+// probe a fresh install, whose default commands the re-run would not use.
+func TestRunInstallGCP_DryRunOnAnExistingDeploymentPreviewsTheUpdate(t *testing.T) {
+	stored := installedGcpTarget()
+	stored.AuthMethod, stored.User = "password", "monitor"
+	stored.Commands = []string{collector.CmdExplain}
+	c, deploys := setupGcpUpdate(t, deployedGcpSpec(t, storedGcpConfig(t, stored), collector.GcpTemplateVersion), completeGcpTarget())
+	passwords := stubEnsureGcpDBPassword(t, nil)
+	mustSet(t, c, "dry-run", "true")
+
+	var err error
+	out := capture(t, func() { err = runInstallGCP(c) })
+	if err != nil {
+		t.Fatalf("runInstallGCP: %v\n%s", err, out)
+	}
+	if deploys.count != 0 {
+		t.Fatalf("a dry run on an installed collector ran a deploy (dry run of a fresh install, or the update itself):\n%s", out)
+	}
+	if len(*passwords) != 0 || deploys.secretsWritten != 0 {
+		t.Error("a dry run must not write secrets")
+	}
+	if !strings.Contains(out, "updates it in place") || !strings.Contains(out, `commands = ["explain"]`) {
+		t.Errorf("output does not show the update it would make:\n%s", out)
+	}
+}

@@ -251,3 +251,16 @@ func completeTarget() collector.AwsTarget {
 		IAMAuthOn:     true,
 	}
 }
+
+// stubPreviewUpdate answers a dry-run re-install's preview with rendered.
+func stubPreviewUpdate(t *testing.T, rendered string) *updateCall {
+	t.Helper()
+	rec := &updateCall{}
+	orig := previewUpdate
+	previewUpdate = func(stack, region string, targets []collector.AwsTarget, keepCommands bool) (string, error) {
+		rec.called, rec.stack, rec.region, rec.targets, rec.keepCommands = true, stack, region, targets, keepCommands
+		return rendered, nil
+	}
+	t.Cleanup(func() { previewUpdate = orig })
+	return rec
+}

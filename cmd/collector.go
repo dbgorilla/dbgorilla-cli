@@ -56,6 +56,7 @@ var (
 	discoverAwsTarget = collector.DiscoverAwsTarget
 	stackStatus       = collector.StackStatus
 	updateComponents  = collector.UpdateComponents
+	previewUpdate     = collector.PreviewComponentUpdate
 	deleteStack       = collector.DeleteStack
 	upgradeImage      = collector.UpgradeImage
 	checkNetworkPath  = collector.VerifyNetworkPath
@@ -386,16 +387,17 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// An existing AWS collector isn't a conflict — it's an update: re-run with a
 	// different --config / --db-instance-id to change which databases it monitors,
 	// in place (no re-mint, no teardown). A local Docker collector still blocks
-	// (can't reconcile it here). Dry-run always takes the fresh path below.
+	// (can't reconcile it here). A dry run takes the same branch, so it previews
+	// the update a real re-run would make rather than a fresh install.
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	prior, _, err := priorCloudInstall(dryRun, (*collector.State).IsAWS,
+	prior, _, err := priorCloudInstall(false, (*collector.State).IsAWS,
 		func(st *collector.State) (string, error) { return stackStatus(st.StackName, st.Region) },
 		"stack", func(st *collector.State) string { return st.StackName })
 	if err != nil {
 		return err
 	}
 	if prior != nil {
-		return runUpdateAWS(cmd, prior)
+		return runUpdateAWS(cmd, prior, dryRun)
 	}
 
 	if err := printCloudIdentity("AWS", awsAvailable, awsIdentity); err != nil {
@@ -549,7 +551,9 @@ func runInstallAWS(cmd *cobra.Command) error {
 // databases now declared by --config / --db-instance-id, reusing its identity,
 // secret, and networking — so "add or change a database" is one command with no
 // teardown. targets is the full desired set (declarative), not a delta.
-func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
+//
+// dryRun prints the config the update would deploy and changes nothing.
+func runUpdateAWS(cmd *cobra.Command, st *collector.State, dryRun bool) error {
 	if err := awsAvailable(); err != nil {
 		return err
 	}
@@ -562,7 +566,7 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 	// the stack's DbPassword parameter — reusing the previous value would leave
 	// ${DBG_DB_PASSWORD} unresolved in the collector's config.
 	dbPassword := dbPasswordFlag(cmd)
-	if err := resolveAwsAuth(cmd, targets, &dbPassword, false); err != nil {
+	if err := resolveAwsAuth(cmd, targets, &dbPassword, dryRun); err != nil {
 		return err
 	}
 	// Per-database commands: the flags when given. Otherwise each database keeps
@@ -578,6 +582,18 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State) error {
 		}
 	} else {
 		resolveCommands(cmd, targets, awsTargetLabel)
+	}
+	if dryRun {
+		rendered, err := previewUpdate(st.StackName, st.Region, targets, keepCommands)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\nDry run — collector %s is installed (stack %q), so this re-run updates it in place to monitor %d database(s). Config it would deploy:\n",
+			st.AgentID, st.StackName, len(targets))
+		for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
+			fmt.Println("    " + line)
+		}
+		return nil
 	}
 	fmt.Printf("Updating collector %s in place to monitor %d database(s)...\n", st.AgentID, len(targets))
 	if err := withSpinner("Updating collector…", func() error {
