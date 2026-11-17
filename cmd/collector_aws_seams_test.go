@@ -249,6 +249,7 @@ func awsCmd(t *testing.T) *cobra.Command {
 	c.Flags().Bool("run-grant", false, "")
 	c.Flags().String("grant-user", "", "")
 	c.Flags().String("grant-password", "", "")
+	c.Flags().Bool("grant-only", false, "")
 	c.Flags().Bool("force", false, "")
 	c.Flags().Bool("yes", false, "")
 	c.Flags().Bool("dry-run", false, "")

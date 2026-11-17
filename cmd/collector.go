@@ -122,6 +122,7 @@ func init() {
 	installCmd.Flags().Bool("run-grant", false, "AWS: run the IAM grant automatically against each database, needing an admin DB login reachable from here (prompted when interactive; otherwise the SQL is printed)")
 	installCmd.Flags().String("grant-user", "", "AWS: admin database user for the one-time grant (default: the database's master user as RDS reports it, else \"postgres\")")
 	installCmd.Flags().String("grant-password", "", "AWS: admin database password for --run-grant (prompted without echo if omitted)")
+	installCmd.Flags().Bool("grant-only", false, "AWS: only run the one-time IAM grant on the databases named by --db-instance-id / --config (or picked); the collector and its stack are left unchanged")
 
 	uninstallCmd.Flags().Bool("yes", false, "Skip the confirmation prompt")
 
@@ -383,6 +384,9 @@ func finishDockerInstall(cmd *cobra.Command, client *api.Client, creds *api.Coll
 // shares the local target's auth + provisioning, but resolves an RDS target
 // (IAM auth, no password) and deploys a stack instead of running Docker.
 func runInstallAWS(cmd *cobra.Command) error {
+	if grantOnly, _ := cmd.Flags().GetBool("grant-only"); grantOnly {
+		return runGrantOnlyAWS(cmd)
+	}
 	apiURL, err := requireInstallSession(cmd)
 	if err != nil {
 		return err
@@ -617,6 +621,50 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State, dryRun bool) error {
 	return nil
 }
 
+// runGrantOnlyAWS runs only the one-time IAM grant on the databases the flags
+// (or the picker) name. It never deploys or updates the stack, so retrying the
+// grant for just the database that failed cannot change which databases an
+// installed collector monitors, as a plain re-run of install would.
+func runGrantOnlyAWS(cmd *cobra.Command) error {
+	if err := awsAvailable(); err != nil {
+		return err
+	}
+	targets, err := resolveAwsTargets(cmd)
+	if err != nil {
+		return err
+	}
+	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
+		fmt.Println("Dry run — the collector is left unchanged; the grant would run:")
+		for _, t := range collector.PlanGrants(targets, nil).Targets {
+			printGrantFor(t)
+		}
+		return nil
+	}
+	if err := cmd.Flags().Set("run-grant", "true"); err != nil {
+		return err
+	}
+	applyGrants(cmd, targets)
+	return nil
+}
+
+// grantRerunHint is the command that retries one database's grant. It uses
+// --grant-only, which leaves the stack alone: a plain re-run of install on a
+// machine with a collector updates it to monitor only the databases that run
+// names.
+func grantRerunHint(t collector.AwsTarget, extra string) string {
+	hint := "dbg collector install --target aws --grant-only --db-instance-id " + t.InstanceID
+	if t.User != "" && t.User != collector.DefaultDBUser {
+		hint += " --db-user " + t.User
+	}
+	if len(t.Databases) > 0 {
+		hint += " --db-name " + strings.Join(t.Databases, ",")
+	}
+	if extra != "" {
+		hint += " " + extra
+	}
+	return hint
+}
+
 // applyGrants either runs the collector's DB grant automatically (--run-grant,
 // using an admin login reachable from here) or prints the SQL for the operator
 // to run. When a run fails (e.g. a private database unreachable from this host),
@@ -738,20 +786,20 @@ func reportGrantFailure(t collector.AwsTarget, admin grantAdmin, err error) {
 		case grantAdminFromRDS:
 			msg += fmt.Sprintf("\n   %q is this database's master user, as RDS reports it; check the password.", admin.user)
 		}
-		msg += "\n   Re-run with the right login:  dbg collector install --target aws --run-grant --grant-user <admin-user>" +
+		msg += "\n   Re-run with the right login:  " + grantRerunHint(t, "--grant-user <admin-user>") +
 			"\n   Or run this SQL as an admin:"
 	case collector.GrantFailedPrivilege:
 		msg = fmt.Sprintf("⚠  %q signed in to %s but isn't allowed to create or grant roles (%v).\n"+
-			"   Use the database's master user:  dbg collector install --target aws --run-grant --grant-user <master-user>\n"+
-			"   Or run this SQL as one:", admin.user, t.InstanceID, err)
+			"   Use the database's master user:  %s\n"+
+			"   Or run this SQL as one:", admin.user, t.InstanceID, err, grantRerunHint(t, "--grant-user <master-user>"))
 	case collector.GrantFailedTLS:
 		msg = fmt.Sprintf("⚠  couldn't verify %s's TLS certificate (%v).\n"+
 			"   Run this SQL from a client that trusts the database's certificate authority"+
 			" (for RDS, sslrootcert=global-bundle.pem from https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem).\n"+
 			"   Or re-run with the right CA bundle (AWS GovCloud and China regions publish their own):"+
-			"  PGSSLROOTCERT=<bundle.pem> dbg collector install --target aws --run-grant\n"+
+			"  PGSSLROOTCERT=<bundle.pem> %s\n"+
 			"   The SQL to run:",
-			t.InstanceID, err)
+			t.InstanceID, err, grantRerunHint(t, ""))
 	case collector.GrantFailedUnreachable:
 		msg = fmt.Sprintf("⚠  couldn't reach %s from here (%v).\n"+
 			"   A private database often isn't reachable from where you run the CLI — run this SQL where it is:", t.InstanceID, err)

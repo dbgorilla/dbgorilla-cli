@@ -1048,18 +1048,18 @@ func TestApplyGrants_FailureNamesTheCause(t *testing.T) {
 		reject []string
 	}{
 		{"a guessed admin is called a guess, with where to look", completeTarget(), authErr,
-			[]string{`rejected the admin login "postgres"`, "was assumed", "Master username", "--grant-user <admin-user>"},
+			[]string{`rejected the admin login "postgres"`, "was assumed", "Master username", "--grant-only --db-instance-id prod-db", "--grant-user <admin-user>"},
 			[]string{"private database"}},
 		{"the RDS master user points at the password", withMaster, authErr,
 			[]string{`rejected the admin login "db_admin"`, "master user, as RDS reports it", "--grant-user"},
 			[]string{"was assumed", "private database"}},
 		{"an untrusted certificate is not blamed on the network", withMaster,
 			fmt.Errorf("tls: %w", x509.UnknownAuthorityError{}),
-			[]string{"couldn't verify", "TLS certificate", "truststore.pki.rds.amazonaws.com", "PGSSLROOTCERT=<bundle.pem>"},
+			[]string{"couldn't verify", "TLS certificate", "truststore.pki.rds.amazonaws.com", "PGSSLROOTCERT=<bundle.pem> dbg collector install --target aws --grant-only --db-instance-id prod-db"},
 			[]string{"private database"}},
 		{"a login without CREATEROLE says so", withMaster,
 			fmt.Errorf("CREATE USER -> %w", &pgconn.PgError{Code: "42501"}),
-			[]string{"isn't allowed to create or grant roles", "--grant-user <master-user>"},
+			[]string{"isn't allowed to create or grant roles", "--grant-only --db-instance-id prod-db", "--grant-user <master-user>"},
 			[]string{"private database"}},
 		{"an unreachable database keeps the private-network hint", withMaster,
 			&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("i/o timeout")},
@@ -1215,6 +1215,83 @@ func TestApplyGrants_PasswordsPerDatabase(t *testing.T) {
 		}
 		if p, _ := u.User.Password(); p != want {
 			t.Errorf("grant %d used password %q, want %q", i, p, want)
+		}
+	}
+}
+
+// --grant-only retries the grant without touching the stack: on a machine with
+// a collector, a plain re-run of install would update it to monitor only the
+// databases that run names.
+func TestRunInstallAWS_GrantOnlyLeavesTheCollectorAlone(t *testing.T) {
+	isolate(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	update := stubUpdateComponents(t, nil)
+	grants := stubRunGrantDSNs(t, nil)
+	if err := collector.SaveState(&collector.State{AgentID: "agent-aws", Target: "aws",
+		StackName: "dbg-collector", Region: "us-east-1", TargetName: "prod (+2 more)"}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := awsCmd(t)
+	mustSet(t, c, "grant-only", "true")
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "grant-password", "pw")
+	mustSet(t, c, "yes", "true")
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("grant-only: %v\n%s", err, out)
+	}
+	if update.called || deploys.count != 0 {
+		t.Errorf("grant-only changed the collector (update=%v, deploys=%d)", update.called, deploys.count)
+	}
+	if len(*grants) != 1 {
+		t.Fatalf("grants = %v, want one", *grants)
+	}
+	st, _ := collector.LoadState()
+	if st == nil || st.TargetName != "prod (+2 more)" {
+		t.Errorf("state changed: %+v", st)
+	}
+}
+
+func TestRunInstallAWS_GrantOnlyDryRunPrintsTheSQL(t *testing.T) {
+	isolate(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	grants := stubRunGrantDSNs(t, nil)
+
+	c := awsCmd(t)
+	mustSet(t, c, "grant-only", "true")
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "dry-run", "true")
+	mustSet(t, c, "yes", "true")
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("grant-only dry run: %v\n%s", err, out)
+	}
+	if len(*grants) != 0 {
+		t.Errorf("a dry run ran %d grant(s)", len(*grants))
+	}
+	if !strings.Contains(out, "left unchanged") || !strings.Contains(out, "on prod-db") {
+		t.Errorf("dry run output:\n%s", out)
+	}
+}
+
+func TestGrantRerunHint(t *testing.T) {
+	base := completeTarget()
+	base.User, base.Databases = collector.DefaultDBUser, nil
+	if got, want := grantRerunHint(base, ""), "dbg collector install --target aws --grant-only --db-instance-id prod-db"; got != want {
+		t.Errorf("default user: %q, want %q", got, want)
+	}
+	custom := completeTarget()
+	custom.User, custom.Databases = "dbg_ro", []string{"app", "billing"}
+	got := grantRerunHint(custom, "--grant-user <admin-user>")
+	for _, w := range []string{"--db-user dbg_ro", "--db-name app,billing", "--grant-user <admin-user>"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("hint %q lacks %q", got, w)
 		}
 	}
 }
