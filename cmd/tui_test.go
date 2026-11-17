@@ -102,7 +102,9 @@ func TestPromptPasswordOptional_UnansweredMeansNoPassword(t *testing.T) {
 
 func TestPromptGrantPassword_UnansweredMeansNoPassword(t *testing.T) {
 	var got string
-	scriptForm(t, "", func() { got = promptGrantPassword(grantAdmin{user: "postgres", source: grantAdminFallback}, "prod-db") })
+	scriptForm(t, "", func() {
+		got = promptGrantPassword(grantAdmin{user: "postgres", source: grantAdminFallback}, "prod-db", "")
+	})
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}

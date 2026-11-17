@@ -61,8 +61,11 @@ var (
 	upgradeImage      = collector.UpgradeImage
 	checkNetworkPath  = collector.VerifyNetworkPath
 	ensureECSRole     = collector.EnsureECSServiceLinkedRole
-	runGrant          = collector.RunGrant
-	reachable         = collector.Reachable
+	// promptGrantPasswordFn is a seam so tests can answer the per-database
+	// admin password prompt.
+	promptGrantPasswordFn = promptGrantPassword
+	runGrant              = collector.RunGrant
+	reachable             = collector.Reachable
 	// runFargateDeploy / runFargateDeployQuiet are method expressions (not
 	// wrapping closures) so the production defaults carry no uncovered
 	// statement of their own.
@@ -657,27 +660,18 @@ func applyGrants(cmd *cobra.Command, targets []collector.AwsTarget) {
 		return
 	}
 
-	// Settle every database's admin login before connecting anywhere, asking
-	// once per distinct admin user rather than once per database.
+	// Settle every database's admin login before connecting anywhere.
 	flagPass, _ := cmd.Flags().GetString("grant-password")
-	passwords := map[string]string{}
 	admins := make([]grantAdmin, len(plan.Targets))
 	for i, t := range plan.Targets {
 		admins[i] = resolveGrantAdmin(cmd, t)
-		if _, ok := passwords[admins[i].user]; ok {
-			continue
-		}
-		pass := flagPass
-		if pass == "" {
-			pass = promptGrantPassword(admins[i], t.InstanceID)
-		}
-		passwords[admins[i].user] = pass
 	}
+	passwords := settleGrantPasswords(plan.Targets, admins, flagPass, promptGrantPasswordFn)
 
 	fmt.Println("\nGranting the collector's IAM user access inside each database...")
 	for i, t := range plan.Targets {
 		admin := admins[i]
-		dsn := collector.AdminDSN(admin.user, passwords[admin.user], t)
+		dsn := collector.AdminDSN(admin.user, passwords[i], t)
 		if err := runGrant(cmd.Context(), dsn, collector.GrantStatements(t.User, t.Databases)); err != nil {
 			reportGrantFailure(t, admin, err)
 			continue
@@ -753,7 +747,10 @@ func reportGrantFailure(t collector.AwsTarget, admin grantAdmin, err error) {
 	case collector.GrantFailedTLS:
 		msg = fmt.Sprintf("⚠  couldn't verify %s's TLS certificate (%v).\n"+
 			"   Run this SQL from a client that trusts the database's certificate authority"+
-			" (for RDS, sslrootcert=global-bundle.pem from https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem):",
+			" (for RDS, sslrootcert=global-bundle.pem from https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem).\n"+
+			"   Or re-run with the right CA bundle (AWS GovCloud and China regions publish their own):"+
+			"  PGSSLROOTCERT=<bundle.pem> dbg collector install --target aws --run-grant\n"+
+			"   The SQL to run:",
 			t.InstanceID, err)
 	case collector.GrantFailedUnreachable:
 		msg = fmt.Sprintf("⚠  couldn't reach %s from here (%v).\n"+
@@ -795,10 +792,57 @@ func printGrantFor(t collector.AwsTarget) {
 	}
 }
 
-func promptGrantPassword(admin grantAdmin, instance string) string {
+// settleGrantPasswords returns the admin password for each target's grant,
+// in targets order. An explicit --grant-password applies to every database.
+// Otherwise each database is asked for separately: the same admin name (RDS's
+// default "postgres", typically) rarely means the same password on another
+// instance, so a password is only ever reused for a database when the user
+// asks to by leaving that database's prompt blank. One database means one
+// prompt.
+func settleGrantPasswords(targets []collector.AwsTarget, admins []grantAdmin, flagPass string,
+	ask func(admin grantAdmin, instance, reuseFrom string) string) []string {
+	passwords := make([]string, len(targets))
+	if flagPass != "" {
+		for i := range passwords {
+			passwords[i] = flagPass
+		}
+		return passwords
+	}
+	type key struct{ instance, user string }
+	asked := map[key]int{}          // instance+user -> index already answered
+	lastForUser := map[string]int{} // admin user -> index of its latest answer
+	for i, t := range targets {
+		k := key{t.InstanceID, admins[i].user}
+		if j, ok := asked[k]; ok {
+			passwords[i] = passwords[j]
+			continue
+		}
+		reuseFrom := ""
+		prev, hasPrev := lastForUser[admins[i].user]
+		if hasPrev {
+			reuseFrom = targets[prev].InstanceID
+		}
+		pass := ask(admins[i], t.InstanceID, reuseFrom)
+		if pass == "" && hasPrev {
+			pass = passwords[prev]
+		}
+		passwords[i] = pass
+		asked[k] = i
+		lastForUser[admins[i].user] = i
+	}
+	return passwords
+}
+
+// promptGrantPassword asks for the admin password of one database. reuseFrom,
+// when set, names an earlier database with the same admin user whose password
+// a blank answer reuses.
+func promptGrantPassword(admin grantAdmin, instance, reuseFrom string) string {
 	label := fmt.Sprintf("Admin password for %q on %s (used once for this grant, not stored)", admin.user, instance)
 	if admin.source == grantAdminFromRDS {
 		label = fmt.Sprintf("Password for %q, %s's master user (used once for this grant, not stored)", admin.user, instance)
+	}
+	if reuseFrom != "" {
+		label += fmt.Sprintf("; leave blank to reuse the one entered for %s", reuseFrom)
 	}
 	return promptPasswordOptional(label)
 }

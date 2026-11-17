@@ -1055,7 +1055,7 @@ func TestApplyGrants_FailureNamesTheCause(t *testing.T) {
 			[]string{"was assumed", "private database"}},
 		{"an untrusted certificate is not blamed on the network", withMaster,
 			fmt.Errorf("tls: %w", x509.UnknownAuthorityError{}),
-			[]string{"couldn't verify", "TLS certificate", "truststore.pki.rds.amazonaws.com"},
+			[]string{"couldn't verify", "TLS certificate", "truststore.pki.rds.amazonaws.com", "PGSSLROOTCERT=<bundle.pem>"},
 			[]string{"private database"}},
 		{"a login without CREATEROLE says so", withMaster,
 			fmt.Errorf("CREATE USER -> %w", &pgconn.PgError{Code: "42501"}),
@@ -1102,6 +1102,119 @@ func TestApplyGrants_PrintedSQLExplainsItself(t *testing.T) {
 	for _, w := range []string{"never needs a password", "rds_iam once", `connected as its admin user ("db_admin")`} {
 		if !strings.Contains(out, w) {
 			t.Errorf("output lacks %q:\n%s", w, out)
+		}
+	}
+}
+
+// --- grant passwords: one per database, never reused silently --------------
+
+type askCall struct{ user, instance, reuseFrom string }
+
+// scriptedAsk answers each password prompt from answers in order and records
+// what was asked.
+func scriptedAsk(answers ...string) (func(grantAdmin, string, string) string, *[]askCall) {
+	calls := new([]askCall)
+	return func(a grantAdmin, instance, reuseFrom string) string {
+		*calls = append(*calls, askCall{a.user, instance, reuseFrom})
+		ans := ""
+		if len(*calls) <= len(answers) {
+			ans = answers[len(*calls)-1]
+		}
+		return ans
+	}, calls
+}
+
+func grantTargets(ids ...string) []collector.AwsTarget {
+	var out []collector.AwsTarget
+	for _, id := range ids {
+		t := completeTarget()
+		t.InstanceID = id
+		out = append(out, t)
+	}
+	return out
+}
+
+func sameAdmins(n int, user string) []grantAdmin {
+	out := make([]grantAdmin, n)
+	for i := range out {
+		out[i] = grantAdmin{user: user, source: grantAdminFromRDS}
+	}
+	return out
+}
+
+func TestSettleGrantPasswords(t *testing.T) {
+	t.Run("one database asks once, naming it", func(t *testing.T) {
+		ask, calls := scriptedAsk("pw-a")
+		got := settleGrantPasswords(grantTargets("db-a"), sameAdmins(1, "postgres"), "", ask)
+		if len(*calls) != 1 || (*calls)[0] != (askCall{"postgres", "db-a", ""}) {
+			t.Fatalf("asked %v, want one prompt for db-a with no reuse offer", *calls)
+		}
+		if got[0] != "pw-a" {
+			t.Fatalf("passwords = %v", got)
+		}
+	})
+	t.Run("same admin user on two databases is asked per database", func(t *testing.T) {
+		ask, calls := scriptedAsk("pw-a", "pw-b")
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), sameAdmins(2, "postgres"), "", ask)
+		want := []askCall{{"postgres", "db-a", ""}, {"postgres", "db-b", "db-a"}}
+		if len(*calls) != 2 || (*calls)[0] != want[0] || (*calls)[1] != want[1] {
+			t.Fatalf("asked %v, want %v", *calls, want)
+		}
+		if got[0] != "pw-a" || got[1] != "pw-b" {
+			t.Fatalf("passwords = %v, want each database's own", got)
+		}
+	})
+	t.Run("a blank answer reuses the earlier password for that user", func(t *testing.T) {
+		ask, _ := scriptedAsk("pw-a", "")
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), sameAdmins(2, "postgres"), "", ask)
+		if got[1] != "pw-a" {
+			t.Fatalf("passwords = %v, want db-b to reuse db-a's", got)
+		}
+	})
+	t.Run("a different admin user is not offered another user's password", func(t *testing.T) {
+		ask, calls := scriptedAsk("pw-a", "")
+		admins := []grantAdmin{{user: "postgres"}, {user: "admin"}}
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), admins, "", ask)
+		if (*calls)[1].reuseFrom != "" || got[1] != "" {
+			t.Fatalf("asked %v, passwords %v: a different user must not reuse", *calls, got)
+		}
+	})
+	t.Run("--grant-password applies everywhere without asking", func(t *testing.T) {
+		ask, calls := scriptedAsk()
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), sameAdmins(2, "postgres"), "flag-pw", ask)
+		if len(*calls) != 0 || got[0] != "flag-pw" || got[1] != "flag-pw" {
+			t.Fatalf("asked %v, passwords %v", *calls, got)
+		}
+	})
+}
+
+// Two databases with the same master user each connect with their own password.
+func TestApplyGrants_PasswordsPerDatabase(t *testing.T) {
+	isolate(t)
+	dsns := stubRunGrantDSNs(t, nil)
+	orig := promptGrantPasswordFn
+	answers := map[string]string{"db-a": "pw-a", "db-b": "pw-b"}
+	promptGrantPasswordFn = func(_ grantAdmin, instance, _ string) string { return answers[instance] }
+	t.Cleanup(func() { promptGrantPasswordFn = orig })
+
+	c := awsCmd(t)
+	mustSet(t, c, "run-grant", "true")
+	mustSet(t, c, "yes", "true")
+	targets := grantTargets("db-a", "db-b")
+	for i := range targets {
+		targets[i].MasterUser = "postgres"
+	}
+	capture(t, func() { applyGrants(c, targets) })
+	if len(*dsns) != 2 {
+		t.Fatalf("grants = %v, want 2", *dsns)
+	}
+	for i, want := range []string{"pw-a", "pw-b"} {
+		u, err := url.Parse((*dsns)[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := u.User.Password(); p != want {
+			t.Errorf("grant %d used password %q, want %q", i, p, want)
 		}
 	}
 }
