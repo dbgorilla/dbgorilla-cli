@@ -35,7 +35,7 @@ func TestProbePostgres(t *testing.T) {
 	}{
 		{"postgres without TLS", func(c net.Conn) { _, _ = c.Write([]byte("N")) }, SpeaksPostgres},
 		{"postgres with TLS", func(c net.Conn) { _, _ = c.Write([]byte("S")) }, SpeaksPostgres},
-		{"closes the connection, as Cassandra does", func(net.Conn) {}, SpeaksOther},
+		{"closes without a reply, as Cassandra 5.0.9 does", func(net.Conn) {}, SpeaksClosed},
 		{"replies with something else", func(c net.Conn) { _, _ = c.Write([]byte("HTTP/1.1 400")) }, SpeaksOther},
 		{"says nothing", func(net.Conn) { time.Sleep(500 * time.Millisecond) }, SpeaksUnknown},
 	}
@@ -65,11 +65,33 @@ func TestProbePostgresOldServerError(t *testing.T) {
 	}
 }
 
+// A failed write means the probe never asked, so it cannot tell.
 func TestProbeConnWriteFails(t *testing.T) {
 	ours, theirs := net.Pipe()
 	_ = theirs.Close()
 	defer func() { _ = ours.Close() }()
-	if got := probeConn(ours, 200*time.Millisecond); got != SpeaksOther {
-		t.Fatalf("got %v, want SpeaksOther", got)
+	if got := probeConn(ours, 200*time.Millisecond); got != SpeaksUnknown {
+		t.Fatalf("got %v, want SpeaksUnknown", got)
+	}
+}
+
+// A forwarder whose backend is down (docker-proxy, ssh -L, kubectl
+// port-forward) accepts and then closes: ambiguous, not a definite "other".
+func TestProbePostgresForwarderWithNoBackend(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		// Close before reading: the forwarder gave up on its upstream dial.
+		_ = c.Close()
+	}()
+	if got := ProbePostgres(ln.Addr().String(), 500*time.Millisecond); got != SpeaksClosed {
+		t.Fatalf("got %v, want SpeaksClosed", got)
 	}
 }

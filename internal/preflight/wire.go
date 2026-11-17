@@ -17,10 +17,16 @@ const (
 	// SpeaksPostgres means the server answered the SSL request the way only a
 	// PostgreSQL server does.
 	SpeaksPostgres
-	// SpeaksOther means something answered on the port but it is not
-	// PostgreSQL: it closed or reset the connection, or replied with bytes
-	// PostgreSQL never sends.
+	// SpeaksOther means something answered on the port with bytes PostgreSQL
+	// never sends in reply to an SSLRequest. That is a definite answer.
 	SpeaksOther
+	// SpeaksClosed means the connection was closed or reset without a reply.
+	// That is ambiguous: a server that is not PostgreSQL does it (Cassandra
+	// 5.0.9 closes without a byte), but so does a forwarder whose backend is
+	// not there, such as docker-proxy while the container is still starting,
+	// ssh -L or kubectl port-forward to an unreachable host, or a Cloud SQL
+	// Auth Proxy whose upstream dial failed.
+	SpeaksClosed
 )
 
 // sslRequest is PostgreSQL's SSLRequest message: length 8, code 80877103.
@@ -45,14 +51,14 @@ func ProbePostgres(addr string, timeout time.Duration) Speaks {
 func probeConn(conn net.Conn, timeout time.Duration) Speaks {
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write(sslRequest); err != nil {
-		return SpeaksOther
+		return SpeaksUnknown // could not even ask; let the real preflight report it
 	}
 	reply := make([]byte, 1)
 	if _, err := conn.Read(reply); err != nil {
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			return SpeaksUnknown
 		}
-		return SpeaksOther // closed or reset: Cassandra and most other servers do this
+		return SpeaksClosed // closed or reset: a foreign server, or a forwarder with no backend
 	}
 	switch reply[0] {
 	case 'S', 'N':
