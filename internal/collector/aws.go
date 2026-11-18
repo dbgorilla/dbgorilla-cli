@@ -58,6 +58,10 @@ type AwsTarget struct {
 	// different group the task runs in. Empty when the target skipped discovery.
 	DBSecurityGroups []string
 	IAMAuthOn        bool // whether the instance has IAM auth enabled (warn if not)
+	// MasterUser is the instance's (or cluster's) admin login as RDS reports
+	// it, captured at discovery so the one-time grant can ask for the right
+	// password. Empty when the target skipped discovery.
+	MasterUser string
 }
 
 // rdsInstance is the subset of an RDS instance the discovery reads, mapped from
@@ -68,6 +72,7 @@ type rdsInstance struct {
 	DbiResourceID  string
 	DBName         string
 	IAMAuthEnabled bool
+	MasterUser     string
 	Host           string
 	Port           int
 	Subnets        []string
@@ -193,6 +198,7 @@ func mergeInstance(into AwsTarget, inst *rdsInstance) AwsTarget {
 	}
 	t.DBSecurityGroups = activeSGs(inst.SecurityGroups)
 	t.IAMAuthOn = inst.IAMAuthEnabled
+	t.MasterUser = orDefault(t.MasterUser, inst.MasterUser)
 	return t
 }
 
@@ -228,6 +234,7 @@ type rdsCluster struct {
 	ResourceID     string // DbClusterResourceId
 	DatabaseName   string
 	IAMAuthEnabled bool
+	MasterUser     string
 	SubnetGroup    string // subnet group name (a second lookup resolves its subnets)
 	SecurityGroups []sgMembership
 }
@@ -266,6 +273,7 @@ func clusterFromSDK(in rdstypes.DBCluster) *rdsCluster {
 		ResourceID:     aws.ToString(in.DbClusterResourceId),
 		DatabaseName:   aws.ToString(in.DatabaseName),
 		IAMAuthEnabled: aws.ToBool(in.IAMDatabaseAuthenticationEnabled),
+		MasterUser:     aws.ToString(in.MasterUsername),
 		SubnetGroup:    aws.ToString(in.DBSubnetGroup),
 	}
 	for _, g := range in.VpcSecurityGroups {
@@ -324,6 +332,7 @@ func mergeCluster(into AwsTarget, c *rdsCluster, subnets []string) AwsTarget {
 	}
 	t.DBSecurityGroups = activeSGs(c.SecurityGroups)
 	t.IAMAuthOn = c.IAMAuthEnabled
+	t.MasterUser = orDefault(t.MasterUser, c.MasterUser)
 	return t
 }
 
@@ -395,6 +404,7 @@ func instanceFromSDK(in rdstypes.DBInstance) *rdsInstance {
 		DbiResourceID:  aws.ToString(in.DbiResourceId),
 		DBName:         aws.ToString(in.DBName),
 		IAMAuthEnabled: aws.ToBool(in.IAMDatabaseAuthenticationEnabled),
+		MasterUser:     aws.ToString(in.MasterUsername),
 	}
 	if in.Endpoint != nil {
 		r.Host = aws.ToString(in.Endpoint.Address)
@@ -755,7 +765,12 @@ func GrantStatements(user string, databases []string) []string {
 // private RDS unreachable from here returns a connection error, and the command
 // layer falls back to printing the SQL.
 func RunGrant(ctx context.Context, dsn string, statements []string) error {
-	conn, err := pgx.Connect(ctx, dsn)
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return err
+	}
+	trustRDSCAs(cfg)
+	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}

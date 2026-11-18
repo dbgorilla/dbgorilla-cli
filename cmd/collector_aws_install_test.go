@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/collector"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The `--target aws` install is the most destructive path in the CLI: it mints
@@ -883,5 +887,411 @@ func TestRunInstallAWS_DryRunOnAnExistingStackPreviewsTheUpdate(t *testing.T) {
 	}
 	if !strings.Contains(out, `commands = ["explain"]`) || !strings.Contains(out, "updates it in place") {
 		t.Errorf("output does not show the update it would make:\n%s", out)
+	}
+}
+
+// --- ECS service-linked role ---------------------------------------------
+
+func ecsRoleInstall(t *testing.T, status collector.ECSRoleStatus, roleErr error, dryRun bool) (string, *[]bool, *deployCall, error) {
+	t.Helper()
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	calls := stubECSRole(t, status, roleErr)
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	srv := installServer(t, "agent-aws")
+	t.Cleanup(srv.Close)
+
+	c := awsCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+	if dryRun {
+		mustSet(t, c, "dry-run", "true")
+	}
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	return out, calls, deploys, err
+}
+
+// An account that has never used ECS gets the role before anything is minted,
+// so the stack's cluster doesn't fail on first install.
+func TestRunInstallAWS_CreatesTheECSRoleOnFirstUse(t *testing.T) {
+	out, calls, deploys, err := ecsRoleInstall(t, collector.ECSRoleCreated, nil, false)
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if len(*calls) != 1 || (*calls)[0] {
+		t.Fatalf("ECS role check calls = %v, want one real (non-dry-run) call", *calls)
+	}
+	if !strings.Contains(out, "Created the AWSServiceRoleForECS role") {
+		t.Errorf("output should say the role was created:\n%s", out)
+	}
+	if deploys.count != 1 {
+		t.Errorf("deploys = %d, want 1", deploys.count)
+	}
+}
+
+// A role that is missing and can't be created means the deploy would fail, so
+// stop before an identity is minted.
+func TestRunInstallAWS_StopsWhenTheECSRoleCannotBeCreated(t *testing.T) {
+	roleErr := errors.New("its AWSServiceRoleForECS role could not be created: AccessDenied\n" +
+		"   Ask an account administrator to run, once:\n     " + collector.ECSRoleCreateCommand)
+	out, _, deploys, err := ecsRoleInstall(t, collector.ECSRoleMissing, roleErr, false)
+	if err == nil || !strings.Contains(err.Error(), collector.ECSRoleCreateCommand) {
+		t.Fatalf("err = %v, want the role error with its fix", err)
+	}
+	if deploys.count != 0 {
+		t.Error("nothing should deploy without the ECS role")
+	}
+	if strings.Contains(out, "Provisioning collector identity") {
+		t.Error("no identity should be minted when the install can't proceed")
+	}
+	if st, _ := collector.LoadState(); st != nil {
+		t.Error("no state should be saved")
+	}
+}
+
+// A dry run asks without creating, and says what the real run will do.
+func TestRunInstallAWS_DryRunReportsAMissingECSRole(t *testing.T) {
+	out, calls, _, err := ecsRoleInstall(t, collector.ECSRoleMissing, nil, true)
+	if err != nil {
+		t.Fatalf("dry run: %v\n%s", err, out)
+	}
+	if len(*calls) != 1 || !(*calls)[0] {
+		t.Fatalf("ECS role check calls = %v, want one dry-run call", *calls)
+	}
+	if !strings.Contains(out, "a real install will first create the AWSServiceRoleForECS role") {
+		t.Errorf("dry run should say the role will be created:\n%s", out)
+	}
+}
+
+// Without iam:GetRole the check can't tell. The role most likely exists, so
+// the install warns, names the symptom to watch for, and carries on.
+func TestRunInstallAWS_UnknownECSRoleWarnsAndContinues(t *testing.T) {
+	out, _, deploys, err := ecsRoleInstall(t, collector.ECSRoleUnknown,
+		errors.New("could not check for the AWSServiceRoleForECS role: AccessDenied"), false)
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Unable to assume the service linked role") || !strings.Contains(out, collector.ECSRoleCreateCommand) {
+		t.Errorf("warning should name the symptom and the fix:\n%s", out)
+	}
+	if deploys.count != 1 {
+		t.Errorf("deploys = %d, want 1", deploys.count)
+	}
+}
+
+// --- grant admin login and failure messages -------------------------------
+
+// grantWith runs applyGrants with --run-grant and a fixed password, so no
+// prompt is involved; it returns the output and the DSNs the grant used.
+func grantWith(t *testing.T, target collector.AwsTarget, grantUser string, grantErr error) (string, []string) {
+	t.Helper()
+	isolate(t)
+	dsns := stubRunGrantDSNs(t, grantErr)
+	c := awsCmd(t)
+	mustSet(t, c, "run-grant", "true")
+	mustSet(t, c, "grant-password", "pw123")
+	mustSet(t, c, "yes", "true")
+	if grantUser != "" {
+		mustSet(t, c, "grant-user", grantUser)
+	}
+	out := capture(t, func() { applyGrants(c, []collector.AwsTarget{target}) })
+	return out, *dsns
+}
+
+func dsnUser(t *testing.T, dsn string) string {
+	t.Helper()
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse %q: %v", dsn, err)
+	}
+	return u.User.Username()
+}
+
+func TestApplyGrants_AdminLogin(t *testing.T) {
+	withMaster := completeTarget()
+	withMaster.MasterUser = "db_admin"
+
+	t.Run("the master user RDS reports is used by default", func(t *testing.T) {
+		_, dsns := grantWith(t, withMaster, "", nil)
+		if len(dsns) != 1 || dsnUser(t, dsns[0]) != "db_admin" {
+			t.Fatalf("dsns = %v, want one grant as db_admin", dsns)
+		}
+	})
+	t.Run("an explicit --grant-user wins", func(t *testing.T) {
+		_, dsns := grantWith(t, withMaster, "ops", nil)
+		if len(dsns) != 1 || dsnUser(t, dsns[0]) != "ops" {
+			t.Fatalf("dsns = %v, want one grant as ops", dsns)
+		}
+	})
+	t.Run("with nothing known, postgres is assumed", func(t *testing.T) {
+		_, dsns := grantWith(t, completeTarget(), "", nil)
+		if len(dsns) != 1 || dsnUser(t, dsns[0]) != "postgres" {
+			t.Fatalf("dsns = %v, want one grant as postgres", dsns)
+		}
+	})
+}
+
+func TestApplyGrants_FailureNamesTheCause(t *testing.T) {
+	authErr := fmt.Errorf("failed to connect: %w", &pgconn.PgError{Code: "28P01", Message: "password authentication failed"})
+	withMaster := completeTarget()
+	withMaster.MasterUser = "db_admin"
+
+	cases := []struct {
+		name   string
+		target collector.AwsTarget
+		err    error
+		want   []string
+		reject []string
+	}{
+		{"a guessed admin is called a guess, with where to look", completeTarget(), authErr,
+			[]string{`rejected the admin login "postgres"`, "was assumed", "Master username", "--grant-only --db-instance-id prod-db", "--grant-user <admin-user>"},
+			[]string{"private database"}},
+		{"the RDS master user points at the password", withMaster, authErr,
+			[]string{`rejected the admin login "db_admin"`, "master user, as RDS reports it", "--grant-user"},
+			[]string{"was assumed", "private database"}},
+		{"an untrusted certificate is not blamed on the network", withMaster,
+			fmt.Errorf("tls: %w", x509.UnknownAuthorityError{}),
+			[]string{"couldn't verify", "TLS certificate", "truststore.pki.rds.amazonaws.com", "PGSSLROOTCERT=<bundle.pem> dbg collector install --target aws --grant-only --db-instance-id prod-db"},
+			[]string{"private database"}},
+		{"a login without CREATEROLE says so", withMaster,
+			fmt.Errorf("CREATE USER -> %w", &pgconn.PgError{Code: "42501"}),
+			[]string{"isn't allowed to create or grant roles", "--grant-only --db-instance-id prod-db", "--grant-user <master-user>"},
+			[]string{"private database"}},
+		{"an unreachable database keeps the private-network hint", withMaster,
+			&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("i/o timeout")},
+			[]string{"couldn't reach", "private database"}, nil},
+		{"anything else shows the error itself", withMaster, errors.New("something odd"),
+			[]string{"the grant on prod-db failed (something odd)"}, []string{"private database"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, _ := grantWith(t, c.target, "", c.err)
+			for _, w := range c.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("output lacks %q:\n%s", w, out)
+				}
+			}
+			for _, r := range c.reject {
+				if strings.Contains(out, r) {
+					t.Errorf("output should not say %q:\n%s", r, out)
+				}
+			}
+			// Whatever the cause, the user is never left without the SQL.
+			if !strings.Contains(out, "GRANT rds_iam") {
+				t.Errorf("the SQL must always be printed on failure:\n%s", out)
+			}
+		})
+	}
+}
+
+// When the SQL is only printed, it says why an IAM install needs it and which
+// login to run it as.
+func TestApplyGrants_PrintedSQLExplainsItself(t *testing.T) {
+	isolate(t)
+	stubRunGrant(t, nil)
+	c := awsCmd(t)
+	mustSet(t, c, "yes", "true")
+	target := completeTarget()
+	target.MasterUser = "db_admin"
+
+	out := capture(t, func() { applyGrants(c, []collector.AwsTarget{target}) })
+	for _, w := range []string{"never needs a password", "rds_iam once", `connected as its admin user ("db_admin")`} {
+		if !strings.Contains(out, w) {
+			t.Errorf("output lacks %q:\n%s", w, out)
+		}
+	}
+}
+
+// --- grant passwords: one per database, never reused silently --------------
+
+type askCall struct{ user, instance, reuseFrom string }
+
+// scriptedAsk answers each password prompt from answers in order and records
+// what was asked.
+func scriptedAsk(answers ...string) (func(grantAdmin, string, string) string, *[]askCall) {
+	calls := new([]askCall)
+	return func(a grantAdmin, instance, reuseFrom string) string {
+		*calls = append(*calls, askCall{a.user, instance, reuseFrom})
+		ans := ""
+		if len(*calls) <= len(answers) {
+			ans = answers[len(*calls)-1]
+		}
+		return ans
+	}, calls
+}
+
+func grantTargets(ids ...string) []collector.AwsTarget {
+	var out []collector.AwsTarget
+	for _, id := range ids {
+		t := completeTarget()
+		t.InstanceID = id
+		out = append(out, t)
+	}
+	return out
+}
+
+func sameAdmins(n int, user string) []grantAdmin {
+	out := make([]grantAdmin, n)
+	for i := range out {
+		out[i] = grantAdmin{user: user, source: grantAdminFromRDS}
+	}
+	return out
+}
+
+func TestSettleGrantPasswords(t *testing.T) {
+	t.Run("one database asks once, naming it", func(t *testing.T) {
+		ask, calls := scriptedAsk("pw-a")
+		got := settleGrantPasswords(grantTargets("db-a"), sameAdmins(1, "postgres"), "", ask)
+		if len(*calls) != 1 || (*calls)[0] != (askCall{"postgres", "db-a", ""}) {
+			t.Fatalf("asked %v, want one prompt for db-a with no reuse offer", *calls)
+		}
+		if got[0] != "pw-a" {
+			t.Fatalf("passwords = %v", got)
+		}
+	})
+	t.Run("same admin user on two databases is asked per database", func(t *testing.T) {
+		ask, calls := scriptedAsk("pw-a", "pw-b")
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), sameAdmins(2, "postgres"), "", ask)
+		want := []askCall{{"postgres", "db-a", ""}, {"postgres", "db-b", "db-a"}}
+		if len(*calls) != 2 || (*calls)[0] != want[0] || (*calls)[1] != want[1] {
+			t.Fatalf("asked %v, want %v", *calls, want)
+		}
+		if got[0] != "pw-a" || got[1] != "pw-b" {
+			t.Fatalf("passwords = %v, want each database's own", got)
+		}
+	})
+	t.Run("a blank answer reuses the earlier password for that user", func(t *testing.T) {
+		ask, _ := scriptedAsk("pw-a", "")
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), sameAdmins(2, "postgres"), "", ask)
+		if got[1] != "pw-a" {
+			t.Fatalf("passwords = %v, want db-b to reuse db-a's", got)
+		}
+	})
+	t.Run("a different admin user is not offered another user's password", func(t *testing.T) {
+		ask, calls := scriptedAsk("pw-a", "")
+		admins := []grantAdmin{{user: "postgres"}, {user: "admin"}}
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), admins, "", ask)
+		if (*calls)[1].reuseFrom != "" || got[1] != "" {
+			t.Fatalf("asked %v, passwords %v: a different user must not reuse", *calls, got)
+		}
+	})
+	t.Run("--grant-password applies everywhere without asking", func(t *testing.T) {
+		ask, calls := scriptedAsk()
+		got := settleGrantPasswords(grantTargets("db-a", "db-b"), sameAdmins(2, "postgres"), "flag-pw", ask)
+		if len(*calls) != 0 || got[0] != "flag-pw" || got[1] != "flag-pw" {
+			t.Fatalf("asked %v, passwords %v", *calls, got)
+		}
+	})
+}
+
+// Two databases with the same master user each connect with their own password.
+func TestApplyGrants_PasswordsPerDatabase(t *testing.T) {
+	isolate(t)
+	dsns := stubRunGrantDSNs(t, nil)
+	orig := promptGrantPasswordFn
+	answers := map[string]string{"db-a": "pw-a", "db-b": "pw-b"}
+	promptGrantPasswordFn = func(_ grantAdmin, instance, _ string) string { return answers[instance] }
+	t.Cleanup(func() { promptGrantPasswordFn = orig })
+
+	c := awsCmd(t)
+	mustSet(t, c, "run-grant", "true")
+	mustSet(t, c, "yes", "true")
+	targets := grantTargets("db-a", "db-b")
+	for i := range targets {
+		targets[i].MasterUser = "postgres"
+	}
+	capture(t, func() { applyGrants(c, targets) })
+	if len(*dsns) != 2 {
+		t.Fatalf("grants = %v, want 2", *dsns)
+	}
+	for i, want := range []string{"pw-a", "pw-b"} {
+		u, err := url.Parse((*dsns)[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := u.User.Password(); p != want {
+			t.Errorf("grant %d used password %q, want %q", i, p, want)
+		}
+	}
+}
+
+// --grant-only retries the grant without touching the stack: on a machine with
+// a collector, a plain re-run of install would update it to monitor only the
+// databases that run names.
+func TestRunInstallAWS_GrantOnlyLeavesTheCollectorAlone(t *testing.T) {
+	isolate(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	deploys := stubDeploy(t, nil)
+	update := stubUpdateComponents(t, nil)
+	grants := stubRunGrantDSNs(t, nil)
+	if err := collector.SaveState(&collector.State{AgentID: "agent-aws", Target: "aws",
+		StackName: "dbg-collector", Region: "us-east-1", TargetName: "prod (+2 more)"}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := awsCmd(t)
+	mustSet(t, c, "grant-only", "true")
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "grant-password", "pw")
+	mustSet(t, c, "yes", "true")
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("grant-only: %v\n%s", err, out)
+	}
+	if update.called || deploys.count != 0 {
+		t.Errorf("grant-only changed the collector (update=%v, deploys=%d)", update.called, deploys.count)
+	}
+	if len(*grants) != 1 {
+		t.Fatalf("grants = %v, want one", *grants)
+	}
+	st, _ := collector.LoadState()
+	if st == nil || st.TargetName != "prod (+2 more)" {
+		t.Errorf("state changed: %+v", st)
+	}
+}
+
+func TestRunInstallAWS_GrantOnlyDryRunPrintsTheSQL(t *testing.T) {
+	isolate(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil)
+	grants := stubRunGrantDSNs(t, nil)
+
+	c := awsCmd(t)
+	mustSet(t, c, "grant-only", "true")
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "dry-run", "true")
+	mustSet(t, c, "yes", "true")
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("grant-only dry run: %v\n%s", err, out)
+	}
+	if len(*grants) != 0 {
+		t.Errorf("a dry run ran %d grant(s)", len(*grants))
+	}
+	if !strings.Contains(out, "left unchanged") || !strings.Contains(out, "on prod-db") {
+		t.Errorf("dry run output:\n%s", out)
+	}
+}
+
+func TestGrantRerunHint(t *testing.T) {
+	base := completeTarget()
+	base.User, base.Databases = collector.DefaultDBUser, nil
+	if got, want := grantRerunHint(base, ""), "dbg collector install --target aws --grant-only --db-instance-id prod-db"; got != want {
+		t.Errorf("default user: %q, want %q", got, want)
+	}
+	custom := completeTarget()
+	custom.User, custom.Databases = "dbg_ro", []string{"app", "billing"}
+	got := grantRerunHint(custom, "--grant-user <admin-user>")
+	for _, w := range []string{"--db-user dbg_ro", "--db-name app,billing", "--grant-user <admin-user>"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("hint %q lacks %q", got, w)
+		}
 	}
 }
