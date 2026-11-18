@@ -218,13 +218,8 @@ func runInstallLocal(cmd *cobra.Command) error {
 
 	// Reachability preflight from the host (the CLI runs on the host, so the
 	// original loopback host is correct here, not the container rewrite).
-	if err := checkReachable(target.HostDial()); err != nil {
-		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s", err)))
-		if !confirm(cmd, "Continue anyway?") {
-			return errors.New("aborted")
-		}
-	} else {
-		fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", target.HostDial())))
+	if err := checkTargetIsPostgres(cmd, target.HostDial()); err != nil {
+		return err
 	}
 
 	// Settle the TLS mode against what the server actually supports, before the
@@ -2358,6 +2353,72 @@ func resolveDBPassword(cmd *cobra.Command) (string, error) {
 		return "", errors.New("a database password is required")
 	}
 	return pw, nil
+}
+
+// errNotPostgres is returned when the target answers but is not PostgreSQL.
+// The installer only sets up PostgreSQL collectors; other engines take
+// credentials from the app and a hand-written collector.toml.
+func errNotPostgres(addr string) error {
+	return fmt.Errorf("%s is not a PostgreSQL server.\n"+
+		"  `dbg collector install --target docker` sets up PostgreSQL collectors only. Nothing has been provisioned.\n"+
+		"  For Cassandra or another database: in DBGorilla open Admin > Collectors, click\n"+
+		"  \"Create credentials\" under \"Deploy with your infrastructure as code\", and follow\n"+
+		"  the guide for your database at https://www.dbgorilla.com/docs/connect/", addr)
+}
+
+// checkTargetIsPostgres is the installer's first look at the database: is
+// anything listening, and is it PostgreSQL. An unreachable database only
+// warns, because it may be started later; a reachable one that answers like
+// something other than PostgreSQL stops the install unless --force is set.
+func checkTargetIsPostgres(cmd *cobra.Command, addr string) error {
+	if err := checkReachable(addr); err != nil {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s", err)))
+		if !confirm(cmd, "Continue anyway?") {
+			return errors.New("aborted")
+		}
+		return nil
+	}
+	fmt.Println(style.Success(fmt.Sprintf("✓ Database reachable at %s", addr)))
+	return requirePostgres(cmd, addr)
+}
+
+// requirePostgres checks that the target speaks PostgreSQL, before any
+// identity is minted.
+//
+//   - A definite foreign reply stops the install; --force carries on with a
+//     warning, as it does for other preflight failures.
+//   - A connection closed without a reply is ambiguous (a server that is not
+//     PostgreSQL, or a proxy/port-forward that could not reach the database),
+//     so it warns and asks, like an unreachable database; --yes or --force
+//     carries on.
+//   - An inconclusive probe carries on silently.
+func requirePostgres(cmd *cobra.Command, addr string) error {
+	force, _ := cmd.Flags().GetBool("force")
+	switch preflight.ProbePostgres(addr, 3*time.Second) {
+	case preflight.SpeaksOther:
+		if !force {
+			return errNotPostgres(addr)
+		}
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  %s does not answer like PostgreSQL. Continuing anyway (--force).", addr)))
+	case preflight.SpeaksClosed:
+		fmt.Println(style.Warn(warnClosedOnProbe(addr)))
+		if !force && !confirm(cmd, "Continue anyway?") {
+			return errors.New("aborted")
+		}
+	}
+	return nil
+}
+
+// warnClosedOnProbe names both causes of a connection closed on the
+// SSLRequest, since the probe cannot tell them apart.
+func warnClosedOnProbe(addr string) string {
+	return fmt.Sprintf("⚠  %s accepted the connection but closed it without answering PostgreSQL's SSL request.\n"+
+		"   Either it is not a PostgreSQL server, or a proxy or port-forward in front of it\n"+
+		"   (docker-proxy, ssh -L, kubectl port-forward, Cloud SQL Auth Proxy) could not reach the database,\n"+
+		"   or PostgreSQL is still starting.\n"+
+		"   `dbg collector install --target docker` sets up PostgreSQL collectors only. For Cassandra or\n"+
+		"   another database: in DBGorilla open Admin > Collectors, click \"Create credentials\" under\n"+
+		"   \"Deploy with your infrastructure as code\", and follow the guide at https://www.dbgorilla.com/docs/connect/", addr)
 }
 
 // checkReachable does a quick TCP dial so the most common local-dev failure
