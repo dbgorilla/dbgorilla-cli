@@ -1,10 +1,15 @@
 package collector
 
 import (
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestPlanGrants(t *testing.T) {
@@ -168,4 +173,34 @@ func TestResolveCommands_Precedence(t *testing.T) {
 			t.Error("unchecking every database should turn analysis off")
 		}
 	})
+}
+
+func TestClassifyGrantError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want GrantFailure
+	}{
+		{"wrong password", fmt.Errorf("failed to connect: %w", &pgconn.PgError{Code: "28P01", Message: `password authentication failed for user "postgres"`}), GrantFailedAuth},
+		{"no such role / no hba entry", &pgconn.PgError{Code: "28000"}, GrantFailedAuth},
+		{"not allowed to create roles", fmt.Errorf("CREATE USER x -> %w", &pgconn.PgError{Code: "42501"}), GrantFailedPrivilege},
+		{"other server error", &pgconn.PgError{Code: "42P01"}, GrantFailedOther},
+		{"untrusted certificate", fmt.Errorf("tls: %w", x509.UnknownAuthorityError{}), GrantFailedTLS},
+		{"wrong hostname", fmt.Errorf("tls: %w", x509.HostnameError{Host: "x"}), GrantFailedTLS},
+		{"connection refused", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}, GrantFailedUnreachable},
+		{"no such host", fmt.Errorf("dial: %w", &net.DNSError{Err: "no such host", Name: "db.invalid"}), GrantFailedUnreachable},
+		// Flattened errors (type lost upstream) still classify by message,
+		// using the exact shapes pgx produces.
+		{"flattened auth", errors.New(`failed SASL auth: FATAL: password authentication failed for user "postgres" (SQLSTATE 28P01)`), GrantFailedAuth},
+		{"flattened tls", errors.New("tls: failed to verify certificate: x509: certificate signed by unknown authority"), GrantFailedTLS},
+		{"flattened dial", errors.New("dial error: dial tcp 127.0.0.1:1: connect: connection refused"), GrantFailedUnreachable},
+		{"flattened timeout", errors.New("dial tcp: i/o timeout"), GrantFailedUnreachable},
+		{"unknown", errors.New("something else"), GrantFailedOther},
+		{"nil", nil, GrantFailedOther},
+	}
+	for _, c := range cases {
+		if got := ClassifyGrantError(c.err); got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+		}
+	}
 }
