@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/dbgorilla/dbgorilla-cli/internal/api"
@@ -268,6 +269,7 @@ func runSetupIDE(cmd *cobra.Command, _ []string) error {
 		}
 		installSkill(writer, scope, dryRun)
 		printClientWarnings(writer)
+		warnLegacyEntries(writer)
 		configured++
 	}
 
@@ -329,6 +331,12 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			if path, err := writer.ConfigPath(scope); err == nil {
 				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
 			}
+			for _, path := range ide.LegacyEntries(writer) {
+				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
+			}
+			for _, dir := range ide.LegacySkills(writer) {
+				fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
+			}
 			if host, ok := writer.(ide.SkillHost); ok {
 				if dir, err := host.SkillDir(scope); err == nil {
 					fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
@@ -364,6 +372,9 @@ func runRemoveIDE(cmd *cobra.Command) error {
 		case err != nil:
 			failed++
 			fmt.Println(style.Error(fmt.Sprintf("error: %v", err)))
+			// The old files are independent of the new one: a failure here
+			// (say, comments in the Copilot file) must not leave them behind.
+			removeLegacyEntries(writer)
 			continue
 		case res.Absent:
 			fmt.Printf("Nothing to remove: %s\n", res.Path)
@@ -371,6 +382,8 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			fmt.Println(style.Success("✓ Removed the dbgorilla entry from " + res.Path))
 			fmt.Printf("  Backup: %s\n", res.BackupPath)
 		}
+
+		removeLegacyEntries(writer)
 
 		if host, ok := writer.(ide.SkillHost); ok {
 			skill, err := ide.RemoveSkill(host, scope)
@@ -400,6 +413,49 @@ func runRemoveIDE(cmd *cobra.Command) error {
 	fmt.Println()
 	fmt.Println("The MCP API key is untouched and still valid. `dbgorilla logout --revoke-key` revokes it.")
 	return nil
+}
+
+// warnLegacyEntries names config files this CLI used to write for the client
+// that still hold a dbgorilla entry. They are left alone: a workspace file may
+// be committed and shared, and the user decides what happens to it.
+func warnLegacyEntries(a ide.Adapter) {
+	for _, path := range ide.LegacyEntries(a) {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  An older dbgorilla entry is still in %s.", path)))
+		fmt.Println(style.Warn("   The client reads both files and will list DBGorilla twice; delete that entry."))
+	}
+	for _, dir := range ide.LegacySkills(a) {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  An older DBGorilla skill is still in %s.", dir)))
+		fmt.Println(style.Warn("   The skill is now installed per user; delete that folder, and commit the deletion if it is tracked."))
+	}
+}
+
+// removeLegacyEntries clears the dbgorilla entry from files earlier versions
+// wrote for this client, so --remove undoes old setups as well as new ones.
+func removeLegacyEntries(w ide.Writer) {
+	for _, dir := range ide.LegacySkills(w) {
+		if _, err := ide.RemoveSkillDir(dir); err != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  Could not remove the older DBGorilla skill in %s: %v", dir, err)))
+			continue
+		}
+		fmt.Println(style.Success("✓ Removed the older DBGorilla skill from " + dir))
+	}
+	l, ok := w.(ide.LegacyLocator)
+	if !ok {
+		return
+	}
+	stale := ide.LegacyEntries(w)
+	for _, lw := range l.LegacyConfigs() {
+		res, err := ide.RemoveMCPConfig(lw, lw.DefaultScope())
+		switch {
+		case errors.Is(err, ide.ErrJSONCRefused) && slices.Contains(stale, res.Path):
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  %s has comments; remove its dbgorilla entry by hand.", res.Path)))
+		case err != nil && slices.Contains(stale, res.Path):
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  Could not clean %s: %v", res.Path, err)))
+		case res.Removed:
+			fmt.Println(style.Success("✓ Removed the dbgorilla entry from " + res.Path))
+			fmt.Printf("  Backup: %s\n", res.BackupPath)
+		}
+	}
 }
 
 // resolveSelectedAdapters maps the --client flag (or auto-detect) to a list

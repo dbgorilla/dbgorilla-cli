@@ -88,6 +88,27 @@ func InstallSkill(host SkillHost, scope Scope) (SkillResult, error) {
 	return res, nil
 }
 
+// LegacySkillLocator is implemented by clients whose skill an earlier
+// release of this CLI installed somewhere it no longer does.
+type LegacySkillLocator interface {
+	LegacySkillDirs() []string
+}
+
+// LegacySkills returns the old skill directories that still exist.
+func LegacySkills(a Adapter) []string {
+	l, ok := a.(LegacySkillLocator)
+	if !ok {
+		return nil
+	}
+	var found []string
+	for _, dir := range l.LegacySkillDirs() {
+		if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil {
+			found = append(found, dir)
+		}
+	}
+	return found
+}
+
 // RemoveSkill deletes the skill directory for the given host and scope.
 //
 // Removing the directory rather than the one file inside it is safe because
@@ -99,6 +120,13 @@ func RemoveSkill(host SkillHost, scope Scope) (SkillResult, error) {
 	if err != nil {
 		return SkillResult{}, err
 	}
+	return RemoveSkillDir(dir)
+}
+
+// RemoveSkillDir deletes one dbgorilla skill directory. The same reasoning
+// as RemoveSkill applies: nothing else lives in a directory named for this
+// integration.
+func RemoveSkillDir(dir string) (SkillResult, error) {
 	res := SkillResult{Path: filepath.Join(dir, "SKILL.md")}
 	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
 		res.Absent = true

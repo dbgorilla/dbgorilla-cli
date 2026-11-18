@@ -1,12 +1,19 @@
 package ide
 
 import (
+	"os"
 	"path/filepath"
 )
 
-// VSCode targets the official MCP support shipped in mid-2025. Its config
-// file uses the top-level key "servers" -- NOT "mcpServers". This is the
-// most common copy-paste mistake when wiring up MCP across IDEs.
+// VSCode writes the Copilot user file, $COPILOT_HOME/mcp-config.json or
+// ~/.copilot/mcp-config.json. VS Code's add-server flow labels its own
+// mcp.json files (workspace .vscode/mcp.json and the user-profile mcp.json)
+// deprecated, and reads the Copilot file through GitHub Copilot CLI
+// discovery, which is on by default. The Copilot file is the portable
+// format: top-level "mcpServers", not VS Code's "servers".
+//
+// There is no project scope: the only non-deprecated workspace destination
+// (workspace-root .mcp.json) sits behind an experimental VS Code setting.
 type VSCode struct{}
 
 func (v *VSCode) Name() string { return "VS Code" }
@@ -28,18 +35,56 @@ func (v *VSCode) Detect() bool {
 	return false
 }
 
-func (v *VSCode) SupportedScopes() []Scope { return []Scope{ScopeUser, ScopeProject} }
+func (v *VSCode) SupportedScopes() []Scope { return []Scope{ScopeUser} }
+func (v *VSCode) DefaultScope() Scope      { return ScopeUser }
 
-// DefaultScope: project. VS Code's MCP UX is built around .vscode/mcp.json
-// living next to the workspace -- that's the conventional place. Users who
-// want global setup pass --scope user explicitly.
-func (v *VSCode) DefaultScope() Scope { return ScopeProject }
-
-// ConfigPath:
-//   - Project: .vscode/mcp.json (in cwd)
-//   - User:    OS-specific Code/User/mcp.json
+// ConfigPath is the same on every OS. An empty COPILOT_HOME counts as unset.
 func (v *VSCode) ConfigPath(scope Scope) (string, error) {
-	if scope == ScopeProject {
+	if dir := os.Getenv("COPILOT_HOME"); dir != "" {
+		return filepath.Join(dir, "mcp-config.json"), nil
+	}
+	return filepath.Join(homeDir(), ".copilot", "mcp-config.json"), nil
+}
+
+func (v *VSCode) TopLevelKey() string { return "mcpServers" }
+
+// BuildEntry: the Copilot CLI reads this same file and lists "tools" as
+// required for a remote server (CLI command reference, "Remote server
+// configuration fields"), so every tool is enabled explicitly.
+func (v *VSCode) BuildEntry(mcpURL, apiKey string) map[string]any {
+	return map[string]any{
+		"type":  "http",
+		"url":   mcpURL,
+		"tools": []string{"*"},
+		"headers": map[string]string{
+			"Authorization": "Bearer " + apiKey,
+		},
+	}
+}
+
+// LegacyConfigs are the files earlier versions of this CLI wrote. They keep
+// working in VS Code, so an entry left there shows DBGorilla twice.
+func (v *VSCode) LegacyConfigs() []Writer {
+	return []Writer{&vscodeLegacy{scope: ScopeProject}, &vscodeLegacy{scope: ScopeUser}}
+}
+
+// vscodeLegacy addresses VS Code's own mcp.json files, so --remove can clean
+// them with the same merge contract as every other write.
+type vscodeLegacy struct{ scope Scope }
+
+func (l *vscodeLegacy) Name() string             { return "VS Code (mcp.json)" }
+func (l *vscodeLegacy) Slug() string             { return "vscode-legacy" }
+func (l *vscodeLegacy) Detect() bool             { return false }
+func (l *vscodeLegacy) SupportedScopes() []Scope { return []Scope{l.scope} }
+func (l *vscodeLegacy) DefaultScope() Scope      { return l.scope }
+func (l *vscodeLegacy) TopLevelKey() string      { return "servers" }
+func (l *vscodeLegacy) BuildEntry(u, k string) map[string]any {
+	return (&VSCode{}).BuildEntry(u, k)
+}
+
+// ConfigPath ignores its argument: each legacy writer is bound to one file.
+func (l *vscodeLegacy) ConfigPath(Scope) (string, error) {
+	if l.scope == ScopeProject {
 		cwd, err := getCWD()
 		if err != nil {
 			return "", err
@@ -56,18 +101,14 @@ func (v *VSCode) ConfigPath(scope Scope) (string, error) {
 	}
 }
 
-// TopLevelKey is "servers", not "mcpServers". This is the load-bearing
-// difference between VS Code and every other IDE in this package.
-func (v *VSCode) TopLevelKey() string { return "servers" }
-
-func (v *VSCode) BuildEntry(mcpURL, apiKey string) map[string]any {
-	return map[string]any{
-		"type": "http",
-		"url":  mcpURL,
-		"headers": map[string]string{
-			"Authorization": "Bearer " + apiKey,
-		},
+// LegacySkillDirs: release 0.9.0 defaulted VS Code to project scope, so its
+// skill landed in the working directory's .github/skills/dbgorilla.
+func (v *VSCode) LegacySkillDirs() []string {
+	dir, err := v.SkillDir(ScopeProject)
+	if err != nil {
+		return nil
 	}
+	return []string{dir}
 }
 
 // SkillDir: ~/.copilot/skills/dbgorilla (user) or .github/skills/dbgorilla
