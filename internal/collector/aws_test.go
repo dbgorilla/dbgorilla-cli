@@ -97,6 +97,7 @@ func sampleCluster() *rdsCluster {
 		ResourceID:     "cluster-XYZ789",
 		DatabaseName:   "app",
 		IAMAuthEnabled: true,
+		MasterUser:     "cluster_admin",
 		SubnetGroup:    "default-vpc-123",
 		SecurityGroups: []sgMembership{{ID: "sg-aurora", Status: "active"}},
 	}
@@ -118,6 +119,7 @@ func TestMergeCluster_Discovery(t *testing.T) {
 		SecurityGroup:    "sg-aurora",
 		DBSecurityGroups: []string{"sg-aurora"},
 		IAMAuthOn:        true,
+		MasterUser:       "cluster_admin",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("mergeCluster (discovery):\n got  %+v\n want %+v", got, want)
@@ -133,6 +135,7 @@ func sampleInstance() *rdsInstance {
 		DbiResourceID:  "db-ABC123",
 		DBName:         "app",
 		IAMAuthEnabled: true,
+		MasterUser:     "db_admin",
 		Host:           "prod-pg.abc.us-east-2.rds.amazonaws.com",
 		Port:           5432,
 		Subnets:        []string{"subnet-1", "subnet-2"},
@@ -156,6 +159,7 @@ func TestMergeInstance_Discovery(t *testing.T) {
 		SecurityGroup:    "sg-active",           // skips the non-active group
 		DBSecurityGroups: []string{"sg-active"}, // active groups only
 		IAMAuthOn:        true,
+		MasterUser:       "db_admin", // the grant asks for this login's password
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("mergeInstance (discovery):\n got  %+v\n want %+v", got, want)
@@ -630,5 +634,16 @@ func TestTemplateIsStatic(t *testing.T) {
 	// The config parameter must not be a plaintext secret carrier.
 	if strings.Contains(fargateTemplate, "DBG__COMPONENT__") {
 		t.Error("template still configures the collector through DBG__* env vars")
+	}
+}
+
+// An explicitly configured admin user is the operator's choice; discovery only
+// fills it in when unset.
+func TestMerge_ExplicitMasterUserWins(t *testing.T) {
+	if got := mergeInstance(AwsTarget{MasterUser: "ops"}, sampleInstance()); got.MasterUser != "ops" {
+		t.Errorf("instance: MasterUser = %q, want the explicit ops", got.MasterUser)
+	}
+	if got := mergeCluster(AwsTarget{MasterUser: "ops"}, sampleCluster(), nil); got.MasterUser != "ops" {
+		t.Errorf("cluster: MasterUser = %q, want the explicit ops", got.MasterUser)
 	}
 }

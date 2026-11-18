@@ -167,6 +167,30 @@ func stubNetworkPath(t *testing.T, findings []collector.NetworkFinding, err erro
 	t.Cleanup(func() { checkNetworkPath = orig })
 }
 
+// stubECSRole fixes the ECS service-linked-role check's answer and records the
+// dryRun it was asked with.
+func stubECSRole(t *testing.T, status collector.ECSRoleStatus, err error) *[]bool {
+	t.Helper()
+	calls := new([]bool)
+	orig := ensureECSRole
+	ensureECSRole = func(dryRun bool) (collector.ECSRoleStatus, error) {
+		*calls = append(*calls, dryRun)
+		return status, err
+	}
+	t.Cleanup(func() { ensureECSRole = orig })
+	return calls
+}
+
+// stubRunGrantDSNs records the admin DSN of every grant attempt.
+func stubRunGrantDSNs(t *testing.T, err error) *[]string {
+	t.Helper()
+	dsns := new([]string)
+	orig := runGrant
+	runGrant = func(_ context.Context, dsn string, _ []string) error { *dsns = append(*dsns, dsn); return err }
+	t.Cleanup(func() { runGrant = orig })
+	return dsns
+}
+
 func stubRunGrant(t *testing.T, err error) *int {
 	t.Helper()
 	n := new(int)
@@ -223,8 +247,9 @@ func awsCmd(t *testing.T) *cobra.Command {
 	c.Flags().String("commands", "", "")
 	c.Flags().Bool("enable-commands", false, "")
 	c.Flags().Bool("run-grant", false, "")
-	c.Flags().String("grant-user", "postgres", "")
+	c.Flags().String("grant-user", "", "")
 	c.Flags().String("grant-password", "", "")
+	c.Flags().Bool("grant-only", false, "")
 	c.Flags().Bool("force", false, "")
 	c.Flags().Bool("yes", false, "")
 	c.Flags().Bool("dry-run", false, "")

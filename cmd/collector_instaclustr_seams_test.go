@@ -1090,3 +1090,25 @@ func TestRefreshFirewallOnGCPUsesTheDeploymentEgressIP(t *testing.T) {
 		t.Fatalf("expected the deployment's static address, got %v", *cidrs)
 	}
 }
+
+// The Instaclustr --target aws path deploys the same Fargate stack, so it needs
+// the same ECS service-linked role, checked before anything is discovered,
+// allowlisted or minted.
+func TestInstallInstaclustrAWSStopsWhenTheECSRoleCannotBeCreated(t *testing.T) {
+	isolate(t)
+	writeTokens(t)
+	srv := installServer(t, "a-1")
+	defer srv.Close()
+	stubAWSOK(t)
+	calls := stubECSRole(t, collector.ECSRoleMissing,
+		errors.New("role could not be created; run: "+collector.ECSRoleCreateCommand))
+	stubDiscoverInstaclustr(t, icTestTarget(), nil)
+	cmd := icAwsCmd(t, srv.URL)
+	err := runInstall(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), collector.ECSRoleCreateCommand) {
+		t.Fatalf("expected the ECS role error, got %v", err)
+	}
+	if len(*calls) != 1 || (*calls)[0] {
+		t.Errorf("ECS role check calls = %v, want one real (non-dry-run) call", *calls)
+	}
+}
