@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `dbg collector install --target aws` now runs an RDS or Aurora collector in
+  a security group of its own, with no inbound rules and outbound only to 443
+  and the database ports, instead of in the database's group, which often
+  admits the whole VPC. The install adds one inbound rule to each database's
+  security group that admits the collector's group, and uninstall removes it.
+  `--security-group-id` still runs the collector in the group you name.
+  Existing installs keep the group they run in.
+
+  The install's credentials now also need `ec2:CreateSecurityGroup`,
+  `ec2:CreateTags`, `ec2:AuthorizeSecurityGroupEgress`,
+  `ec2:RevokeSecurityGroupEgress`, `ec2:AuthorizeSecurityGroupIngress`,
+  `ec2:RevokeSecurityGroupIngress`, `ec2:DescribeSecurityGroupRules`,
+  `ec2:DescribeSubnets` and `ec2:DeleteSecurityGroup`.
+
+- AWS uninstall waits for the stack to finish deleting, then removes the
+  collector's security group. If the group is still in use, uninstall keeps a
+  record of it and the next `dbg collector uninstall` finishes the job; a new
+  install is refused until then.
+
 ## v0.9.0
 
 ### Added

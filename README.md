@@ -155,6 +155,8 @@ dbg collector install --target aws                 # discover the database, depl
 dbg collector install --target aws --dry-run       # show the config + validate, deploy nothing
 ```
 
+The collector runs in a security group of its own, `<stack>-egress`, with no inbound rules and outbound only to 443 and the database ports. The install adds one inbound rule to each database's security group that admits that group on the database port, and uninstall removes it. Pass `--security-group-id` to run the collector in a group you choose instead. For this, the install's credentials need `ec2:DescribeSubnets`, `ec2:DescribeSecurityGroups`, `ec2:DescribeSecurityGroupRules`, `ec2:CreateSecurityGroup`, `ec2:CreateTags`, `ec2:AuthorizeSecurityGroupEgress`, `ec2:RevokeSecurityGroupEgress`, `ec2:AuthorizeSecurityGroupIngress`, `ec2:RevokeSecurityGroupIngress` and `ec2:DeleteSecurityGroup`. If you manage the database's security groups with Terraform or CloudFormation, add the rule there too, or the next apply removes it.
+
 ### The CloudFormation template
 
 The stack is defined by a template DBGorilla publishes, so you can read exactly what will be created before running anything:

@@ -358,3 +358,84 @@ func TestRunUpdateAWS_DryRunShowsTheRulesItWouldAdd(t *testing.T) {
 		t.Errorf("the dry run does not show the rules it would add:\n%s", out)
 	}
 }
+
+// With its own group the install adds the rule that admits the collector, so
+// the check of the database's group must not run: it tests a path the task
+// will not use, and its suggested fix is a rule that is not needed.
+func TestRunInstallAWS_OwnGroupSkipsTheDatabaseGroupCheck(t *testing.T) {
+	stubCollectorNetwork(t, nil)
+	isolate(t)
+	writeTokens(t)
+	stubAWSOK(t)
+	checked := 0
+	orig := checkNetworkPath
+	checkNetworkPath = func(context.Context, string, []string, []collector.AwsTarget) ([]collector.NetworkFinding, error) {
+		checked++
+		return []collector.NetworkFinding{{Target: "prod-db", Port: 5432, Detail: "no rule admits the group"}}, nil
+	}
+	t.Cleanup(func() { checkNetworkPath = orig })
+	stubDiscover(t, discoveredTarget(), nil)
+	stubDeploy(t, nil)
+	srv := installServer(t, "agent-aws")
+	t.Cleanup(srv.Close)
+	c := awsCmd(t)
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+	var err error
+	out := capture(t, func() { err = runInstallAWS(c) })
+	if err != nil {
+		t.Fatalf("runInstallAWS: %v\n%s", err, out)
+	}
+	if checked != 0 || strings.Contains(out, "Network path:") {
+		t.Errorf("the database group's path was checked (%d calls):\n%s", checked, out)
+	}
+}
+
+// An update whose stack change fails must still record the rules it added,
+// or uninstall cannot remove them and the collector's group can never be
+// deleted.
+func TestRunUpdateAWS_AFailedUpdateKeepsTheRulesItAdded(t *testing.T) {
+	isolate(t)
+	stubAWSOK(t)
+	stubDiscover(t, discoveredTarget(), nil)
+	stubUpdateComponents(t, errors.New("stack update rolled back"))
+	stubCollectorNetwork(t, nil)
+	st := &collector.State{AgentID: "agent-aws", Target: "aws", StackName: "dbg-collector", Region: "us-east-1",
+		CollectorSecurityGroupID: "sg-own",
+		DBIngressRules:           []collector.DBIngressRule{{GroupID: "sg-db", RuleID: "sgr-1"}}}
+	c := awsCmd(t)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+	var err error
+	capture(t, func() { err = runUpdateAWS(c, st, false) })
+	if err == nil {
+		t.Fatal("expected the update to fail")
+	}
+	saved, _ := collector.LoadState()
+	want := []collector.DBIngressRule{{GroupID: "sg-db", RuleID: "sgr-1"}, {GroupID: "sg-db", RuleID: "sgr-2"}}
+	if saved == nil || !reflect.DeepEqual(saved.DBIngressRules, want) {
+		t.Fatalf("saved rules = %+v, want %v", saved, want)
+	}
+}
+
+func TestRunUpdateAWS_WarnsAboutADatabaseItCannotAdmit(t *testing.T) {
+	isolate(t)
+	stubAWSOK(t)
+	stubDiscover(t, completeTarget(), nil) // no security groups known
+	stubUpdateComponents(t, nil)
+	stubCollectorNetwork(t, nil)
+	st := &collector.State{AgentID: "agent-aws", Target: "aws", StackName: "dbg-collector", Region: "us-east-1",
+		CollectorSecurityGroupID: "sg-own"}
+	c := awsCmd(t)
+	mustSet(t, c, "db-instance-id", "prod-db")
+	mustSet(t, c, "yes", "true")
+	var err error
+	out := capture(t, func() { err = runUpdateAWS(c, st, false) })
+	if err != nil {
+		t.Fatalf("runUpdateAWS: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "security groups are unknown") || !strings.Contains(out, "sg-own") {
+		t.Errorf("no warning about the database it cannot admit:\n%s", out)
+	}
+}

@@ -439,8 +439,13 @@ func runInstallAWS(cmd *cobra.Command) error {
 	// unreachable DB is caught here rather than after a deployed collector
 	// silently fails to connect. Advisory — a gap warns (and asks, interactively)
 	// but --force / non-interactive proceeds.
-	if err := verifyNetworkPath(cmd, sg, subnets, targets); err != nil {
-		return err
+	//
+	// With its own group the install adds the rule that admits it, so checking
+	// the database's group would test a path the task will not use.
+	if !ownGroup {
+		if err := verifyNetworkPath(cmd, sg, subnets, targets); err != nil {
+			return err
+		}
 	}
 
 	stackName, _ := cmd.Flags().GetString("stack-name")
@@ -650,11 +655,21 @@ func runUpdateAWS(cmd *cobra.Command, st *collector.State, dryRun bool) error {
 	if st.CollectorSecurityGroupID != "" && st.InstaclustrClusterID == "" {
 		// The collector runs in its own group: a database added since install
 		// has to admit it, or the updated task cannot connect.
+		for _, t := range targets {
+			if len(t.DBSecurityGroups) == 0 {
+				fmt.Println(style.Warn(fmt.Sprintf("⚠  %s's security groups are unknown, so the collector cannot be admitted to it. "+
+					"Add an inbound rule on its port from security group %s, or the collector will report no data for it.",
+					t.Name, st.CollectorSecurityGroupID)))
+			}
+		}
 		rules, err := admitCollector(cmd.Context(), st.Region, st.CollectorSecurityGroupID, targets)
+		// Record the rules before anything else can fail, so uninstall
+		// revokes every rule this run added.
 		st.DBIngressRules = append(st.DBIngressRules, rules...)
+		saveStateOrWarn(st)
 		if err != nil {
-			saveStateOrWarn(st)
-			return fmt.Errorf("could not admit the collector to the databases' security groups: %w", err)
+			return fmt.Errorf("could not admit the collector to the databases' security groups: %w. "+
+				"Check that your credentials allow ec2:AuthorizeSecurityGroupIngress, then run the update again", err)
 		}
 	}
 	fmt.Printf("Updating collector %s in place to monitor %d database(s)...\n", st.AgentID, len(targets))
@@ -1745,11 +1760,9 @@ var uninstallCmd = &cobra.Command{
 // releaseCollectorSecurityGroup removes the security group the install created
 // for a VPC-resident collector. A group that already existed is left alone.
 //
-// The stack deletion above is asynchronous, so the task's network interface
-// usually still holds the group at this point and EC2 refuses. That is reported
-// with the one command that finishes the job rather than retried: blocking
-// uninstall for the minutes a stack takes to drain is worse than a line of
-// output, and the group costs nothing while it waits.
+// EC2 refuses while the task's network interface still holds the group, so
+// the release retries for a bounded time. If the group is still in use after
+// that, the command that finishes the job is printed.
 func releaseCollectorSecurityGroup(ctx context.Context, st *collector.State) bool {
 	if !st.CollectorSecurityGroupCreated || st.CollectorSecurityGroupID == "" {
 		return true

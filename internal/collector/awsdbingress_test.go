@@ -81,7 +81,8 @@ func TestAnExistingIngressRuleIsNotRecordedAsOurs(t *testing.T) {
 		on("DescribeSecurityGroups", oneSecurityGroupXML("sg-existing")).
 		on("AuthorizeSecurityGroupEgress", authorizeEgressXML).
 		fail("AuthorizeSecurityGroupIngress", http.StatusBadRequest,
-			ec2ErrorXML("InvalidPermission.Duplicate", "already exists")))
+			ec2ErrorXML("InvalidPermission.Duplicate", "already exists")).
+		on("DescribeSecurityGroupRules", describeRuleXML("sg-existing", "added by hand")))
 
 	net, err := EnsureCollectorNetwork(context.Background(), "us-east-1", "dbg-collector",
 		[]string{"subnet-a"}, []AwsTarget{{Name: "pg", Port: 5432, DBSecurityGroups: []string{"sg-db"}}})
@@ -214,5 +215,101 @@ func TestReleaseRetriesAGroupStillInUse(t *testing.T) {
 	}
 	if n := fake.called("DeleteSecurityGroup"); n != 3 {
 		t.Errorf("tried %d times, want 3", n)
+	}
+}
+
+func describeRuleXML(groupRef, description string) string {
+	return `<DescribeSecurityGroupRulesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <securityGroupRuleSet><item>
+    <securityGroupRuleId>sgr-left</securityGroupRuleId><groupId>sg-db</groupId>
+    <isEgress>false</isEgress><ipProtocol>tcp</ipProtocol><fromPort>5432</fromPort><toPort>5432</toPort>
+    <referencedGroupInfo><groupId>` + groupRef + `</groupId></referencedGroupInfo>
+    <description>` + description + `</description>
+  </item></securityGroupRuleSet>
+</DescribeSecurityGroupRulesResponse>`
+}
+
+// A rule left by an earlier run that failed before recording it must be
+// claimed, or uninstall can never delete the collector's group: EC2 refuses
+// while a rule still names it.
+func TestALeftoverRuleOfOursIsClaimed(t *testing.T) {
+	stubAWS(t, newAWSFake(t).
+		on("DescribeSubnets", describeSubnetsVPC1XML).
+		on("DescribeSecurityGroups", noSecurityGroupsXML).
+		on("CreateSecurityGroup", createSGXML).
+		on("AuthorizeSecurityGroupEgress", authorizeEgressXML).
+		on("RevokeSecurityGroupEgress", revokeEgressXML).
+		fail("AuthorizeSecurityGroupIngress", http.StatusBadRequest,
+			ec2ErrorXML("InvalidPermission.Duplicate", "already exists")).
+		on("DescribeSecurityGroupRules", describeRuleXML("sg-new", ingressRuleMarker)))
+
+	net, err := EnsureCollectorNetwork(context.Background(), "us-east-1", "dbg-collector",
+		[]string{"subnet-a"}, []AwsTarget{{Name: "pg", Port: 5432, DBSecurityGroups: []string{"sg-db"}}})
+	if err != nil {
+		t.Fatalf("EnsureCollectorNetwork: %v", err)
+	}
+	if !reflect.DeepEqual(net.Rules, []DBIngressRule{{GroupID: "sg-db", RuleID: "sgr-left"}}) {
+		t.Fatalf("leftover rule not claimed: %v", net.Rules)
+	}
+}
+
+func TestAnExistingRuleWithoutOurMarkerIsNotClaimed(t *testing.T) {
+	stubAWS(t, newAWSFake(t).
+		on("DescribeSubnets", describeSubnetsVPC1XML).
+		on("DescribeSecurityGroups", noSecurityGroupsXML).
+		on("CreateSecurityGroup", createSGXML).
+		on("AuthorizeSecurityGroupEgress", authorizeEgressXML).
+		on("RevokeSecurityGroupEgress", revokeEgressXML).
+		fail("AuthorizeSecurityGroupIngress", http.StatusBadRequest,
+			ec2ErrorXML("InvalidPermission.Duplicate", "already exists")).
+		on("DescribeSecurityGroupRules", describeRuleXML("sg-new", "added by the platform team")))
+
+	net, err := EnsureCollectorNetwork(context.Background(), "us-east-1", "dbg-collector",
+		[]string{"subnet-a"}, []AwsTarget{{Name: "pg", Port: 5432, DBSecurityGroups: []string{"sg-db"}}})
+	if err != nil {
+		t.Fatalf("EnsureCollectorNetwork: %v", err)
+	}
+	if len(net.Rules) != 0 {
+		t.Fatalf("someone else's rule was recorded as ours: %v", net.Rules)
+	}
+}
+
+// When undoing a half-made network also fails, the error must say what is
+// left and how to remove it, rather than drop it.
+func TestAFailedUndoNamesWhatIsLeft(t *testing.T) {
+	fake := newAWSFake(t).
+		on("DescribeSubnets", describeSubnetsVPC1XML).
+		on("DescribeSecurityGroups", noSecurityGroupsXML).
+		on("CreateSecurityGroup", createSGXML).
+		on("AuthorizeSecurityGroupEgress", authorizeEgressXML).
+		on("RevokeSecurityGroupEgress", revokeEgressXML).
+		fail("AuthorizeSecurityGroupIngress", http.StatusForbidden,
+			ec2ErrorXML("UnauthorizedOperation", "not authorized")).
+		fail("DeleteSecurityGroup", http.StatusForbidden,
+			ec2ErrorXML("UnauthorizedOperation", "not authorized"))
+	stubAWS(t, fake)
+
+	_, err := EnsureCollectorNetwork(context.Background(), "us-east-1", "dbg-collector",
+		[]string{"subnet-a"}, rdsTargets()[:1])
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "aws ec2 delete-security-group --group-id sg-new --region us-east-1") {
+		t.Errorf("error does not say how to remove the group:\n%v", err)
+	}
+}
+
+func TestManualNetworkCleanupRevokesRulesBeforeTheGroup(t *testing.T) {
+	got := ManualNetworkCleanup("us-east-1", CollectorNetwork{
+		SecurityGroupID: "sg-new", SecurityGroupCreated: true,
+		Rules: []DBIngressRule{{GroupID: "sg-db", RuleID: "sgr-1"}},
+	})
+	revoke := strings.Index(got, "revoke-security-group-ingress --group-id sg-db --security-group-rule-ids sgr-1")
+	del := strings.Index(got, "delete-security-group --group-id sg-new")
+	if revoke < 0 || del < 0 || revoke > del {
+		t.Fatalf("want the rule revoked before the group is deleted:\n%s", got)
+	}
+	if strings.Contains(ManualNetworkCleanup("us-east-1", CollectorNetwork{SecurityGroupID: "sg-x"}), "delete-security-group") {
+		t.Error("a group this install did not create must not be deleted")
 	}
 }
