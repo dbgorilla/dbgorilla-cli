@@ -1351,7 +1351,7 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		// stack that is most likely still converging server-side;
 		// cloudDeployFailed keeps those and rolls back only real failures.
 		kept, derr := cloudDeployFailed(err, in.client, creds.AgentID, collector.DeployTimeout(), "stack", stackName,
-			func() error { return deleteStack(stackName, region) }, nil,
+			func() error { return deleteStackWithSpinner(stackName, region) }, nil,
 			"   Watch it with: dbg collector status, then re-run `dbg collector refresh-firewall` once it is up "+
 				"(the EgressIP output appears only once the stack completes, so the firewall entry waits for it).\n")
 		removeOperatorRule()

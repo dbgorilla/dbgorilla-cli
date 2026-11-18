@@ -305,6 +305,18 @@ func DeleteStack(stackName, region string) error {
 	return nil
 }
 
+// DeleteStackAndWait deletes the stack and blocks (up to the delete budget)
+// until it is gone, so what the stack held — the collector's security group —
+// can be removed straight after. A stack that does not exist is already gone.
+func DeleteStackAndWait(stackName, region string) error {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx, region)
+	if err != nil {
+		return err
+	}
+	return deleteStackAndWait(ctx, cloudformation.NewFromConfig(cfg), stackName)
+}
+
 // StackStatus returns the stack's status (e.g. CREATE_COMPLETE), or "" (nil
 // error) when the stack does not exist.
 func StackStatus(stackName, region string) (string, error) {

@@ -74,6 +74,10 @@ func priorCloudInstall(dryRun bool, isMine func(*collector.State) bool,
 	if st == nil || dryRun {
 		return nil, "", nil
 	}
+	if st.PendingNetworkCleanup {
+		return nil, "", errors.New("the last collector's security group or database rules are still in place. " +
+			"Run `dbg collector uninstall` to remove them, then re-run the install")
+	}
 	if !isMine(st) {
 		return nil, "", fmt.Errorf("a collector is already installed (agent %s). Run `dbg collector uninstall` first, or `dbg collector status`",
 			st.AgentID)
