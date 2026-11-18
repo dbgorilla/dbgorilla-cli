@@ -334,6 +334,9 @@ func runRemoveIDE(cmd *cobra.Command) error {
 			for _, path := range ide.LegacyEntries(writer) {
 				fmt.Println(style.Info(fmt.Sprintf("Would remove the dbgorilla entry from: %s", path)))
 			}
+			for _, dir := range ide.LegacySkills(writer) {
+				fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
+			}
 			if host, ok := writer.(ide.SkillHost); ok {
 				if dir, err := host.SkillDir(scope); err == nil {
 					fmt.Println(style.Info("Would remove the DBGorilla skill from: " + dir))
@@ -420,11 +423,22 @@ func warnLegacyEntries(a ide.Adapter) {
 		fmt.Println(style.Warn(fmt.Sprintf("⚠  An older dbgorilla entry is still in %s.", path)))
 		fmt.Println(style.Warn("   The client reads both files and will list DBGorilla twice; delete that entry."))
 	}
+	for _, dir := range ide.LegacySkills(a) {
+		fmt.Println(style.Warn(fmt.Sprintf("⚠  An older DBGorilla skill is still in %s.", dir)))
+		fmt.Println(style.Warn("   The skill is now installed per user; delete that folder, and commit the deletion if it is tracked."))
+	}
 }
 
 // removeLegacyEntries clears the dbgorilla entry from files earlier versions
 // wrote for this client, so --remove undoes old setups as well as new ones.
 func removeLegacyEntries(w ide.Writer) {
+	for _, dir := range ide.LegacySkills(w) {
+		if _, err := ide.RemoveSkillDir(dir); err != nil {
+			fmt.Println(style.Warn(fmt.Sprintf("⚠  Could not remove the older DBGorilla skill in %s: %v", dir, err)))
+			continue
+		}
+		fmt.Println(style.Success("✓ Removed the older DBGorilla skill from " + dir))
+	}
 	l, ok := w.(ide.LegacyLocator)
 	if !ok {
 		return

@@ -9,6 +9,8 @@
   reads through its GitHub Copilot CLI discovery, on by default. VS Code's
   add-server flow labels its own `mcp.json` files deprecated. VS Code now has
   one scope, user; `--scope project` writes the same file.
+- `setup-ide` also names a skill that 0.9.0 left in the project's
+  `.github/skills/dbgorilla/`, and `setup-ide --remove` deletes it.
 - If an older entry is still in `.vscode/mcp.json` or the user-profile
   `mcp.json`, `setup-ide` names the file so you can delete the entry; VS Code
   would otherwise list DBGorilla twice. `setup-ide --remove` cleans those

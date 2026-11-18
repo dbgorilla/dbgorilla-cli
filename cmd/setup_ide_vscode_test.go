@@ -208,6 +208,53 @@ func TestRunSetupIDE_VSCode(t *testing.T) {
 		}
 	})
 
+	// 0.9.0 defaulted VS Code to project scope, so the skill was written
+	// into the working directory. It is part of the old setup, like the
+	// old mcp.json files.
+	oldSkill := filepath.Join(".github", "skills", "dbgorilla", "SKILL.md")
+
+	t.Run("names an old project skill and leaves it alone", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		t.Chdir(t.TempDir())
+		write(t, oldSkill, "old")
+		out := setupVSCode(t)
+		if !strings.Contains(out, "older DBGorilla skill") || !strings.Contains(out, filepath.Join(".github", "skills", "dbgorilla")) {
+			t.Errorf("no hint about the old skill:\n%s", out)
+		}
+		if data, _ := os.ReadFile(oldSkill); string(data) != "old" {
+			t.Error("setup changed the old skill")
+		}
+	})
+
+	t.Run("--remove deletes the old project skill", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		t.Chdir(t.TempDir())
+		write(t, oldSkill, "old")
+		out := removeVSCode(t)
+		if !strings.Contains(out, "Removed the older DBGorilla skill") {
+			t.Errorf("out=%q", out)
+		}
+		if _, err := os.Stat(filepath.Dir(oldSkill)); !os.IsNotExist(err) {
+			t.Errorf("old skill survived (err=%v)", err)
+		}
+	})
+
+	t.Run("--remove --dry-run lists the old skill and keeps it", func(t *testing.T) {
+		isolate(t)
+		writeTokens(t)
+		t.Chdir(t.TempDir())
+		write(t, oldSkill, "old")
+		out := removeVSCode(t, "dry-run")
+		if !strings.Contains(out, "Would remove the DBGorilla skill from: ") || !strings.Contains(out, filepath.Join(".github", "skills", "dbgorilla")) {
+			t.Errorf("old skill not listed:\n%s", out)
+		}
+		if _, err := os.Stat(oldSkill); err != nil {
+			t.Errorf("dry run removed the old skill: %v", err)
+		}
+	})
+
 	t.Run("--remove --dry-run lists the old files and touches nothing", func(t *testing.T) {
 		home := isolate(t)
 		writeTokens(t)

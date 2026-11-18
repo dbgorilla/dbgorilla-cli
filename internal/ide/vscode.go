@@ -101,6 +101,16 @@ func (l *vscodeLegacy) ConfigPath(Scope) (string, error) {
 	}
 }
 
+// LegacySkillDirs: release 0.9.0 defaulted VS Code to project scope, so its
+// skill landed in the working directory's .github/skills/dbgorilla.
+func (v *VSCode) LegacySkillDirs() []string {
+	dir, err := v.SkillDir(ScopeProject)
+	if err != nil {
+		return nil
+	}
+	return []string{dir}
+}
+
 // SkillDir: ~/.copilot/skills/dbgorilla (user) or .github/skills/dbgorilla
 // (project). The project root is .github, not .vscode: skills belong to
 // Copilot rather than to the editor, and that is where both the editor's
