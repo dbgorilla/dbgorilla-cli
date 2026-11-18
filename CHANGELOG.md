@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### Added
+
+- The DBGorilla skill that `dbg setup-ide` installs now also covers a
+  project that needs a new PostgreSQL database: the agent asks you first,
+  then creates one DBGorilla hosts and puts its connection string where the
+  project reads config. Re-run `dbg setup-ide` after upgrading to get it.
+
+- `dbg collector install --target aws --grant-only` runs only the one-time
+  database grant, on the databases you name with `--db-instance-id` or
+  `--config`, and leaves an installed collector and its stack alone. A failed
+  grant now tells you to retry with it.
+
+### Changed
+
+- `dbg collector install --target aws` now runs an RDS or Aurora collector in
+  a security group of its own, with no inbound rules and outbound only to 443
+  and the database ports, instead of in the database's group, which often
+  admits the whole VPC. The install adds one inbound rule to each database's
+  security group that admits the collector's group, and uninstall removes it.
+  `--security-group-id` still runs the collector in the group you name.
+  Existing installs keep the group they run in.
+
+  The install's credentials now also need `ec2:CreateSecurityGroup`,
+  `ec2:CreateTags`, `ec2:AuthorizeSecurityGroupEgress`,
+  `ec2:RevokeSecurityGroupEgress`, `ec2:AuthorizeSecurityGroupIngress`,
+  `ec2:RevokeSecurityGroupIngress`, `ec2:DescribeSecurityGroupRules`,
+  `ec2:DescribeSubnets` and `ec2:DeleteSecurityGroup`.
+
+- AWS uninstall waits for the stack to finish deleting, then removes the
+  collector's security group. If the group is still in use, uninstall keeps a
+  record of it and the next `dbg collector uninstall` finishes the job; a new
+  install is refused until then.
+
+- The one-time database grant on AWS now signs in as the database's master
+  user as RDS reports it (`--grant-user` picks another admin), asks for the
+  password once per database (a blank answer reuses an earlier one), and
+  verifies the server certificate against Amazon's RDS certificate
+  authorities, which the CLI now carries. For a region outside that bundle,
+  set `PGSSLROOTCERT`. Each kind of failure is named, with the SQL to run
+  yourself.
+
+- On an AWS account that has never used ECS, the install now creates ECS's
+  service-linked role first, which needs `iam:CreateServiceLinkedRole` once
+  per account. Without that permission the install stops before deploying
+  anything and prints the command an administrator runs.
+
+- `dbg setup-ide --client vscode` now writes `~/.copilot/mcp-config.json`
+  (or `$COPILOT_HOME/mcp-config.json`) under `mcpServers`, which VS Code
+  reads through its GitHub Copilot CLI discovery, on by default. VS Code's
+  add-server flow labels its own `mcp.json` files deprecated. VS Code now has
+  one scope, user; `--scope project` writes the same file.
+
+  If an older entry is still in `.vscode/mcp.json` or the user-profile
+  `mcp.json`, or 0.9.0 left the skill in the project's
+  `.github/skills/dbgorilla/`, `setup-ide` names it so you can remove it;
+  VS Code would otherwise list DBGorilla twice. `setup-ide --remove` cleans
+  all of them, and asks for a hand edit when a file has comments.
+
 ### Fixed
 
 - `dbg collector install --target docker` pointed at a database that is not
@@ -9,12 +67,14 @@
   PostgreSQL never sends stops the install before provisioning anything
   (`--force` carries on). A server that closes the connection without a
   reply, as Cassandra on port 9042 does, gets a warning that it is either not
-  PostgreSQL or a proxy/port-forward that could not reach the database, and a
-  "Continue anyway?" prompt (`--yes` or `--force` carries on). Both messages
-  say how to connect other databases: create credentials in Admin >
-  Collectors and follow the guide for it. Before, the install reported the
-  database as reachable and then failed with a PostgreSQL error
+  PostgreSQL or a proxy or port-forward that could not reach the database,
+  and a "Continue anyway?" prompt (`--yes` or `--force` carries on). Both
+  messages say how to connect other databases. Before, the install reported
+  the database as reachable and then failed with a PostgreSQL error
   ("unexpected EOF") that named the wrong cause.
+
+- The first AWS install into an account that has never used ECS no longer
+  fails partway with "Unable to assume the service linked role".
 
 ## v0.9.0
 
