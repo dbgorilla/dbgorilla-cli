@@ -1182,6 +1182,9 @@ func runInstallInstaclustrAWS(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Println(style.Success(fmt.Sprintf("✓ AWS identity: %s (%s)", identity, region)))
+	if err := ensureECSServiceRole(dryRun); err != nil {
+		return err
+	}
 
 	// Discovery comes before the networking decision: a cluster in the
 	// customer's own account names the VPC the collector belongs in, and that

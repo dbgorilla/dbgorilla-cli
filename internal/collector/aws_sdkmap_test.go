@@ -20,6 +20,7 @@ func TestInstanceFromSDK_MapsEveryFieldWeDependOn(t *testing.T) {
 		DbiResourceId:                    aws.String("db-ABCDEF"),
 		DBName:                           aws.String("appdb"),
 		IAMDatabaseAuthenticationEnabled: aws.Bool(true),
+		MasterUsername:                   aws.String("db_admin"),
 		Endpoint: &rdstypes.Endpoint{
 			Address: aws.String("prod-db.abc.eu-west-1.rds.amazonaws.com"),
 			Port:    aws.Int32(5432),
@@ -46,6 +47,9 @@ func TestInstanceFromSDK_MapsEveryFieldWeDependOn(t *testing.T) {
 	}
 	if got.DBName != "appdb" || !got.IAMAuthEnabled {
 		t.Errorf("dbname=%q iam=%v", got.DBName, got.IAMAuthEnabled)
+	}
+	if got.MasterUser != "db_admin" {
+		t.Errorf("MasterUser = %q — the grant prompt names this login", got.MasterUser)
 	}
 	if got.Host != "prod-db.abc.eu-west-1.rds.amazonaws.com" || got.Port != 5432 {
 		t.Errorf("endpoint = %s:%d", got.Host, got.Port)
@@ -87,12 +91,16 @@ func TestClusterFromSDK_MapsEveryFieldWeDependOn(t *testing.T) {
 		DbClusterResourceId:              aws.String("cluster-XYZ"),
 		DatabaseName:                     aws.String("appdb"),
 		IAMDatabaseAuthenticationEnabled: aws.Bool(true),
+		MasterUsername:                   aws.String("cluster_admin"),
 		DBSubnetGroup:                    aws.String("aurora-subnets"),
 		VpcSecurityGroups: []rdstypes.VpcSecurityGroupMembership{
 			{VpcSecurityGroupId: aws.String("sg-live"), Status: aws.String("active")},
 		},
 	})
 
+	if got.MasterUser != "cluster_admin" {
+		t.Errorf("MasterUser = %q", got.MasterUser)
+	}
 	if got.ID != "aurora-1" || got.Engine != "aurora-postgresql" {
 		t.Errorf("id/engine = %q/%q", got.ID, got.Engine)
 	}

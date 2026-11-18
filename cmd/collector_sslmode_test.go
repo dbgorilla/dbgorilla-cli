@@ -21,6 +21,9 @@ func TestMain(m *testing.M) {
 	latestCollectorRelease = func() (string, string, error) {
 		return collector.ImageForVersion(testLatestVersion), testLatestVersion, nil
 	}
+	// Every AWS test account already has ECS's service-linked role unless a
+	// test says otherwise, so no test reaches IAM.
+	ensureECSRole = func(bool) (collector.ECSRoleStatus, error) { return collector.ECSRolePresent, nil }
 	os.Exit(m.Run())
 }
 
