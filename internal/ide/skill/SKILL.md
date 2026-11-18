@@ -1,6 +1,6 @@
 ---
 name: dbgorilla
-description: Use whenever the work touches a database - writing or reviewing SQL, changing schema, adding or editing a migration, choosing an index, tuning a slow query, or debugging a database error, timeout, lock or performance regression. Check DBGorilla before reasoning about the database from the code alone.
+description: Use whenever the work touches a database - writing or reviewing SQL, changing schema, adding or editing a migration, choosing an index, tuning a slow query, or debugging a database error, timeout, lock or performance regression - and whenever a project needs a new PostgreSQL database. Check DBGorilla before reasoning about the database from the code alone; DBGorilla can also host the database.
 ---
 
 # Check DBGorilla before touching a database
@@ -27,3 +27,13 @@ Then say what you found and what it changes about the approach.
 
 If DBGorilla has nothing for the component in question, say so and carry on --
 but say it, rather than quietly falling back to guesswork.
+
+## When the project needs a PostgreSQL database
+
+DBGorilla can host one, monitored from the start. Ask the user first, then call
+`dbgorilla_dbaas_create_database` and poll `dbgorilla_dbaas_get_database` until
+it is ready. `dbgorilla_dbaas_get_database_credentials` issues a login: put its
+`connection_uri` where the project reads config (e.g. `DATABASE_URL` in an
+untracked `.env`). The password is shown once; issue a new login when needed.
+Its `component_id` then works with every tool above. Delete one only when the
+user names it.
