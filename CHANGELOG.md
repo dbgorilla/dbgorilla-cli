@@ -2,25 +2,12 @@
 
 ## Unreleased
 
-### Fixed
-
-- `dbgorilla login` works for accounts made with an email and password. In a
-  terminal it asks how you signed up; an email-and-password account signs in
-  with its password instead of being sent to the browser page, which only
-  knows Google, GitHub and GitLab accounts and rejected the correct password.
-  `--organization` or `--account` picks password sign-in without asking.
-- Password sign-in asks for "Organization name (as on the sign-up form)"
-  instead of "Tenant", and "Username or email" instead of "Account".
-  `--organization` replaces `--tenant`, which still works.
-- Sign-in errors say what to fix: an unverified email address, an unknown
-  organization, or wrong credentials, instead of one message for all.
-- Password sign-in reads all three answers from a pipe. The password read
-  used to fail with `Error: EOF`. With nothing to read, it says to run the
-  command in a separate terminal, with the full path.
-
-## Unreleased
-
 ### Added
+
+- `dbgorilla login` supports accounts created with an email and password,
+  alongside Google, GitHub and GitLab sign-in. In a terminal it asks how you
+  signed up; `--organization` or `--account` picks password sign-in without
+  asking.
 
 - The DBGorilla skill that `dbg setup-ide` installs now also covers a
   project that needs a new PostgreSQL database: the agent asks you first,
@@ -33,6 +20,10 @@
   grant now tells you to retry with it.
 
 ### Changed
+
+- Password sign-in asks for "Organization name (as on the sign-up form)" and
+  "Username or email", in place of "Tenant" and "Account". `--organization`
+  replaces `--tenant`, which still works.
 
 - `dbg collector install --target aws` now runs an RDS or Aurora collector in
   a security group of its own, with no inbound rules and outbound only to 443
@@ -79,6 +70,13 @@
   all of them, and asks for a hand edit when a file has comments.
 
 ### Fixed
+
+- A failed sign-in says what to fix: an email address that isn't verified
+  yet, an unknown organization, or wrong credentials.
+
+- Password sign-in accepts piped answers. Before, the password read failed
+  with `Error: EOF`. When there is nothing to read, it says to run the command
+  in a terminal.
 
 - `dbg collector install --target docker` pointed at a database that is not
   PostgreSQL no longer blames PostgreSQL. A server that replies with bytes
