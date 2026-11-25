@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Fixed
+
+- `dbgorilla login` works for accounts made with an email and password. In a
+  terminal it asks how you signed up; an email-and-password account signs in
+  with its password instead of being sent to the browser page, which only
+  knows Google, GitHub and GitLab accounts and rejected the correct password.
+  `--organization` or `--account` picks password sign-in without asking.
+- Password sign-in asks for "Organization name (as on the sign-up form)"
+  instead of "Tenant", and "Username or email" instead of "Account".
+  `--organization` replaces `--tenant`, which still works.
+- Sign-in errors say what to fix: an unverified email address, an unknown
+  organization, or wrong credentials, instead of one message for all.
+- Password sign-in reads all three answers from a pipe. The password read
+  used to fail with `Error: EOF`. With nothing to read, it says to run the
+  command in a separate terminal, with the full path.
+
+## Unreleased
+
 ### Added
 
 - The DBGorilla skill that `dbg setup-ide` installs now also covers a

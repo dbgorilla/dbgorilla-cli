@@ -34,7 +34,7 @@ func TestRunLogin_AutoDetectChoosesSSO(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the SSO device flow to fail at authorization")
 	}
-	if !strings.Contains(out, "Signing in via SSO") {
+	if !strings.Contains(out, "Signing in through your browser") {
 		t.Errorf("auto-detect should have selected SSO mode:\n%s", out)
 	}
 }

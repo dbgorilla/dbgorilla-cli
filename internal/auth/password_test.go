@@ -102,8 +102,11 @@ func TestPromptCredentials_MissingFieldsError(t *testing.T) {
 	// back empty from blank lines -> the "all required" validation fires.
 	withStdin(t, "\n\n")
 	_, err := PromptCredentials(context.Background(), PasswordCredentials{Password: "pw"})
-	if err == nil || !strings.Contains(err.Error(), "all required") {
-		t.Fatalf("err = %v, want 'all required'", err)
+	if err == nil || !strings.Contains(err.Error(), "missing organization name, username or email") {
+		t.Fatalf("err = %v, want the missing fields named", err)
+	}
+	if !strings.Contains(err.Error(), "separate terminal") {
+		t.Errorf("err = %v, want the no-keyboard hint", err)
 	}
 }
 
@@ -225,8 +228,8 @@ func TestLoginPassword_AuthFailures(t *testing.T) {
 			}))
 			defer srv.Close()
 			_, err := LoginPassword(srv.URL, true, PasswordCredentials{Tenant: "t", Account: "a", Password: "p"})
-			if err == nil || !strings.Contains(err.Error(), "authentication failed") {
-				t.Fatalf("err = %v, want authentication failed", err)
+			if err == nil || !strings.Contains(err.Error(), "the username or email, or the password is wrong") {
+				t.Fatalf("err = %v, want the credential fields named", err)
 			}
 		})
 	}
@@ -316,5 +319,54 @@ func TestLoginPassword_Unreachable(t *testing.T) {
 	_, err := LoginPassword(url, true, PasswordCredentials{Tenant: "t", Account: "a", Password: "p"})
 	if err == nil || !strings.Contains(err.Error(), "cannot reach") {
 		t.Fatalf("err = %v, want cannot reach", err)
+	}
+}
+
+// Piped input: all three lines arrive in one write. Each prompt used to open
+// its own reader, so the first one swallowed the password and the password
+// read failed with EOF.
+func TestPromptCredentials_AllFieldsFromOnePipe(t *testing.T) {
+	withStdin(t, "Acme Inc\ndev@acme.com\ns3cret")
+	got, err := PromptCredentials(context.Background(), PasswordCredentials{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Tenant != "Acme Inc" || got.Account != "dev@acme.com" || got.Password != "s3cret" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestLoginPassword_ErrorNamesTheField(t *testing.T) {
+	cases := []struct{ detail, want string }{
+		{"Organization not found", `no organization named "t"`},
+		{"Email not verified", "not verified yet"},
+		{"Account deactivated", "Account deactivated"},
+		{"The email or password provided is incorrect.", "the username or email, or the password is wrong"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.detail, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"detail":"` + tc.detail + `"}`))
+			}))
+			defer srv.Close()
+			_, err := LoginPassword(srv.URL, true, PasswordCredentials{Tenant: "t", Account: "a", Password: "p"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The server answers an unverified account with a structured detail.
+func TestLoginPassword_UnverifiedEmail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail":{"code":"pending_email_verification","verification_mode":"centralized"}}`))
+	}))
+	defer srv.Close()
+	_, err := LoginPassword(srv.URL, true, PasswordCredentials{Tenant: "t", Account: "a", Password: "p"})
+	if err == nil || !strings.Contains(err.Error(), "not verified yet") {
+		t.Fatalf("err = %v", err)
 	}
 }

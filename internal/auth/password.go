@@ -35,33 +35,60 @@ type PasswordCredentials struct {
 // to swallow the interrupt silently.
 func PromptCredentials(ctx context.Context, prefill PasswordCredentials) (PasswordCredentials, error) {
 	creds := prefill
+	// One reader for every prompt. Each prompt used to open its own, and the
+	// first one buffered all of piped stdin, so the password read hit EOF.
 	r := bufio.NewReader(os.Stdin)
-
 	if creds.Tenant == "" {
-		v, err := promptLine(ctx, r, "Tenant")
+		v, err := promptLine(ctx, r, "Organization name (as on the sign-up form)")
 		if err != nil {
 			return creds, err
 		}
 		creds.Tenant = v
 	}
 	if creds.Account == "" {
-		v, err := promptLine(ctx, r, "Account")
+		v, err := promptLine(ctx, r, "Username or email")
 		if err != nil {
 			return creds, err
 		}
 		creds.Account = v
 	}
 	if creds.Password == "" {
-		pw, err := readPassword(ctx, "Password: ")
+		pw, err := readPassword(ctx, r, "Password: ")
 		if err != nil {
 			return creds, err
 		}
 		creds.Password = pw
 	}
-	if creds.Tenant == "" || creds.Account == "" || creds.Password == "" {
-		return creds, errors.New("tenant, account, and password are all required")
+	var missing []string
+	if creds.Tenant == "" {
+		missing = append(missing, "organization name")
+	}
+	if creds.Account == "" {
+		missing = append(missing, "username or email")
+	}
+	if creds.Password == "" {
+		missing = append(missing, "password")
+	}
+	if len(missing) > 0 {
+		msg := "missing " + strings.Join(missing, ", ")
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			msg += noKeyboardHint()
+		}
+		return creds, errors.New(msg)
 	}
 	return creds, nil
+}
+
+// noKeyboardHint explains what to do when there is no terminal to type into,
+// for example inside a coding agent.
+func noKeyboardHint() string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "dbgorilla"
+	}
+	return ".\n  There is no keyboard to read from here. Either run this in a separate terminal:\n" +
+		"    " + exe + " login --mode password\n" +
+		"  or pass --organization and --account and pipe the password on standard input"
 }
 
 // LoginPassword exchanges credentials for tokens and stores them.
@@ -93,7 +120,7 @@ func LoginPassword(apiURL string, insecure bool, creds PasswordCredentials) (*To
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, errors.New("authentication failed (check tenant/account/password)")
+		return nil, loginRefused(respBody, creds)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Echo only the FastAPI-style `detail` field if present. Returning
@@ -137,6 +164,37 @@ func LoginPassword(apiURL string, insecure bool, creds PasswordCredentials) (*To
 		return nil, fmt.Errorf("cannot store tokens: %w", err)
 	}
 	return tok, nil
+}
+
+// loginRefused turns a 401/403 into a message that says which field to check.
+// The server names the field when it can (an unknown organization); otherwise
+// the username and the password cannot be told apart without revealing which
+// accounts exist, so the message says so.
+func loginRefused(body []byte, creds PasswordCredentials) error {
+	var errResp struct {
+		Detail json.RawMessage `json:"detail"`
+	}
+	_ = json.Unmarshal(body, &errResp)
+	var text string
+	var obj struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(errResp.Detail, &text) != nil {
+		_ = json.Unmarshal(errResp.Detail, &obj)
+	}
+	d := strings.ToLower(text)
+	switch {
+	case strings.Contains(obj.Code, "verification") || strings.Contains(d, "verif"):
+		return errors.New("sign-in failed: the email address on this account is not verified yet. " +
+			"Click the link in the verification email, then sign in again")
+	case strings.Contains(d, "organization"):
+		return fmt.Errorf("sign-in failed: no organization named %q. Use the organization name exactly as you typed it on the sign-up form", creds.Tenant)
+	case text != "" && !strings.Contains(d, "incorrect") && !strings.Contains(d, "invalid"):
+		return fmt.Errorf("sign-in failed: %s", text)
+	}
+	return fmt.Errorf("sign-in failed: the organization name, the username or email, or the password is wrong (organization %q).\n"+
+		"  The organization name must match the sign-up form exactly.\n"+
+		"  Signed up with Google, GitHub or GitLab? Run `dbgorilla login` without --mode password", creds.Tenant)
 }
 
 // --- prompt helpers --------------------------------------------------------
@@ -188,7 +246,7 @@ func promptLine(ctx context.Context, r *bufio.Reader, label string) (string, err
 	return strings.TrimSpace(line), nil
 }
 
-func readPassword(ctx context.Context, prompt string) (string, error) {
+func readPassword(ctx context.Context, r *bufio.Reader, prompt string) (string, error) {
 	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {
 		fmt.Fprintf(os.Stderr, "  %s", prompt)
@@ -225,13 +283,13 @@ func readPassword(ctx context.Context, prompt string) (string, error) {
 	}
 	// Non-tty: read one line. Caller accepts that scripted invocations
 	// may put the password on stdin without echo control.
-	r := bufio.NewReader(os.Stdin)
 	line, err, cancelled := readLineCtx(ctx, r)
 	if cancelled {
 		return "", err
 	}
-	if err != nil {
-		return "", err
+	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
+		// Nothing to read: no blank password is sent; the caller explains.
+		return "", nil
 	}
-	return strings.TrimRight(line, "\n"), nil
+	return strings.TrimRight(line, "\r\n"), nil
 }
