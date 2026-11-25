@@ -287,7 +287,7 @@ func readPassword(ctx context.Context, r *bufio.Reader, prompt string) (string, 
 	if cancelled {
 		return "", err
 	}
-	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
+	if err != nil && (!errors.Is(err, io.EOF) || line == "") {
 		// Nothing to read: no blank password is sent; the caller explains.
 		return "", nil
 	}
