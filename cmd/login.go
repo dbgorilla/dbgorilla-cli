@@ -20,8 +20,10 @@ import (
 
 func init() {
 	loginCmd.Flags().String("mode", "", "Force auth mode: sso (Keycloak device flow) or password (internal). Auto-detect if omitted.")
-	loginCmd.Flags().String("tenant", "", "Tenant slug (password mode only; prompted if omitted)")
-	loginCmd.Flags().String("account", "", "Account / username (password mode only; prompted if omitted)")
+	loginCmd.Flags().String("organization", "", "Organization name exactly as on the sign-up form (password mode; prompted if omitted)")
+	loginCmd.Flags().String("tenant", "", "Old name for --organization")
+	_ = loginCmd.Flags().MarkHidden("tenant")
+	loginCmd.Flags().String("account", "", "Username or email (password mode; prompted if omitted)")
 	loginCmd.Flags().BoolP("verbose", "v", false, "Also show the role and the internal user/organization ids on success")
 	rootCmd.AddCommand(loginCmd)
 }
@@ -31,11 +33,14 @@ var loginCmd = &cobra.Command{
 	Short: "Sign in to DBGorilla",
 	Long: `Signs in to a DBGorilla deployment and stores tokens in the OS keychain.
 
-Auto-detects the auth mode:
-  - SSO (Keycloak device flow) if the backend exposes the device-config endpoint
-  - Username/password otherwise
+How you sign in depends on how you signed up:
+  - Google, GitHub or GitLab: a browser sign-in link and code.
+  - Email and password: your organization name (as on the sign-up form),
+    your username or email, and your password.
 
-Override with --mode sso or --mode password.`,
+In a terminal, login asks which one you use. Skip the question with
+--mode sso (browser) or --mode password. Passing --organization or
+--account also picks password mode.`,
 	RunE: runLogin,
 }
 
@@ -74,7 +79,7 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 		cfg, err := auth.DiscoverDeviceConfig(ctx, apiURL, insecure)
 		switch {
 		case err == nil:
-			deviceCfg, mode = cfg, "sso"
+			deviceCfg, mode = cfg, chooseSignInMode(cmd)
 		case reachedTheAPI(err):
 			// The deployment answered and has no SSO. Password mode is right.
 			mode = "password"
@@ -90,7 +95,8 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 
 	switch mode {
 	case "sso":
-		fmt.Println(style.Info("Signing in via SSO (Keycloak device flow)..."))
+		fmt.Println(style.Info("Signing in through your browser (Google, GitHub or GitLab)..."))
+		fmt.Println("  Signed up with email and password? Press Ctrl-C and run: dbgorilla login --mode password")
 		var err error
 		if deviceCfg == nil {
 			// --mode sso was forced, so nothing has been discovered yet.
@@ -102,7 +108,10 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	case "password":
-		tenant, _ := cmd.Flags().GetString("tenant")
+		tenant, _ := cmd.Flags().GetString("organization")
+		if tenant == "" {
+			tenant, _ = cmd.Flags().GetString("tenant")
+		}
 		account, _ := cmd.Flags().GetString("account")
 		creds, err := auth.PromptCredentials(ctx, auth.PasswordCredentials{Tenant: tenant, Account: account})
 		if err != nil {
@@ -187,6 +196,25 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// chooseSignInMode picks between the browser link and password sign-in on a
+// deployment that offers both. Email-and-password accounts live in the
+// DBGorilla database, not in the identity provider behind the browser link,
+// so sending them to that page can only fail.
+func chooseSignInMode(cmd *cobra.Command) string {
+	for _, f := range []string{"organization", "tenant", "account"} {
+		if v, _ := cmd.Flags().GetString(f); v != "" {
+			return "password"
+		}
+	}
+	if !stdinIsTerminal() {
+		return "sso"
+	}
+	if promptYesNo("Did you sign up with an email and password? (No: Google, GitHub or GitLab)", false) {
+		return "password"
+	}
+	return "sso"
 }
 
 // reachedTheAPI reports whether a failed device-config lookup still tells us

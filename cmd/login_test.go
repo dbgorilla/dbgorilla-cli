@@ -13,6 +13,7 @@ func loginTestCmd() *cobra.Command {
 	c.Flags().String("api-url", "", "")
 	c.Flags().Bool("insecure", false, "")
 	c.Flags().String("mode", "", "")
+	c.Flags().String("organization", "", "")
 	c.Flags().String("tenant", "", "")
 	c.Flags().String("account", "", "")
 	c.Flags().Bool("verbose", false, "")
@@ -140,7 +141,7 @@ func TestRunLogin_PasswordAuthFailure(t *testing.T) {
 	_ = c.Flags().Set("account", "dev")
 	var err error
 	_ = capture(t, func() { err = runLogin(c, nil) })
-	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
+	if err == nil || !strings.Contains(err.Error(), "sign-in failed") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -198,4 +199,56 @@ func TestPersistLoginState(t *testing.T) {
 			t.Errorf("should not re-save unchanged config:\n%s", out)
 		}
 	})
+}
+
+// A deployment with a browser sign-in link still signs an email-and-password
+// account in with its password: naming the organization picks password mode
+// without asking, and never sends the user to a page that cannot know them.
+func TestRunLogin_OrganizationFlagPicksPasswordOverSSO(t *testing.T) {
+	isolate(t)
+	srv := routingServer(t, map[string]resp{
+		deviceConfigPath: {200, `{"device_authorization_endpoint":"https://idp.example/device","token_endpoint":"https://idp.example/token","client_id":"cli","verification_uri":"https://idp.example/device"}`},
+		tokenPath:        {200, `{"access_token":"tok","refresh_token":"r","expires_in":3600}`},
+		authPath:         {200, `{"email":"dev@acme.com","organization":"Acme","id":"u-1","tenant_id":"t-9","role":"admin"}`},
+	})
+	defer srv.Close()
+	setStdin(t, "s3cret\n")
+	c := loginTestCmd()
+	mustSet(t, c, "api-url", srv.URL)
+	mustSet(t, c, "organization", "Acme")
+	mustSet(t, c, "account", "dev@acme.com")
+	var err error
+	out := capture(t, func() { err = runLogin(c, nil) })
+	if err != nil {
+		t.Fatalf("err=%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Signed in as dev@acme.com") {
+		t.Errorf("out=%q", out)
+	}
+}
+
+func TestChooseSignInMode(t *testing.T) {
+	orig := stdinIsTerminal
+	t.Cleanup(func() { stdinIsTerminal = orig })
+
+	stdinIsTerminal = func() bool { return false }
+	if got := chooseSignInMode(loginTestCmd()); got != "sso" {
+		t.Errorf("no terminal, no flags: got %q, want sso", got)
+	}
+	c := loginTestCmd()
+	mustSet(t, c, "tenant", "Acme")
+	if got := chooseSignInMode(c); got != "password" {
+		t.Errorf("--tenant: got %q, want password", got)
+	}
+}
+
+// In a terminal the user is asked how they signed up; the answer decides
+// which sign-in runs.
+func TestChooseSignInModeAsks(t *testing.T) {
+	for answer, want := range map[string]string{"y\n": "password", "n\n": "sso"} {
+		asTerminal(t, answer)
+		if got := chooseSignInMode(loginTestCmd()); got != want {
+			t.Errorf("answer %q: got %q, want %q", answer, got, want)
+		}
+	}
 }

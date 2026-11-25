@@ -105,7 +105,7 @@ func TestRunLogin_AutoDetectDistinguishesNoSSOFromNoAPI(t *testing.T) {
 			t.Fatal("expected the password prompt to fail on empty stdin")
 		}
 		// It got as far as prompting, which is the point: SSO is genuinely absent.
-		if !strings.Contains(out, "Tenant") && !strings.Contains(out, "Account") {
+		if !strings.Contains(out, "Organization name") && !strings.Contains(out, "Username or email") {
 			t.Errorf("a 404 should reach the password prompt, got: %s", out)
 		}
 	})
