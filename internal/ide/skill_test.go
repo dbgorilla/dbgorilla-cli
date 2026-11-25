@@ -26,9 +26,11 @@ func TestSkillBodyIsUsable(t *testing.T) {
 		}
 	}
 	// The value of this skill is that it is short enough to always be worth
-	// loading. If it grows into documentation, split it or cut it.
-	if n := strings.Count(skillBody, "\n"); n > 40 {
-		t.Errorf("skill is %d lines; keep it under 40", n)
+	// loading. If it grows into documentation, split it or cut it. 50 lines
+	// leaves room for the hosted-database steps an agent gets wrong without
+	// them (monitoring, login expiry, confirm_name) and no more.
+	if n := strings.Count(skillBody, "\n"); n > 50 {
+		t.Errorf("skill is %d lines; keep it under 50", n)
 	}
 }
 
