@@ -30,10 +30,19 @@ but say it, rather than quietly falling back to guesswork.
 
 ## When the project needs a PostgreSQL database
 
-DBGorilla can host one, monitored from the start. Ask the user first, then call
-`dbgorilla_dbaas_create_database` and poll `dbgorilla_dbaas_get_database` until
-it is ready. `dbgorilla_dbaas_get_database_credentials` issues a login: put its
-`connection_uri` where the project reads config (e.g. `DATABASE_URL` in an
-untracked `.env`). The password is shown once; issue a new login when needed.
-Its `component_id` then works with every tool above. Delete one only when the
-user names it.
+DBGorilla can host one, monitored from the start. Ask the user first, then:
+
+- Create it with `dbgorilla_dbaas_create_database` and poll
+  `dbgorilla_dbaas_get_database` until it is ready.
+- Setup is not done until `monitoring` shows `connected`. It starts as
+  `pending`: keep checking for up to 5 minutes before telling the user setup is
+  finished, and if it never connects, say what status you saw.
+- `dbgorilla_dbaas_get_database_credentials` (Create Hosted Database Login)
+  issues a login (the password is shown once). Put its `connection_uri` where
+  the project reads config (e.g. `DATABASE_URL` in an untracked `.env`). It
+  expires after one hour, at its `expires_at`: tell the user, and that calling
+  it again gives a new one to replace in `.env`. Connections already open
+  survive the expiry.
+- Delete only a database the user names, passing that name as `confirm_name`.
+
+Its `component_id` then works with every tool above.
